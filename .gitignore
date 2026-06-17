@@ -9,6 +9,8 @@ functions/node_modules/
 # Environment / Secrets
 .env
 .env.*
+# LOW-1: template (placeholders only) — tracked for contributors
+!.env.example
 .dev.vars
 *.pem
 *.key

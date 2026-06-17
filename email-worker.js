@@ -2874,12 +2874,19 @@ async function handleClientError(request, env, CORS) {
     || msg.includes('quota') || msg.includes('permission-denied') || msg.includes('unavailable')
   );
   if (isCritical) {
+    // LOW-3: every field is HTML-escaped before going into the admin's inbox.
+    // The previous version trusted entry.page / entry.build / entry.type /
+    // entry.message / entry.source — all caller-supplied. A malformed
+    // /client-error POST could inject arbitrary HTML into the alert email.
+    const _esc = (s) => String(s ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     await sendSecurityAlert(env,
-      `🖥️ Critical client-side error on <b>${entry.page}</b> (build: ${entry.build}):<br><br>`
-      + `<b>Type:</b> ${entry.type}<br>`
-      + `<b>Message:</b> ${entry.message}<br>`
-      + `<b>Source:</b> ${entry.source} L${entry.line || '?'}<br>`
-      + `<pre style="font-size:12px;max-height:200px;overflow:auto">${(entry.stack || '').replace(/</g,'&lt;')}</pre>`
+      `🖥️ Critical client-side error on <b>${_esc(entry.page)}</b> (build: ${_esc(entry.build)}):<br><br>`
+      + `<b>Type:</b> ${_esc(entry.type)}<br>`
+      + `<b>Message:</b> ${_esc(entry.message)}<br>`
+      + `<b>Source:</b> ${_esc(entry.source)}<br>`
+      + `<pre style="font-size:12px;max-height:200px;overflow:auto">${_esc(entry.stack)}</pre>`
     );
   }
 
