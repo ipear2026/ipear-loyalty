@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#8ae900">
+<meta name="color-scheme" content="light only">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="iPear Tablet">
+<meta name="mobile-web-app-capable" content="yes">
+<title>iPear Loyalty — Κατάστημα</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx" crossorigin="anonymous"></script>
+<!-- ═══ TELEMETRY: Client-side error reporting to Worker /client-error ═══ -->
+<script>
+(function(){
+  var _W = 'https://email-worker.ipear2026.workers.dev';
+  var _F = false;
+  function _send(payload) {
+    if (_F) return;
+    _F = true;
+    try {
+      var body = JSON.stringify(Object.assign({
+        page: location.pathname,
+        ua: navigator.userAgent,
+        ts: new Date().toISOString(),
+        build: (window.TABLET_BUILD_TAG || window.CUSTOMER_BUILD_TAG || 'unknown')
+      }, payload));
+      if (navigator.sendBeacon) { navigator.sendBeacon(_W + '/client-error', body); }
+      else { fetch(_W + '/client-error', { method:'POST', body:body, headers:{'Content-Type':'application/json'}, keepalive:true }).catch(function(){}); }
+    } catch(_){}
+  }
+  window.onerror = function(msg, src, line, col, err) {
+    _send({ type:'onerror', message:String(msg).slice(0,500), source:(src||'').slice(-120), line:line, col:col, stack:(err&&err.stack||'').slice(0,800) });
+  };
+  window.addEventListener('unhandledrejection', function(ev) {
+    var r = ev.reason;
+    _send({ type:'rejection', message:String(r&&r.message||r||'').slice(0,500), stack:(r&&r.stack||'').slice(0,800) });
+  });
+})();
+</script>
+
+<style>
+@font-face {
+  font-family: 'Zona Pro';
+  src: url('/fonts/zonapro-regular-webfont.woff2') format('woff2'),
+       url('/fonts/zonapro-regular-webfont.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Zona Pro';
+  src: url('/fonts/zonapro-bold-webfont.woff2') format('woff2'),
+       url('/fonts/zonapro-bold-webfont.woff') format('woff');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+:root {
+  color-scheme: light only;
+  --green:      #8ae900;
+  --green-dark: #6bb800;
+  --green-pale: #edffc5;
+  --black:      #111111;
+  --white:      #ffffff;
+  --gray:       #666;
+  --light:      #F6F6F6;
+  --border:     #e8e8e8;
+  --font:       'Zona Pro', sans-serif;
+}
+.build-version-stamp {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 9999;
+  padding: 6px 10px;
+  font-size: .72rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .04em;
+  color: #111;
+  background: rgba(255,255,255,.92);
+  border: 1px solid rgba(0,0,0,.1);
+  border-radius: 999px;
+  pointer-events: none;
+  opacity: .72;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+button,.idle-opt-wrap.clickable,.idle-opt-sbtn,.qr-cancel-btn,.qr-manual-btn,.result-back,.redeem-btn,.rp-opt,.reward-box,.tl-btn,.cc-card-badge{-webkit-user-select:none;user-select:none}
+html, body { height: 100%; }
+body { font-family: var(--font); background: var(--white); color: var(--black); overflow: hidden; }
+
+/* ── IDLE SCREEN ── */
+#idle {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--white); z-index: 10;
+  transition: opacity .4s;
+}
+#idle.hidden { opacity: 0; pointer-events: none; }
+
+.idle-brand {
+  margin-bottom: 10px;
+  text-align: center;
+}
+.idle-brand img {
+  height: clamp(60px, 10vw, 90px);
+  max-width: 280px;
+  display: block;
+  margin: 0 auto;
+}
+.idle-loyalty {
+  font-size: clamp(0.9rem, 2vw, 1.2rem);
+  font-weight: 700; color: var(--gray);
+  text-transform: uppercase; letter-spacing: 4px;
+  margin-bottom: 60px;
+}
+
+
+/* ── QR SCANNER OVERLAY ── */
+#qr-overlay {
+  display: none; position: fixed; inset: 0;
+  background: #000; z-index: 200;
+  flex-direction: column; align-items: center; justify-content: center;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+#qr-overlay.show { display: flex; }
+#qr-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .35; }
+.qr-frame-wrap {
+  position: relative; z-index: 10;
+  display: flex; flex-direction: column; align-items: center; gap: 24px;
+}
+.qr-frame {
+  width: min(280px, 70vw); height: min(280px, 70vw);
+  position: relative;
+}
+.qr-frame::before,.qr-frame::after,
+.qr-corner-bl,.qr-corner-br {
+  content: ''; position: absolute;
+  width: 36px; height: 36px; border-color: var(--green); border-style: solid;
+}
+.qr-frame::before  { top:0;    left:0;  border-width: 4px 0 0 4px; border-radius: 4px 0 0 4px; }
+.qr-frame::after   { top:0;    right:0; border-width: 4px 4px 0 0; border-radius: 0 4px 0 0; }
+.qr-corner-bl      { bottom:0; left:0;  border-width: 0 0 4px 4px; border-radius: 0 0 0 4px; }
+.qr-corner-br      { bottom:0; right:0; border-width: 0 4px 4px 0; border-radius: 0 0 4px 0; }
+.qr-scan-line {
+  position: absolute; left: 8px; right: 8px; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--green), transparent);
+  animation: qr-scan 2s ease-in-out infinite;
+}
+@keyframes qr-scan { 0%,100%{top:8px} 50%{top:calc(100% - 10px)} }
+.qr-scan-hint { color: #fff; font-size: clamp(.85rem,2vw,1rem); font-weight: 600; text-align: center; }
+.qr-scan-sub  { color: #666; font-size: clamp(.72rem,1.5vw,.85rem); margin-top: 6px; text-align: center; }
+.qr-cancel-btn {
+  background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.2);
+  color: #fff; border-radius: 12px; padding: 12px 28px;
+  font-family: var(--font); font-weight: 700; font-size: .9rem;
+  cursor: pointer; transition: background .15s, transform .12s;
+  margin-top: 8px;
+  min-height: 44px;
+}
+.qr-cancel-btn:hover { background: rgba(255,255,255,.2); }
+.qr-cancel-btn:active { transform: scale(.94); }
+.qr-manual-btn {
+  background: #ffffff; border: 1px solid rgba(0,0,0,.08);
+  color: #0a0a0a; border-radius: 12px; padding: 12px 28px;
+  font-family: var(--font); font-weight: 800; font-size: .95rem;
+  cursor: pointer; transition: background .15s, transform .12s, box-shadow .15s;
+  min-height: 44px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.10);
+}
+.qr-manual-btn:hover { background: #f4f4f4; box-shadow: 0 8px 24px rgba(0,0,0,.16); transform: translateY(-1px); }
+.qr-manual-btn:active { transform: scale(.94); box-shadow: 0 2px 6px rgba(0,0,0,.08); }
+.qr-action-row {
+  display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-top: 12px;
+}
+.qr-found-flash {
+  position: absolute; inset: 0; background: rgba(138,233,0,.25);
+  border: 3px solid var(--green); border-radius: 6px;
+  animation: flash .4s ease;
+}
+@keyframes flash { 0%{opacity:0} 50%{opacity:1} 100%{opacity:0} }
+
+/* Animated dots */
+.dots { display: flex; gap: 8px; margin-top: 50px; }
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #ddd; animation: dotpulse 2s ease-in-out infinite;
+}
+.dot:nth-child(2) { animation-delay: .3s; }
+.dot:nth-child(3) { animation-delay: .6s; }
+@keyframes dotpulse { 0%,100%{background:#ddd} 50%{background:var(--green)} }
+
+/* ── RESULT SCREEN ── */
+#result-screen {
+  position: fixed; inset: 0;
+  background: var(--white);
+  display: flex; flex-direction: column;
+  opacity: 0; pointer-events: none; transition: opacity .4s;
+}
+#result-screen.show { opacity: 1; pointer-events: all; }
+
+/* Top bar */
+.result-topbar {
+  background: var(--white); border-bottom: 1px solid var(--border);
+  padding: 16px 32px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.result-topbar .brand { font-size: 1.3rem; font-weight: 900; color: var(--green); letter-spacing: -1px; }
+.result-topbar .brand span { color: var(--black); }
+.result-back {
+  background: #f5f5f5; color: var(--black);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 9px 18px; font-family: var(--font); font-weight: 700;
+  font-size: 0.9rem; cursor: pointer; transition: background .15s, transform .12s;
+}
+.result-back:hover { background: #e8e8e8; }
+.result-back:active { transform: scale(.95); }
+
+/* Main content */
+.result-content {
+  flex: 1; overflow-y: auto;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 30px 24px;
+}
+
+/* Customer card */
+.cust-card {
+  background: var(--white); border: 1px solid var(--border); border-radius: 24px;
+  padding: clamp(24px, 4vw, 40px);
+  width: min(700px, 100%);
+  box-shadow: 0 0 60px rgba(138,233,0,.08);
+}
+
+.cc-top {
+  display: flex; align-items: center; gap: 20px; margin-bottom: 28px;
+}
+.cc-avatar {
+  width: clamp(60px, 10vw, 80px);
+  height: clamp(60px, 10vw, 80px);
+  border-radius: 50%; background: var(--green); color: var(--black);
+  display: flex; align-items: center; justify-content: center;
+  font-size: clamp(1.4rem, 3vw, 2rem); font-weight: 900; flex-shrink: 0;
+}
+.cc-info { flex: 1; }
+.cc-name { font-size: clamp(1.6rem, 4vw, 2.4rem); font-weight: 900; line-height: 1.1; }
+.cc-meta { color: var(--gray); font-size: clamp(0.85rem, 1.8vw, 1rem); margin-top: 5px; font-weight: 500; }
+.cc-card-badge {
+  background: var(--green); color: var(--black);
+  padding: 7px 18px; border-radius: 20px;
+  font-weight: 800; font-size: clamp(0.8rem, 1.8vw, 1rem);
+  white-space: nowrap;
+}
+
+/* Points big display */
+.cc-pts-main {
+  background: #0a0a0a; border-radius: 18px; padding: clamp(20px, 4vw, 32px);
+  text-align: center; margin-bottom: 20px;
+  border: 1px solid #222;
+}
+.cc-pts-num {
+  font-size: clamp(4rem, 12vw, 7rem);
+  font-weight: 900; color: var(--green);
+  line-height: 1; letter-spacing: -4px;
+}
+.cc-pts-lbl {
+  font-size: clamp(0.85rem, 2vw, 1.1rem);
+  color: var(--gray); font-weight: 700;
+  text-transform: uppercase; letter-spacing: 2px; margin-top: 6px;
+}
+
+/* Tier + progress */
+.cc-tier-row {
+  display: flex; align-items: center; gap: 16px;
+  background: var(--light); border-radius: 14px; padding: 18px 22px;
+  margin-bottom: 18px; border: 1px solid var(--border);
+}
+.cc-tier-icon { font-size: clamp(1.8rem, 4vw, 2.4rem); flex-shrink: 0; }
+.cc-tier-info { flex: 1; }
+.cc-tier-name { font-size: clamp(1.1rem, 2.5vw, 1.4rem); font-weight: 800; }
+.cc-tier-sub  { font-size: clamp(0.78rem, 1.6vw, 0.9rem); color: var(--gray); margin-top: 3px; }
+.prog-bar { height: 10px; background: #e5e5e5; border-radius: 5px; overflow: hidden; margin-top: 10px; }
+.prog-fill { height: 100%; background: var(--green); border-radius: 5px; transition: width .7s ease; }
+
+/* Rewards row */
+.cc-rewards {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+}
+@media(max-width:560px){ .cc-rewards { grid-template-columns: repeat(2,1fr); } }
+.reward-box {
+  background: var(--light); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px; text-align: center; transition: border-color .2s;
+}
+.reward-box.available { border-color: var(--green); background: #f0ffe0; }
+.reward-box .r-pts { font-size: clamp(0.9rem, 2vw, 1.1rem); font-weight: 900; color: var(--gray); }
+.reward-box.available .r-pts { color: var(--green); }
+.reward-box .r-lbl { font-size: clamp(0.7rem, 1.5vw, 0.82rem); color: var(--gray); margin-top: 3px; font-weight: 500; }
+.reward-box.available .r-lbl { color: #aad966; }
+
+/* Not found */
+#not-found {
+  display: none; text-align: center; padding: 50px 20px;
+}
+.nf-icon  { font-size: clamp(3rem, 8vw, 5rem); display: block; margin-bottom: 16px; }
+.nf-title { font-size: clamp(1.2rem, 3vw, 1.8rem); font-weight: 800; margin-bottom: 8px; }
+.nf-sub   { color: var(--gray); font-size: clamp(0.85rem, 2vw, 1rem); }
+
+/* Spinner */
+.spin { display:inline-block; width:22px; height:22px; border:3px solid rgba(0,0,0,.2); border-top-color:var(--black); border-radius:50%; animation:rot .7s linear infinite; }
+@keyframes rot { to { transform:rotate(360deg); } }
+
+/* Connection indicator — top-right header pill with safe-area inset */
+.conn-wrap {
+  position: fixed;
+  top: calc(14px + env(safe-area-inset-top, 0px));
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  display: flex; align-items: center; gap: 7px;
+  background: rgba(255,255,255,.94);
+  -webkit-backdrop-filter: saturate(180%) blur(6px);
+  backdrop-filter: saturate(180%) blur(6px);
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 999px;
+  padding: 6px 12px 6px 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  z-index: 999;
+}
+.conn-dot { width: 7px; height: 7px; border-radius: 50%; background: #ccc; transition: background .4s; }
+.conn-dot.ok  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.conn-dot.err { background: #ff3b30; animation: pulse 1.5s infinite; }
+.conn-txt { color: var(--gray); font-size: 0.72rem; font-weight: 600; letter-spacing: .2px; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* ═══════════════════════════════════════════
+   NEW IDLE — VERTICAL PARALLELOGRAM CARDS
+═══════════════════════════════════════════ */
+.idle-options {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: min(700px, 92vw);
+}
+
+.idle-opt-wrap {
+  transform: skewX(-4deg);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 6px 28px rgba(0,0,0,.13);
+  transition: box-shadow .18s, transform .18s;
+}
+.idle-opt-wrap.clickable { cursor: pointer; }
+.idle-opt-wrap.clickable:hover {
+  box-shadow: 0 12px 44px rgba(0,0,0,.22);
+  transform: skewX(-4deg) translateX(8px);
+}
+
+.idle-opt {
+  transform: skewX(4deg);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 36px 22px 28px;
+}
+
+/* Variants */
+.idle-opt-dark  { background: #0a0a0a; }
+.idle-opt-green { background: #8ae900; }
+.idle-opt-light { background: #f5f5f5; }
+
+/* Icon circle */
+.idle-opt-icon {
+  width: 60px; height: 60px;
+  border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.idle-opt-dark  .idle-opt-icon { background: #8ae900; }
+.idle-opt-green .idle-opt-icon { background: #0a0a0a; }
+.idle-opt-light .idle-opt-icon { background: #0a0a0a; }
+
+/* Body */
+.idle-opt-body { flex: 1; min-width: 0; }
+
+.idle-opt-title {
+  font-size: clamp(1.05rem, 2.4vw, 1.3rem);
+  font-weight: 900;
+  line-height: 1.2;
+  margin-bottom: 2px;
+}
+.idle-opt-sub {
+  font-size: clamp(.72rem, 1.4vw, .82rem);
+  font-weight: 500;
+}
+
+.idle-opt-dark  .idle-opt-title { color: #fff; }
+.idle-opt-dark  .idle-opt-sub   { color: #555; }
+.idle-opt-green .idle-opt-title { color: #0a0a0a; }
+.idle-opt-green .idle-opt-sub   { color: rgba(0,0,0,.5); }
+.idle-opt-light .idle-opt-title { color: #0a0a0a; }
+.idle-opt-light .idle-opt-sub   { color: #888; }
+
+/* Arrow */
+.idle-opt-arrow {
+  font-size: clamp(1.6rem, 3vw, 2rem);
+  font-weight: 900;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+.idle-opt-dark  .idle-opt-arrow { color: #8ae900; }
+.idle-opt-green .idle-opt-arrow { color: #0a0a0a; }
+.idle-opt-light .idle-opt-arrow { color: #0a0a0a; }
+
+/* Input row */
+.idle-opt-row {
+  display: flex; gap: 8px; align-items: center;
+  margin-top: 10px;
+}
+.idle-opt-pfx {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-weight: 800;
+  font-size: clamp(.85rem, 1.8vw, 1rem);
+  white-space: nowrap; flex-shrink: 0;
+}
+.idle-opt-green .idle-opt-pfx { background: rgba(0,0,0,.12); color: #0a0a0a; }
+
+.idle-opt-inp {
+  flex: 1; min-width: 0;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-family: var(--font);
+  font-size: clamp(.88rem, 1.8vw, 1.05rem);
+  font-weight: 700;
+  outline: none;
+  transition: border-color .2s;
+}
+.idle-opt-green .idle-opt-inp {
+  background: #fff; border: 2.5px solid rgba(0,0,0,.2); color: #0a0a0a;
+}
+.idle-opt-green .idle-opt-inp:focus { border-color: #0a0a0a; }
+.idle-opt-light .idle-opt-inp {
+  background: #fff; border: 2.5px solid #ddd; color: #0a0a0a;
+}
+.idle-opt-light .idle-opt-inp:focus { border-color: var(--green); }
+
+.idle-opt-sbtn {
+  padding: 10px 20px;
+  min-height: 44px;
+  border: none; border-radius: 8px;
+  font-family: var(--font); font-weight: 800;
+  font-size: clamp(.82rem, 1.6vw, .95rem);
+  cursor: pointer; transition: background .15s;
+  flex-shrink: 0; white-space: nowrap;
+}
+.idle-opt-green .idle-opt-sbtn { background: #0a0a0a; color: #8ae900; }
+.idle-opt-green .idle-opt-sbtn:hover { background: #222; }
+.idle-opt-light .idle-opt-sbtn { background: #8ae900; color: #0a0a0a; }
+.idle-opt-light .idle-opt-sbtn:hover { background: #6bb800; }
+/* Logo image */
+.logo-img{display:block;object-fit:contain;object-position:center}
+.logo-lg{height:56px;max-width:210px}
+.logo-sm{height:38px;max-width:150px}
+.logo-xs{height:26px;max-width:100px}
+.logo-white{filter:brightness(0) invert(1)}
+
+/* ═══════════════════════════════════════════════════
+   TABLET LOGIN — polished card
+═══════════════════════════════════════════════════ */
+#tablet-login {
+  background: linear-gradient(155deg, #f4fff0 0%, #ffffff 55%);
+  padding-top: calc(40px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+}
+.tl-logo-wrap { text-align: center; margin-bottom: 38px; }
+.tl-logo { height: clamp(52px, 8vw, 72px); max-width: 260px; display: block; margin: 0 auto 12px; }
+.tl-tagline {
+  font-size: .78rem; font-weight: 700; color: var(--gray);
+  text-transform: uppercase; letter-spacing: 3.5px;
+}
+.tl-card {
+  width: min(420px, 92vw);
+  background: #fff;
+  border-radius: 22px;
+  padding: 32px 30px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.10), 0 4px 16px rgba(0,0,0,.06);
+  border: 1px solid rgba(0,0,0,.05);
+}
+.tl-demo {
+  background: var(--green-pale); border: 1px solid var(--green);
+  border-radius: 11px; padding: 10px 14px;
+  font-size: .78rem; text-align: center; line-height: 1.6;
+  margin-bottom: 16px;
+}
+.tl-field {
+  width: 100%; padding: 15px 18px; margin-bottom: 12px;
+  border: 2px solid #e8e8e8; border-radius: 13px;
+  font-family: var(--font); font-size: .98rem; font-weight: 600;
+  outline: none; transition: border-color .2s, box-shadow .2s;
+  color: var(--black); background: #fafafa; display: block;
+}
+.tl-field:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(138,233,0,.14);
+  background: #fff;
+}
+.tl-err {
+  color: #ff3b30; font-size: .82rem; font-weight: 600;
+  min-height: 20px; text-align: center; margin: -4px 0 8px;
+}
+.tl-btn {
+  width: 100%; padding: 17px;
+  background: linear-gradient(135deg, var(--green) 0%, var(--green-dark) 100%);
+  color: var(--black); border: none; border-radius: 13px;
+  font-family: var(--font); font-weight: 900; font-size: 1rem;
+  cursor: pointer; transition: filter .15s, transform .12s, box-shadow .15s;
+  box-shadow: 0 4px 18px rgba(107,184,0,.35);
+}
+.tl-btn:hover  { filter: brightness(1.06); transform: translateY(-1px); }
+.tl-btn:active { transform: translateY(0); }
+.tl-btn:disabled { opacity: .6; cursor: not-allowed; transform: none; filter: none; }
+
+/* ═══════════════════════════════════════════════════
+   IDLE — logo breathing animation
+═══════════════════════════════════════════════════ */
+@keyframes idleLogoBreath {
+  0%,100% { opacity: 1;   transform: scale(1); }
+  50%     { opacity: .88; transform: scale(.97); }
+}
+.idle-logo-wrap { animation: idleLogoBreath 3.8s ease-in-out infinite; }
+
+/* ═══════════════════════════════════════════════════
+   RESULT SCREEN
+═══════════════════════════════════════════════════ */
+.result-topbar { box-shadow: 0 2px 20px rgba(0,0,0,.07); }
+.cust-card { border-color: rgba(138,233,0,.2); }
+
+/* Avatar ring */
+.cc-avatar {
+  box-shadow: 0 0 0 3px rgba(138,233,0,.38), 0 0 0 6px rgba(138,233,0,.1);
+}
+
+/* Points shimmer */
+.cc-pts-main { position: relative; overflow: hidden; }
+@keyframes tabletPtsShimmer {
+  0%   { transform: translateX(-160%) skewX(-15deg); }
+  100% { transform: translateX(260%)  skewX(-15deg); }
+}
+.cc-pts-main::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 30%, rgba(138,233,0,.1) 50%, transparent 70%);
+  animation: tabletPtsShimmer 4s ease-in-out 1.5s infinite;
+  pointer-events: none;
+}
+.cc-pts-num { text-shadow: 0 0 28px rgba(138,233,0,.45); }
+
+/* Tier & progress */
+.cc-tier-row  { border-color: rgba(138,233,0,.22); }
+.prog-fill {
+  background: linear-gradient(90deg, var(--green-dark) 0%, var(--green) 100%);
+  box-shadow: 0 0 8px rgba(138,233,0,.5);
+}
+
+/* Reward boxes */
+.reward-box.available { box-shadow: 0 3px 14px rgba(138,233,0,.2); }
+.reward-box.available .r-pts { text-shadow: 0 0 10px rgba(138,233,0,.25); }
+
+/* Redeem CTA button */
+.redeem-btn {
+  width: 100%; padding: 18px;
+  background: #0a0a0a; color: #8ae900;
+  border: none; border-radius: 14px;
+  font-family: var(--font); font-weight: 800;
+  font-size: clamp(1rem,2.5vw,1.15rem);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  transition: background .15s, transform .12s, box-shadow .15s;
+  box-shadow: 0 4px 20px rgba(0,0,0,.22);
+}
+.redeem-btn:hover  { background: #1a1a1a; transform: translateY(-1px); box-shadow: 0 8px 28px rgba(0,0,0,.28); }
+.redeem-btn:active { transform: translateY(0); }
+
+/* Redeem panel option rows */
+.rp-opt {
+  padding: 14px 18px; border-radius: 13px; border: 2px solid;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.rp-opt.ok {
+  border-color: var(--green); background: #f0ffe0; cursor: pointer;
+  transition: transform .12s, box-shadow .12s;
+}
+.rp-opt.ok:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(138,233,0,.22); }
+.rp-opt.no { border-color: #e0e0e0; background: #fafafa; cursor: not-allowed; opacity: .45; }
+
+/* Toast */
+@keyframes slideDown { from{opacity:0;transform:translateX(-50%) translateY(-30px)} to{opacity:1;transform:translateX(-50%) translateY(0)} }
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.ipear-toast {
+  position: fixed; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%);
+  background: #0a0a0a; color: #8ae900;
+  padding: 14px 28px; border-radius: 14px;
+  font-weight: 700; font-size: .95rem;
+  z-index: 9999; box-shadow: 0 6px 24px rgba(0,0,0,.35);
+  white-space: nowrap; animation: toastIn .3s ease;
+}
+
+/* QR redeem confirm modal */
+#qr-redeem-confirm > div { box-shadow: 0 32px 80px rgba(0,0,0,.35); }
+
+/* Idle option cards — lift on hover */
+.idle-opt-wrap { transition: box-shadow .18s, transform .18s; }
+
+/* ── Overscroll protection — prevent pull-to-refresh over dialogs ── */
+html, body { overscroll-behavior: none; }
+
+/* ── Pause animations when page is not visible (iPad battery) ── */
+.page-hidden .idle-logo-wrap,
+.page-hidden .cc-pts-main::after,
+.page-hidden .dot,
+.page-hidden .qr-scan-line {
+  animation-play-state: paused !important;
+}
+/* ── Contain layout recalculations ── */
+#idle, #result-screen, #qr-overlay, #tablet-login { contain: layout style; }
+.cust-card { contain: content; }
+
+/* ── Reduce motion for accessibility (WCAG 2.1 SC 2.3.3) ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   iPear Loyalty — Visual Unification Layer (v95-polish)
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --r-sm:8px;--r-md:10px;--r-lg:12px;--r-xl:16px;--r-pill:999px;
+  --sh-sm:0 1px 3px rgba(0,0,0,.06);
+  --sh-md:0 2px 8px rgba(0,0,0,.08);
+  --sh-lg:0 8px 24px rgba(0,0,0,.10);
+  --sh-focus:0 0 0 3px rgba(138,233,0,.18);
+  --t-fast:150ms cubic-bezier(.4,0,.2,1);
+  --t-slow:250ms cubic-bezier(.4,0,.2,1);
+}
+input[type="text"],input[type="email"],input[type="password"],input[type="tel"],input[type="number"],input[type="search"],textarea,select{
+  border-radius:var(--r-md)!important;
+  transition:border-color var(--t-fast),box-shadow var(--t-fast)!important;
+  font-weight:400!important;
+}
+input:focus,textarea:focus,select:focus{
+  outline:none!important;
+  border-color:var(--green,#8ae900)!important;
+  box-shadow:var(--sh-focus)!important;
+}
+input::placeholder,textarea::placeholder{
+  color:rgba(0,0,0,.42)!important;font-weight:400!important;opacity:1!important;
+}
+.btn,#tl-btn{
+  border-radius:var(--r-md)!important;
+  box-shadow:var(--sh-sm)!important;
+  transition:background-color var(--t-fast),box-shadow var(--t-fast),transform 120ms cubic-bezier(.4,0,.2,1)!important;
+}
+.btn:hover,#tl-btn:hover{box-shadow:var(--sh-md)!important;transform:translateY(-1px)}
+.btn:active,#tl-btn:active{transform:scale(.98) translateY(0);box-shadow:var(--sh-sm)!important}
+button:disabled{opacity:.55!important;cursor:not-allowed!important;transform:none!important;box-shadow:none!important}
+.tl-card,.qr-redeem-confirm-panel,.scan-result-box{
+  border-radius:var(--r-lg)!important;
+  box-shadow:var(--sh-sm)!important;
+}
+button,a.btn{min-height:44px}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+
+/* ════════════════════════════════════════════════════════════════════════
+   iPear Loyalty — v95-final: empty states + dark mode tokens
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg-main:#f5f5f5;
+  --bg-card:#ffffff;
+  --bg-elevated:#ffffff;
+  --bg-subtle:#fafafa;
+  --text-primary:#111111;
+  --text-secondary:rgba(0,0,0,.62);
+  --text-muted:rgba(0,0,0,.42);
+  --text-disabled:rgba(0,0,0,.30);
+  --border-strong:rgba(0,0,0,.16);
+  --border-medium:rgba(0,0,0,.10);
+  --border-soft:rgba(0,0,0,.06);
+  --accent:#8ae900;
+  --accent-deep:#6bb800;
+}
+html[data-theme="dark"]{
+  --bg-main:#0a0a0a;
+  --bg-card:#161616;
+  --bg-elevated:#1f1f1f;
+  --bg-subtle:#1a1a1a;
+  --text-primary:#ffffff;
+  --text-secondary:rgba(255,255,255,.72);
+  --text-muted:rgba(255,255,255,.50);
+  --text-disabled:rgba(255,255,255,.34);
+  --border-strong:rgba(255,255,255,.16);
+  --border-medium:rgba(255,255,255,.10);
+  --border-soft:rgba(255,255,255,.06);
+  --accent:#a4f520;
+  --accent-deep:#8ae900;
+}
+.empty,.empty-state{
+  text-align:center!important;
+  padding:44px 24px!important;
+  color:var(--text-muted)!important;
+  font-weight:500!important;
+  font-size:.9rem!important;
+  line-height:1.55!important;
+}
+.empty .e,.empty-state .ico,.empty-state .e{
+  display:block!important;
+  margin:0 auto 12px!important;
+  font-size:2.4rem!important;
+  opacity:.55!important;
+  line-height:1!important;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ TABLET LOGIN ═══ -->
+<div id="tablet-login" style="position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:500;padding:calc(40px + env(safe-area-inset-top, 0px)) 24px calc(40px + env(safe-area-inset-bottom, 0px))">
+  <div class="tl-logo-wrap">
+    <img src="logo.png" alt="iPear Loyalty" class="logo-img tl-logo">
+    <div class="tl-tagline">Tablet — Είσοδος</div>
+  </div>
+  <div class="tl-card">
+    <div id="tl-demo" class="tl-demo" style="display:none">
+      🧪 <strong>Demo:</strong> tablet@ipear.gr / tablet1234
+    </div>
+    <input type="email" id="tl-email" class="tl-field" placeholder="Email λογαριασμού tablet"
+      autocomplete="email" inputmode="email" aria-label="Email λογαριασμού tablet"
+      onkeydown="if(event.key==='Enter')document.getElementById('tl-pass').focus()">
+    <input type="password" id="tl-pass" class="tl-field" placeholder="Κωδικός"
+      autocomplete="current-password" aria-label="Κωδικός πρόσβασης"
+      onkeydown="if(event.key==='Enter')tabletLogin()">
+    <div id="tl-err" class="tl-err"></div>
+    <button id="tl-btn" class="tl-btn" onclick="tabletLogin()">Είσοδος →</button>
+  </div>
+</div>
+
+<!-- ═══ IDLE SCREEN ═══ -->
+<div id="idle">
+  <div class="idle-brand idle-logo-wrap"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+  <div class="idle-loyalty">Loyalty Program</div>
+
+  <div class="idle-options">
+
+    <!-- ① QR Scan — dark parallelogram, fully clickable -->
+    <div class="idle-opt-wrap clickable" onclick="openQRScanner()" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' ')openQRScanner()">
+      <div class="idle-opt idle-opt-dark">
+        <div class="idle-opt-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="#0a0a0a">
+            <path d="M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2v-2zm2 2h2v2h-2v-2zm2-2h2v2h-2v-2zm-2 4h2v2h-2v-2zm2 2h2v2h-2v-2zm-4 0h2v2h-2v-2zm4-8h2v2h-2v-2z"/>
+          </svg>
+        </div>
+        <div class="idle-opt-body">
+          <div class="idle-opt-title">Σάρωση QR Code</div>
+          <div class="idle-opt-sub">Κάρτα πελάτη ή εξαργύρωση</div>
+        </div>
+        <div class="idle-opt-arrow">→</div>
+      </div>
+    </div>
+
+    <!-- ② Card Number — green parallelogram -->
+    <div class="idle-opt-wrap">
+      <div class="idle-opt idle-opt-green">
+        <div class="idle-opt-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="#8ae900">
+            <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z"/>
+          </svg>
+        </div>
+        <div class="idle-opt-body">
+          <div class="idle-opt-title">Αριθμός Κάρτας</div>
+          <div class="idle-opt-row">
+            <span class="idle-opt-pfx">IP-</span>
+            <input id="card-input" type="text" class="idle-opt-inp" placeholder="π.χ. 00001" maxlength="10"
+              style="text-transform:uppercase" aria-label="Αριθμός κάρτας πελάτη"
+              onkeydown="if(event.key==='Enter')searchByCard()">
+            <button class="idle-opt-sbtn" onclick="searchByCard()">Αναζήτηση →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ Name / Phone — light parallelogram -->
+    <div class="idle-opt-wrap">
+      <div class="idle-opt idle-opt-light">
+        <div class="idle-opt-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8ae900" stroke-width="2.5">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+        </div>
+        <div class="idle-opt-body">
+          <div class="idle-opt-title">Όνομα ή Τηλέφωνο</div>
+          <div class="idle-opt-row">
+            <input id="sinput" type="text" class="idle-opt-inp" placeholder="π.χ. Νότης ή 6912345678"
+              aria-label="Αναζήτηση πελάτη με όνομα ή τηλέφωνο"
+              onkeydown="if(event.key==='Enter')doSearch()">
+            <button id="sbtn" class="idle-opt-sbtn" onclick="doSearch()">Αναζήτηση →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /idle-options -->
+
+  <div class="dots" style="margin-top:28px">
+    <div class="dot"></div>
+    <div class="dot"></div>
+    <div class="dot"></div>
+  </div>
+</div>
+
+<!-- ═══ QR SCANNER OVERLAY ═══ -->
+<div id="qr-overlay" role="dialog" aria-modal="true" aria-label="Σάρωση QR κωδικού">
+  <video id="qr-video" autoplay playsinline muted></video>
+  <canvas id="qr-canvas" style="display:none"></canvas>
+  <div class="qr-frame-wrap">
+    <div class="qr-frame">
+      <div class="qr-corner-bl"></div>
+      <div class="qr-corner-br"></div>
+      <div class="qr-scan-line"></div>
+    </div>
+    <div>
+      <div class="qr-scan-hint">Στρέψτε την κάμερα στον QR κωδικό</div>
+      <div class="qr-scan-sub">κάρτας πελάτη ή εξαργύρωσης</div>
+    </div>
+    <div class="qr-action-row">
+      <button class="qr-manual-btn" onclick="switchToManualSearch()">⌨️ Εξαργύρωση με κωδικό</button>
+      <button class="qr-cancel-btn" onclick="closeQRScanner()">✕ Ακύρωση</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ RESULT SCREEN ═══ -->
+<div id="result-screen">
+  <div class="result-topbar">
+    <div class="brand"><img src="logo.png" alt="iPear" class="logo-img logo-sm"> <span style="color:var(--gray);font-weight:500;font-size:0.9rem;margin-left:6px">Loyalty</span></div>
+    <button class="result-back" onclick="goBack()">← Νέα Αναζήτηση</button>
+  </div>
+
+  <div class="result-content">
+
+    <!-- Customer found -->
+    <div id="cust-display" style="width:min(700px,100%)">
+      <div class="cust-card">
+        <div class="cc-top">
+          <div class="cc-avatar" id="r-av">?</div>
+          <div class="cc-info">
+            <div class="cc-name" id="r-name">—</div>
+            <div class="cc-meta">📞 <span id="r-phone">—</span></div>
+          </div>
+          <div class="cc-card-badge" id="r-card">IP-????</div>
+        </div>
+
+        <div class="cc-pts-main">
+          <div class="cc-pts-num" id="r-pts">0</div>
+          <div class="cc-pts-lbl">Διαθέσιμοι Πόντοι</div>
+        </div>
+
+        <div class="cc-tier-row">
+          <div class="cc-tier-icon" id="r-ticon">🥉</div>
+          <div class="cc-tier-info">
+            <div class="cc-tier-name" id="r-tname">Bronze</div>
+            <div class="cc-tier-sub"  id="r-tsub">—</div>
+            <div class="prog-bar"><div class="prog-fill" id="r-prog" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <!-- Rewards -->
+        <div class="cc-rewards" id="r-rewards"></div>
+
+        <!-- Actions -->
+        <div style="margin-top:20px">
+          <button class="redeem-btn" onclick="openRedeemPanel()">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            ΕΞΑΡΓΥΡΩΣΗ ΠΟΝΤΩΝ
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Not found -->
+    <div id="not-found">
+      <span class="nf-icon">🔍</span>
+      <div class="nf-title">Δεν βρέθηκε πελάτης</div>
+      <div class="nf-sub">Δοκίμασε με διαφορετικά στοιχεία ή απευθύνσου στο προσωπικό.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- QR REDEEM CONFIRM -->
+<div id="qr-redeem-confirm" role="dialog" aria-modal="true" aria-label="Επιβεβαίωση εξαργύρωσης" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:300;align-items:center;justify-content:center;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:20px 0">
+  <div style="background:white;border-radius:24px;padding:32px 28px;width:min(420px,94vw);text-align:center">
+    <div style="font-size:3rem;margin-bottom:8px">🎟️</div>
+    <h2 style="font-size:1.4rem;font-weight:900;margin-bottom:6px" id="qrc-title">Εξαργύρωση</h2>
+    <p id="qrc-customer" style="font-size:1rem;color:#444;margin-bottom:4px"></p>
+    <p id="qrc-reward" style="font-size:1.6rem;font-weight:900;color:#5a9600;margin-bottom:6px"></p>
+    <p id="qrc-pts" style="font-size:.85rem;color:#888;margin-bottom:24px"></p>
+    <div id="qrc-error" style="display:none;background:#fff3f3;border:1.5px solid #e53935;border-radius:12px;padding:12px;margin-bottom:8px;font-size:.88rem;color:#c62828;font-weight:600"></div>
+    <div style="display:flex;gap:10px">
+      <button onclick="closeQRRedeemConfirm()" style="flex:1;padding:16px;background:#f5f5f5;border:none;border-radius:14px;font-weight:700;font-size:1rem;cursor:pointer;font-family:inherit">Ακύρωση</button>
+      <button id="qrc-confirm-btn" onclick="confirmQRRedeem()" style="flex:2;padding:16px;background:#0a0a0a;color:#8ae900;border:none;border-radius:14px;font-weight:900;font-size:1rem;cursor:pointer;font-family:inherit">✅ Επιβεβαίωση</button>
+    </div>
+  </div>
+</div>
+
+<!-- REDEEM PANEL -->
+<div id="redeem-panel" role="dialog" aria-modal="true" aria-label="Εξαργύρωση πόντων" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:20px 0">
+  <div style="background:white;border-radius:20px;padding:28px 24px;width:min(400px,92vw);max-height:90vh;overflow-y:auto">
+    <h3 style="font-size:1.2rem;font-weight:800;margin-bottom:6px">💶 Εξαργύρωση</h3>
+    <p style="color:#666;font-size:.85rem;margin-bottom:18px">Πελάτης: <strong id="rp-name"></strong> &nbsp;|&nbsp; Διαθέσιμοι: <strong id="rp-pts" style="color:#8ae900"></strong> πόντοι</p>
+    <div id="rp-options" style="display:grid;gap:10px;margin-bottom:18px"></div>
+    <button onclick="closeRedeemPanel()" style="width:100%;padding:13px;background:#f5f5f5;border:none;border-radius:12px;font-weight:700;font-size:.95rem;cursor:pointer">Ακύρωση</button>
+  </div>
+</div>
+
+<!-- Connection indicator -->
+<div class="conn-wrap">
+  <div class="conn-dot" id="cdot"></div>
+  <span class="conn-txt" id="ctxt">Firebase</span>
+</div>
+
+
+<script>
+(function(){
+  var btn=document.getElementById('tl-btn');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Φόρτωση...';}
+  window.addEventListener('vite:preloadError',function(e){e.preventDefault();location.reload();});
+  window.addEventListener('tablet-ready',function(){
+    if(btn){btn.disabled=false;btn.textContent='Είσοδος →';}
+  });
+  setTimeout(function(){
+    if(typeof window.tabletLogin!=='function'){
+      var err=document.getElementById('tl-err');
+      if(err)err.textContent='⚠️ Αργή σύνδεση — επαναφόρτωση...';
+      setTimeout(function(){location.reload();},2000);
+    }
+  },15000);
+})();
+</script>
+<script type="module" src="/src/tablet-main.js"></script>
+</body>
+</html>

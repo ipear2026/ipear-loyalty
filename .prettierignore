@@ -1,0 +1,9 @@
+dist
+node_modules
+functions
+_fb
+public/sw-customer.js
+public/sw.js
+public/firebase-messaging-sw.js
+package-lock.json
+*.html

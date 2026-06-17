@@ -1,0 +1,42 @@
+# ═══════════════════════════════════════════
+#  iPear Loyalty — .gitignore
+# ═══════════════════════════════════════════
+
+# Dependencies
+node_modules/
+functions/node_modules/
+
+# Environment / Secrets
+.env
+.env.*
+.dev.vars
+*.pem
+*.key
+credentials*.json
+service-account*.json
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.err
+
+# Cloudflare
+.wrangler/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / Local tooling
+.vscode/
+.idea/
+.claude/
+
+# Logs
+*.log
+
+# Build artifacts / Zips
+dist/
+*.zip
+*.tmp.js
+*.bak

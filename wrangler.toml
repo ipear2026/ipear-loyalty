@@ -1,0 +1,27 @@
+account_id             = "f02bde005d8c8f63cf76a9f7a1c9ee3f"
+name                   = "email-worker"
+main                   = "email-worker.js"
+compatibility_date     = "2025-11-01"
+keep_vars              = true
+
+# ── Non-sensitive runtime variables ──────────────────────────────────────────
+# Sensitive values (ADMIN_SECRET, BREVO_API_KEY, FCM_CLIENT_EMAIL,
+# FCM_PRIVATE_KEY, WOO_URL, WOO_KEY, WOO_SECRET) MUST be stored as
+# encrypted Secrets in the Cloudflare dashboard — never in this file.
+[vars]
+FCM_PROJECT_ID   = "loyalty-ipear"
+SENDER_EMAIL     = "info@ipear.gr"
+SENDER_NAME      = "iPear Loyalty"
+ALLOWED_ORIGINS  = "https://loyalty.ipear.gr,https://ipear-loyalty.pages.dev"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "9b7bfd14b586445db94e932a75635f85"
+
+# ── Enable production logging (real-time tail + dashboard) ───────────────────
+[observability]
+enabled = true
+
+# ── Cron Trigger: deep health check every 30 minutes ────────────────────────
+[triggers]
+crons = ["*/30 * * * *"]

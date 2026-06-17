@@ -1,0 +1,12 @@
+{
+  "name": "ipear-loyalty-functions",
+  "description": "iPear Loyalty — Cloud Functions",
+  "engines": {
+    "node": "22"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^13.10.0",
+    "firebase-functions": "^7.2.5"
+  }
+}

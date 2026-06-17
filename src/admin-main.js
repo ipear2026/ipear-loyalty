@@ -1,0 +1,2601 @@
+import './styles/admin.css';
+import { logger } from './logger.js';
+// ═══════════════════════════════════════════════════════════════════════════
+//  iPear Loyalty — Admin Panel (ES Module Entry Point)
+//  Shared core: firebase-init.js (Firebase refs), utils.js (tier)
+// ═══════════════════════════════════════════════════════════════════════════
+import './firebase-init.js';
+import { tier, escHtml, escJs, tierFloor } from './utils.js';
+import {
+  setAnPeriod,
+  loadAnalytics,
+  renderAnalytics,
+  openDrillDown,
+} from './admin/analytics.js';
+import { toast, closeM } from './admin/ui.js';
+import {
+  getWorkerSecret as _getWorkerSecret,
+  setWorkerSecret as _setWorkerSecret,
+  clearWorkerSecret as _clearWorkerSecret,
+} from './admin/worker-secret.js';
+import { processBirthdayClaims as _processBirthdayClaims } from './admin/birthday-claims.js';
+import { fillPushTpl, sendPushNotification } from './admin/push-fcm.js';
+import {
+  toggleWorkerConfig,
+  saveWorkerConfig,
+  testWorkerConnection,
+  checkWorkerHealth,
+  fillEmailTpl,
+  toggleEmailTargetSearch,
+  searchEmailOne,
+  selectEmailOne,
+  sendEmailBulk,
+} from './admin/email-worker.js';
+import { fillTpl, prepBulk } from './admin/bulk-notifications.js';
+import { authState } from './admin/auth-state.js';
+import {
+  loadOffers,
+  previewOfferImage,
+  removeOfferImage,
+  openOfferModal,
+  openOfferEdit,
+  saveOffer,
+  sendOfferPush,
+  toggleOffer,
+  deleteOffer,
+} from './admin/offers.js';
+import {
+  initRedemptionVerify,
+  verifyCode,
+  confirmVerify,
+  confirmOfferVerify,
+} from './admin/redemption-verify.js';
+import {
+  initApprovals,
+  startApprovalListener,
+  stopApprovalListener,
+  approveOffer,
+  rejectOffer,
+} from './admin/approvals.js';
+import {
+  initPushListener,
+  startPushListener as _startPushListener,
+  stopPushListener,
+} from './admin/push-listener.js';
+import { publishLeaderboard as _publishLeaderboard } from './admin/leaderboard.js';
+
+// Wire push-listener: keep admin-main's _allCustRows cache in sync.
+initPushListener({
+  onCustomerChange: (id, data) => {
+    const idx = _allCustRows.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      _allCustRows[idx].data = data;
+      _allCustRows[idx].pts = data.points || 0;
+      _allCustRows[idx].tot = data.totalPoints || data.points || 0;
+    }
+  },
+});
+
+// Wire approvals module to admin-main's store context + refresh callbacks.
+initApprovals({
+  getStoreContext: () => ({ storeId: _storeId, storeName: _storeName }),
+  refreshAdminViews: () => {
+    loadTx();
+    loadStats();
+  },
+});
+
+// Wire redemption-verify module to admin-main's mutable state (cid/cdata,
+// _storeId/_storeName) and refresh callbacks (loadTx/loadStats) without
+// leaking those globals into the module itself.
+initRedemptionVerify({
+  getStoreContext: () => ({ storeId: _storeId, storeName: _storeName }),
+  onRedemptionApproved: ({ customerId, newPoints }) => {
+    if (cid === customerId && cdata) {
+      cdata.points = newPoints;
+      renderCust(cdata);
+    }
+  },
+  refreshAdminViews: () => {
+    loadTx();
+    loadStats();
+  },
+});
+
+window.ADMIN_BUILD_TAG = 'admin-20260605-a11y1';
+logger.log('admin.html loaded', window.ADMIN_BUILD_TAG);
+
+// ── Admin auth wrappers (production — using Firebase refs from firebase-init.js) ──
+if (!window.DEMO) {
+  window._adminSignIn = async (email, pass) => {
+    const cred = await window._signIn(window._auth, email, pass);
+    return cred.user;
+  };
+  window._adminSignOut = window._signOut;
+}
+
+// ── Admin demo mode overrides ──
+if (window.DEMO) {
+  const _DC = [
+    {id:'dc1',name:'Νότης Μπουντούρης',phone:'6912345678',card:'IP-00001',points:750,totalPoints:1850,email:'notis@ipear.gr',createdAt:new Date(Date.now()-90*864e5).toISOString()},
+    {id:'dc2',name:'Μαρία Κωνσταντίνου',phone:'6923456789',card:'IP-00002',points:2200,totalPoints:3800,email:'maria@demo.gr',createdAt:new Date(Date.now()-180*864e5).toISOString()},
+    {id:'dc3',name:'Νίκος Αντωνίου',phone:'6934567890',card:'IP-00003',points:4500,totalPoints:7200,email:'',createdAt:new Date(Date.now()-365*864e5).toISOString()},
+  ];
+  const _DT = [
+    {id:'t1',customerId:'dc1',customerName:'Νότης Μπουντούρης',card:'IP-00001',type:'add',points:150,amount:100,category:'📱 Αξεσουάρ (1x)',date:new Date(Date.now()-2*864e5).toISOString()},
+    {id:'t2',customerId:'dc1',customerName:'Νότης Μπουντούρης',card:'IP-00001',type:'add',points:225,amount:150,category:'🔧 Επισκευή (1.5x)',date:new Date(Date.now()-7*864e5).toISOString()},
+    {id:'t3',customerId:'dc1',customerName:'Νότης Μπουντούρης',card:'IP-00001',type:'redeem',points:-250,discount:5,date:new Date(Date.now()-15*864e5).toISOString()},
+    {id:'t4',customerId:'dc2',customerName:'Μαρία Κωνσταντίνου',card:'IP-00002',type:'add',points:300,amount:200,category:'🎨 Custom Θήκη (1.5x)',date:new Date(Date.now()-864e5).toISOString()},
+    {id:'t5',customerId:'dc3',customerName:'Νίκος Αντωνίου',card:'IP-00003',type:'add',points:500,amount:333,category:'🔧 Επισκευή (1.5x)',date:new Date(Date.now()-3*864e5).toISOString()},
+  ];
+  const _DO = [
+    {id:'o1',emoji:'🎁',title:'Διπλοί Πόντοι Σαββατοκύριακο',description:'Αυτό το Σαββατοκύριακο κέρδισε διπλούς πόντους!',startDate:new Date().toISOString().split('T')[0],endDate:new Date(Date.now()+3*864e5).toISOString().split('T')[0],active:true,createdAt:new Date().toISOString()},
+  ];
+  const snap=a=>({empty:!a.length,size:a.length,forEach:cb=>a.forEach(d=>cb({id:d.id,data:()=>({...d})}))});
+  window._db={};
+  window._col=(db,n)=>({_n:n});
+  window._getDocs=async ref=>{
+    const n=ref._n||(ref._ref&&ref._ref._n);
+    const args=ref._args||[];
+    let data=n==='ipear_customers'?[..._DC]:n==='ipear_transactions'?[..._DT]:n==='ipear_offers'?[..._DO]:n==='ipear_redemptions'?JSON.parse(localStorage.getItem('_ipear_codes')||'[]'):[];
+    for(const a of args){
+      if(a._t==='w'&&a.op==='==') data=data.filter(d=>String(d[a.f])===String(a.v));
+      if(a._t==='o'&&a.dir==='desc') data=[...data].sort((x,y)=>new Date(y.date)-new Date(x.date));
+      if(a._t==='l') data=data.slice(0,a.n);
+    }
+    return snap(data);
+  };
+  window._query=(ref,...a)=>({_ref:ref,_args:a});
+  window._where=(f,op,v)=>({_t:'w',f,op,v});
+  window._orderBy=(f,d)=>({_t:'o',f,dir:d});
+  window._limit=n=>({_t:'l',n});
+  window._addDoc=async(ref,data)=>{const id='d'+Date.now();if(ref._n==='ipear_customers')_DC.push({id,...data});if(ref._n==='ipear_transactions')_DT.push({id,...data});if(ref._n==='ipear_offers')_DO.push({id,...data});return{id};};
+  window._updateDoc=async(ref,data)=>{if(ref._col==='ipear_redemptions'){const codes=JSON.parse(localStorage.getItem('_ipear_codes')||'[]');const i=codes.findIndex(d=>d.id===ref._id);if(i>=0){Object.assign(codes[i],data);localStorage.setItem('_ipear_codes',JSON.stringify(codes));}return;}const arr=ref._col==='ipear_customers'?_DC:ref._col==='ipear_transactions'?_DT:_DO;const i=arr.findIndex(d=>d.id===ref._id);if(i>=0)Object.assign(arr[i],data);};
+  window._deleteDoc=async(ref)=>{const arr=ref._col==='ipear_customers'?_DC:ref._col==='ipear_transactions'?_DT:_DO;const i=arr.findIndex(d=>d.id===ref._id);if(i>=0)arr.splice(i,1);};
+  window._setDoc=async(ref,data)=>{const arr=ref._col==='ipear_customers'?_DC:ref._col==='ipear_transactions'?_DT:_DO;const i=arr.findIndex(d=>d.id===ref._id);if(i>=0)Object.assign(arr[i],data);else arr.push({id:ref._id,...data});};
+  window._doc=(db,col,id)=>({_col:col,_id:id});
+  const _DEMO_STORES = { 'store-demo': { name: 'iPear Demo', city: 'Demo' } };
+  const _DEMO_ADMINS = { 'demo-admin': { storeid: 'store-demo' } };
+  window._getDoc=async(ref)=>{
+    if(ref._col==='ipear_stores')   { const d=_DEMO_STORES[ref._id]; return {exists:()=>!!d, data:()=>d?{...d}:undefined, id:ref._id}; }
+    if(ref._col==='ipear_admins') { const d=_DEMO_ADMINS[ref._id]; return {exists:()=>!!d, data:()=>d?{...d}:undefined, id:ref._id}; }
+    const arr=ref._col==='ipear_customers'?_DC:ref._col==='ipear_transactions'?_DT:ref._col==='ipear_offers'?_DO:[];
+    const d=arr.find(x=>x.id===ref._id);
+    return {exists:()=>!!d, data:()=>d?{...d}:undefined, id:ref._id};
+  };
+  window._runTransaction = async (db, fn) => {
+    const writes = [];
+    const txn = {
+      get:    (ref)       => window._getDoc(ref),
+      update: (ref, data) => { writes.push(() => window._updateDoc(ref, data)); },
+      set:    (ref, data) => { writes.push(() => window._setDoc  (ref, data)); },
+    };
+    const result = await fn(txn);
+    for (const w of writes) await w();
+    return result;
+  };
+  window._auth = {};
+  window._adminSignIn = async (email, pass) => {
+    if (email === 'admin@ipear.gr' && pass === 'admin1234') return { uid: 'demo-admin' };
+    throw { code: 'auth/wrong-password' };
+  };
+  window._adminSignOut = async () => {};
+  window._onSnapshot = (ref, cb) => { cb({ forEach:()=>{}, empty:true, size:0 }); return ()=>{}; };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMIN APPLICATION CODE
+// ═══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════
+//  LOCK
+// ══════════════════════════════════════
+let _adminAttempts = 0;
+let _adminLockUntil = 0;
+let _adminActorUid = null;
+
+// Shared post-auth bootstrap. Used by manual unlock() AND by silent
+// _tryAdminAutoRestore() when Firebase Auth carries a live session forward
+// (page reload, 30-min sleep recovery, Chrome memory-saver tab restore).
+async function _completeAdminAuth(user) {
+  _adminActorUid = user?.uid || null;
+  _storeId = null; _storeName = '—';
+
+  const adminRef  = window._doc(window._db, 'ipear_admins', user.uid);
+  const adminSnap = await window._getDoc(adminRef);
+  if (!window.DEMO && !adminSnap.exists()) {
+    await window._adminSignOut().catch(() => {});
+    throw new Error('not-admin');
+  }
+  _storeId = adminSnap.data()?.storeid || null;
+
+  if (_storeId) {
+    try {
+      const storeSnap = await window._getDoc(window._doc(window._db, 'ipear_stores', _storeId));
+      if (storeSnap.exists()) {
+        _storeName = storeSnap.data().name || '—';
+        const badge = document.getElementById('store-badge');
+        if (badge) { badge.textContent = '🏪 ' + _storeName; badge.style.display = 'inline-block'; }
+        const regBadge = document.getElementById('reg-store-badge');
+        if (regBadge) { regBadge.textContent = '🏪 Εγγραφή για: ' + _storeName; regBadge.style.display = 'block'; }
+      }
+    } catch(_) {}
+  }
+
+  authState.authenticated = true;
+  document.getElementById('lock').style.display = 'none';
+  document.getElementById('lock-in').value  = '';
+  document.getElementById('lock-email').value = '';
+  document.getElementById('admin-logout-btn').style.display = 'flex';
+  loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startPushListener();
+  processReferralQueue(); loadKpiOverview(); startMaintenanceListener(); checkWorkerHealth();
+  loadDeletionRequests();
+}
+
+// Silent auto-restore: if Firebase Auth has a valid session in the tab's
+// IndexedDB (set on first unlock with SESSION persistence), skip the email
+// /password lock screen entirely. Falls back to the lock screen on any error.
+let _autoRestoreAttempted = false;
+async function _tryAdminAutoRestore() {
+  if (_autoRestoreAttempted) return;
+  _autoRestoreAttempted = true;
+  const user = window._auth?.currentUser;
+  if (!user) return;  // no session → keep lock screen visible
+  logger.log('%c[ADMIN] 🔓 auto-restoring from Firebase session: ' + user.email, 'color:#00cc00;font-weight:bold;font-size:14px');
+  try { await _completeAdminAuth(user); }
+  catch(e) {
+    logger.warn('[ADMIN] auto-restore failed:', e.message);
+    // Lock screen is already visible by default — nothing to do
+  }
+}
+
+// Bootstrap: kick auto-restore as soon as firebase-init.js finishes loading.
+// firebase-init uses top-level await so by the time this module runs the flag
+// may already be set; otherwise wait for the event.
+if (window._firebaseReady) _tryAdminAutoRestore();
+else window.addEventListener('firebase-ready', _tryAdminAutoRestore);
+
+async function unlock() {
+  const email = document.getElementById('lock-email').value.trim().toLowerCase();
+  const pass  = document.getElementById('lock-in').value;
+  const err   = document.getElementById('lock-err');
+  const btn   = document.getElementById('lock-btn');
+  err.textContent = '';
+  if (!email || !email.includes('@')) { err.textContent = '⚠️ Εισάγετε email.'; return; }
+  if (!pass) { err.textContent = '⚠️ Εισάγετε κωδικό.'; return; }
+  if (Date.now() < _adminLockUntil) {
+    const secs = Math.ceil((_adminLockUntil - Date.now()) / 1000);
+    err.textContent = `🔒 Κλειδωμένο — δοκίμασε σε ${secs}s`; return;
+  }
+  btn.disabled = true; btn.textContent = '⏳';
+  try {
+    const user = await window._adminSignIn(email, pass);
+    await _completeAdminAuth(user);
+  } catch(e) {
+    if (e.message === 'not-admin') {
+      err.textContent = '⛔ Ο λογαριασμός δεν έχει δικαιώματα admin.';
+      btn.disabled = false; btn.textContent = 'Είσοδος →'; return;
+    }
+    _adminAttempts++;
+    if (_adminAttempts >= 5) {
+      _adminLockUntil = Date.now() + 60000; // 60s lockout after 5 failures
+      _adminAttempts = 0;
+    }
+    const msgs = {
+      'auth/wrong-password':        '❌ Λάθος κωδικός.',
+      'auth/user-not-found':        '❌ Δεν βρέθηκε λογαριασμός.',
+      'auth/invalid-credential':    '❌ Λάθος email ή κωδικός.',
+      'auth/too-many-requests':     '⚠️ Πάρα πολλές προσπάθειες. Δοκίμασε αργότερα.',
+      'auth/invalid-email':         '⚠️ Μη έγκυρο email.',
+    };
+    err.textContent = msgs[e.code] || ('❌ ' + (e.message || e.code));
+  }
+  btn.disabled = false; btn.textContent = 'Είσοδος →';
+}
+
+function adminLogout() {
+  try { window._adminSignOut(); } catch(_) {}
+  // Stop real-time listeners (prevent leak + stale re-login)
+  stopApprovalListener();
+  stopPushListener();
+  if (_maintenanceUnsub) { try { _maintenanceUnsub(); } catch(_) {} _maintenanceUnsub = null; }
+  _adminActorUid = null;
+  // Clear session-sensitive runtime state
+  authState.authenticated = false;  // H-7: block data-loading after logout
+  _activeSegment = null;
+  cid = null; cdata = null; msgCh = '';
+  _storeId = null; _storeName = '—';
+  // Clear sessionStorage (worker secret lives only for this tab session)
+  _clearWorkerSecret();
+  localStorage.removeItem('ipear_worker_url');
+  // Clear UI: customer result
+  document.getElementById('cust-result')?.classList.remove('show');
+  const sinput = document.getElementById('sinput');
+  if (sinput) sinput.value = '';
+  // kpi-overview merged into dashboard — no hide needed
+  const whEl = document.getElementById('worker-health');
+  if (whEl) whEl.style.display = 'none';
+  // Clear UI: store badges
+  const badge = document.getElementById('store-badge');
+  if (badge) { badge.textContent = ''; badge.style.display = 'none'; }
+  const regBadge = document.getElementById('reg-store-badge');
+  if (regBadge) { regBadge.textContent = ''; regBadge.style.display = 'none'; }
+  // Clear UI: lock screen inputs
+  document.getElementById('lock-email').value = '';
+  document.getElementById('lock-in').value = '';
+  document.getElementById('lock-err').textContent = '';
+  document.getElementById('admin-logout-btn').style.display = 'none';
+  document.getElementById('lock').style.display = 'flex';
+  // Return to search tab (safe default)
+  showTab('search');
+}
+
+// ══════════════════════════════════════
+//  XSS GUARD (escHtml + escJs imported from utils.js)
+// ══════════════════════════════════════
+
+// ══════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════
+let cid = null, cdata = null, msgCh = '';
+let _storeId = null, _storeName = '—';
+const DB = () => window._db;
+const TABS = ['search','register','customers','transactions','approvals','offers','marketing','stats','system','gdpr'];
+
+// ══════════════════════════════════════
+//  ONLINE
+// ══════════════════════════════════════
+function setOnline(on) {
+  document.getElementById('cdot').className = 'conn-dot ' + (on ? 'ok' : 'err');
+  document.getElementById('ctxt').textContent = on ? 'Firebase' : 'OFFLINE';
+  if (!on) toast('🔴 Χάθηκε το ίντερνετ!', 'error');
+}
+window.addEventListener('online',  () => { setOnline(true); _adminKeepAliveRefresh(); });
+window.addEventListener('offline', () => setOnline(false));
+// ── Worker secret helpers  →  moved to ./admin/worker-secret.js ──
+
+setOnline(navigator.onLine);
+// firebase-init.js already executed (imported above) — run directly
+if (window.DEMO) document.getElementById('lock-demo').style.display = 'block';
+
+// ── KEEPALIVE: auto-refresh data + recover from sleep/background ──────────
+let _adminLastRefresh = 0;
+const _ADMIN_REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+function _adminKeepAliveRefresh() {
+  if (!authState.authenticated || !navigator.onLine) return;
+  const now = Date.now();
+  if (now - _adminLastRefresh < 30000) return; // debounce 30s
+  _adminLastRefresh = now;
+  try { loadStats(); loadTx(); loadOffers(); startApprovalListener(); _startPushListener(); loadKpiOverview(); checkWorkerHealth(); } catch(e) { logger.warn('[keepalive] refresh error:', e.message); }
+  // keepalive refreshed
+}
+
+// Periodic refresh every 5 min
+setInterval(() => { if (authState.authenticated) _adminKeepAliveRefresh(); }, _ADMIN_REFRESH_INTERVAL);
+
+// Recover from sleep/tab-switch: visibilitychange + pageshow
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && authState.authenticated) {
+    // If asleep >30 min, Firestore listeners are dead — full reload
+    if (Date.now() - _adminLastRefresh > 30 * 60 * 1000) {
+      logger.log('[keepalive] admin was asleep >30min, reloading...');
+      location.reload();
+      return;
+    }
+    setTimeout(_adminKeepAliveRefresh, 500);
+  }
+});
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted && authState.authenticated) {
+    logger.log('[keepalive] bfcache restore, reloading...');
+    location.reload();
+  }
+});
+window.addEventListener('focus', () => {
+  if (authState.authenticated) setTimeout(_adminKeepAliveRefresh, 300);
+});
+
+// ══════════════════════════════════════
+//  TABS
+// ══════════════════════════════════════
+function showTab(n) {
+  document.querySelectorAll('.tc').forEach(e => e.classList.remove('show'));
+  document.querySelectorAll('.tab').forEach(e => e.classList.remove('active'));
+  document.getElementById('tab-'+n).classList.add('show');
+  const idx = TABS.indexOf(n);
+  document.querySelectorAll('.tab')[idx]?.classList.add('active');
+  if (n==='stats') { loadStats(); loadAnalytics(); }
+  if (n==='transactions') loadTx();
+  if (n==='customers') loadAll();
+  if (n==='offers') loadOffers();
+  if (n==='gdpr') loadDeletionRequests();
+}
+
+async function loadDeletionRequests() {
+  const list = document.getElementById('gdpr-list');
+  list.innerHTML = '<div style="text-align:center;padding:20px;color:var(--gray)">⏳ Φόρτωση...</div>';
+  try {
+    const db = DB(); if (!db) throw new Error('Δεν υπάρχει σύνδεση');
+    const snap = await window._getDocs(window._query(
+      window._col(db, 'ipear_customers'),
+      window._where('deletionRequested', '==', true)
+    ));
+    if (snap.empty) {
+      list.innerHTML = '<div style="text-align:center;padding:28px;color:#888;font-size:.92rem">✅ Δεν υπάρχουν εκκρεμή αιτήματα διαγραφής.</div>';
+      _updateGdprBadge(0);
+      return;
+    }
+    _updateGdprBadge(snap.size);
+    let html = '<div style="display:grid;gap:10px">';
+    snap.forEach(d => {
+      const c = d.data();
+      const reqDate = c.deletionRequestedAt ? new Date(c.deletionRequestedAt).toLocaleDateString('el-GR') + ' ' + new Date(c.deletionRequestedAt).toLocaleTimeString('el-GR',{hour:'2-digit',minute:'2-digit'}) : '—';
+      html += `<div style="display:flex;align-items:center;gap:14px;padding:16px;background:#fff8f8;border:1.5px solid #ffcdd2;border-radius:14px">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:.95rem;margin-bottom:2px">${escHtml(c.name || '—')}</div>
+          <div style="font-size:.82rem;color:#888">${escHtml(c.email || '')} · ${escHtml(c.phone || '')} · ${escHtml(c.card || '')}</div>
+          <div style="font-size:.78rem;color:#bbb;margin-top:2px">Αίτημα: ${reqDate}</div>
+        </div>
+        <button class="btn" style="background:#dc3545;color:#fff;border-color:#dc3545;font-size:.82rem;padding:10px 16px;white-space:nowrap"
+          onclick="gdprDeleteCustomer('${escJs(d.id)}','${escJs(c.name || '')}')">🗑 Διαγραφή</button>
+      </div>`;
+    });
+    html += '</div>';
+    list.innerHTML = html;
+  } catch(e) { list.innerHTML = '<div style="color:#c62828;padding:14px">❌ Σφάλμα: ' + escHtml(e.message) + '</div>'; }
+}
+
+async function gdprDeleteCustomer(docId, _name) {
+  const prevCid = cid; const prevCdata = cdata;
+  try {
+    const db = DB();
+    const doc = await window._getDoc(window._doc(db, 'ipear_customers', docId));
+    if (!doc.exists()) { toast('⚠️ Ο πελάτης δεν βρέθηκε.', 'error'); loadDeletionRequests(); return; }
+    cid = docId; cdata = doc.data();
+    await deleteCust();
+    loadDeletionRequests();
+  } catch(e) {
+    toast('❌ ' + e.message, 'error');
+  }
+  if (!cid) { cid = prevCid; cdata = prevCdata; }
+}
+
+function _updateGdprBadge(count) {
+  const badge = document.getElementById('gdpr-badge');
+  if (!badge) return;
+  if (count > 0) { badge.style.display = ''; badge.textContent = count; }
+  else { badge.style.display = 'none'; }
+}
+
+// ══════════════════════════════════════
+//  TOAST  →  moved to ./admin/ui.js (toast, closeM)
+// ══════════════════════════════════════
+document.querySelectorAll('.modal-bg').forEach(b=>b.addEventListener('click',e=>{ if(e.target===b)closeM(); }));
+
+// ══════════════════════════════════════
+//  REGISTER
+// ══════════════════════════════════════
+async function register() {
+  if (!authState.authenticated) { toast('⛔ Δεν έχεις συνδεθεί!','error'); return; }
+  if (!navigator.onLine) { toast('🔴 Offline','error'); return; }
+  const name=document.getElementById('rn').value.trim(),
+        phone=document.getElementById('rp').value.trim().replace(/[\s\-()]/g,''),
+        card=document.getElementById('rc').value.trim().toUpperCase(),
+        email=document.getElementById('re').value.trim().toLowerCase(),
+        terms=document.getElementById('rterms').checked;
+  if (!name||!phone||!card) { toast('⚠️ Συμπλήρωσε όλα τα υποχρεωτικά!','error'); return; }
+  // Validate card format: IP-XXXXXX (exactly 6 uppercase alphanumeric chars)
+  if (!/^IP-[A-Z0-9]{6}$/.test(card)) { toast('⚠️ Μορφή κάρτας: IP-XXXXXX (6 κεφαλαία/αριθμοί). π.χ. IP-00001A','error'); return; }
+  // Validate Greek mobile phone (10 digits starting with 6)
+  if (!/^6\d{9}$/.test(phone)) { toast('⚠️ Το τηλέφωνο πρέπει να είναι ελληνικός αριθμός κινητού (π.χ. 6912345678)','error'); return; }
+  // Validate email with basic regex
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast('⚠️ Εισάγετε έγκυρο email (π.χ. nikos@email.com)','error'); return; }
+  if (!terms)                      { toast('⚠️ Αποδοχή όρων υποχρεωτική!','error'); return; }
+  // Validate referral code format if provided
+  const refCodeRaw = document.getElementById('rref').value.trim().toUpperCase();
+  if (refCodeRaw && !/^IP-[A-Z0-9]{6}$/.test(refCodeRaw)) { toast('⚠️ Ο κωδικός παραπομπής πρέπει να είναι μορφής IP-XXXXXX (π.χ. IP-00001A)','error'); return; }
+  const db=DB();
+  const ex=await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('card','==',card)));
+  if (!ex.empty) { toast('⚠️ Η κάρτα υπάρχει ήδη!','error'); return; }
+  const exP=await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('phone','==',phone)));
+  if (!exP.empty) { toast('⚠️ Το τηλέφωνο υπάρχει ήδη!','error'); return; }
+  const exE=await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('email','==',email)));
+  if (!exE.empty) { toast('⚠️ Το email υπάρχει ήδη!','error'); return; }
+  document.getElementById('rspin').classList.add('show');
+  document.getElementById('reg-btn').disabled=true;
+  try {
+    const birthday = document.getElementById('rbday').value;
+    const refCode  = refCodeRaw;
+    const { id: newId } = await window._addDoc(window._col(db,'ipear_customers'),
+      { name,phone,card,email, birthday, points:0,totalPoints:0, blocked:false, referralProcessed:false, referralCount:0, fcmToken:'', referredBy:refCode||'', registeredStoreId:_storeId||null, registeredStoreName:_storeName, createdAt:new Date().toISOString() });
+    // Referral bonus: +100 for both (max 5 referrals per referrer)
+    if (refCode) {
+      const refSnap = await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('card','==',refCode)));
+      if (!refSnap.empty) {
+        let referrerAwarded = false;
+        for (const rd of refSnap.docs || (() => { const a = []; refSnap.forEach(d => a.push(d)); return a; })()) {
+          const rdata = rd.data();
+          const refCount = rdata.referralCount || 0;
+          if (refCount >= MAX_REFERRALS_PER_USER) {
+            toast(`⚠️ Ο referrer (${refCode}) έχει φτάσει το όριο ${MAX_REFERRALS_PER_USER} παραπομπών.`,'error');
+            break;
+          }
+          const newPts = (rdata.points||0)+100, newTot = (rdata.totalPoints||rdata.points||0)+100;
+          await window._updateDoc(window._doc(db,'ipear_customers',rd.id),{points:newPts,totalPoints:newTot, referralCount: refCount + 1});
+          await window._addDoc(window._col(db,'ipear_transactions'),{customerId:rd.id,customerUid:rdata.uid||'',customerEmail:rdata.email||'',customerName:rdata.name,card:rdata.card,type:'add',points:100,amount:0,category:'🎁 Referral Bonus',note:`Παραπομπή: ${card} (${refCount+1}/${MAX_REFERRALS_PER_USER})`,date:new Date().toISOString()});
+          referrerAwarded = true;
+        }
+        if (referrerAwarded) {
+          // +100 for new customer too
+          await window._updateDoc(window._doc(db,'ipear_customers',newId),{points:100,totalPoints:100});
+          // Transaction record for new customer's referral bonus
+          await window._addDoc(window._col(db,'ipear_transactions'),{customerId:newId,customerUid:'',customerEmail:email,customerName:name,card:card,type:'add',points:100,amount:0,category:'🎁 Referral Bonus',note:`Μπόνους εγγραφής με παραπομπή: ${refCode}`,date:new Date().toISOString()});
+          toast(`✅ Εγγραφή επιτυχής! +100 πόντοι και στους δύο (referral)! 🎉`,'success');
+        } else {
+          toast('✅ Εγγραφή επιτυχής! Καλωσήρθε '+name+'! (Referral limit reached)','success');
+        }
+      } else {
+        toast('✅ Εγγραφή επιτυχής! Καλωσήρθε '+name+'!','success');
+      }
+    } else {
+      toast('✅ Εγγραφή επιτυχής! Καλωσήρθε '+name+'!','success');
+    }
+    ['rn','rp','rc','re','rbday','rref'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+    document.getElementById('rterms').checked=false;
+    window._emailAllCustomers = null; // invalidate search cache
+    loadStats(); loadAll(); // loadAll also publishes leaderboard
+  } catch(e) { toast('❌ '+e.message,'error'); }
+  finally {
+    // IAM-FIX: always restore UI even if catch itself throws
+    document.getElementById('rspin').classList.remove('show');
+    document.getElementById('reg-btn').disabled=false;
+  }
+}
+
+// ══════════════════════════════════════
+//  SEARCH
+// ══════════════════════════════════════
+async function search() {
+  if (!authState.authenticated) { toast('⛔ Δεν έχεις συνδεθεί!','error'); return; }
+  if (!navigator.onLine) { toast('🔴 Offline','error'); return; }
+  const q=document.getElementById('sinput').value.trim();
+  if (!q) { toast('⚠️ Γράψε κάτι','error'); return; }
+  document.getElementById('sspin').classList.add('show');
+  document.getElementById('cust-result').classList.remove('show');
+  document.getElementById('no-res').style.display='none';
+  const db = DB();
+  try {
+    let found=null, foundId=null;
+
+    // ── FAST PATH: exact-match indexed queries (1 read each, not N) ──
+    const ql = q.toLowerCase();
+    const qUp = q.toUpperCase();
+
+    // 1. Card match (IP-XXXXXX)
+    if (/^IP-/i.test(q)) {
+      const cardSnap = await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('card','==',qUp)));
+      cardSnap.forEach(d => { if (!found) { found=d.data(); foundId=d.id; } });
+    }
+
+    // 2. Phone match (starts with 69 — Greek mobile)
+    if (!found && /^\d{4,}$/.test(q)) {
+      const phoneSnap = await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('phone','==',q)));
+      phoneSnap.forEach(d => { if (!found) { found=d.data(); foundId=d.id; } });
+    }
+
+    // 3. Email match (contains @)
+    if (!found && q.includes('@')) {
+      const emailSnap = await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('email','==',ql)));
+      emailSnap.forEach(d => { if (!found) { found=d.data(); foundId=d.id; } });
+    }
+
+    // 4. FALLBACK: name search — uses cached snapshot if available (< 30s old), else full scan
+    if (!found) {
+      const snap = (_lastCustSnap && Date.now() - _lastCustSnapAt < 30000)
+        ? _lastCustSnap
+        : await window._getDocs(window._col(db,'ipear_customers'));
+      if (!_lastCustSnap || Date.now() - _lastCustSnapAt >= 30000) { _lastCustSnap = snap; _lastCustSnapAt = Date.now(); }
+      snap.forEach(d=>{
+        const data=d.data();
+        if ([data.name||'',String(data.phone||''),String(data.card||'')]
+            .some(s=>s.toLowerCase().includes(ql))) { found=data; foundId=d.id; }
+      });
+    }
+
+    if (found) { cid=foundId; cdata=found; renderCust(found); }
+    else document.getElementById('no-res').style.display='block';
+  } catch(e) { toast('❌ '+e.message,'error'); }
+  document.getElementById('sspin').classList.remove('show');
+}
+
+async function renderCust(d) {
+  const pts=d.points||0, tot=d.totalPoints||pts;
+  const ini=(d.name||'?').split(' ').map(n=>n[0]).join('').substring(0,2).toUpperCase();
+  const t=tier(tot);
+  document.getElementById('r-av').textContent=ini;
+  document.getElementById('r-name').textContent=d.name;
+  document.getElementById('r-phone').textContent=d.phone;
+  document.getElementById('r-email').textContent=d.email||'—';
+  document.getElementById('r-ew').style.display=d.email?'':'none';
+  document.getElementById('r-date').textContent=d.createdAt?new Date(d.createdAt).toLocaleDateString('el-GR'):'—';
+  document.getElementById('r-card').textContent='📱 '+d.card;
+  document.getElementById('r-pts').textContent=pts.toLocaleString('el-GR');
+  document.getElementById('r-tot').textContent=tot.toLocaleString('el-GR');
+  document.getElementById('r-tv').textContent=t.icon+' '+t.name;
+  document.getElementById('r-ticon').textContent=t.icon;
+  document.getElementById('r-tname').textContent=t.name;
+  if (t.next) {
+    const floor=tierFloor(tot);
+    const pct=Math.min(100,Math.round(((tot-floor)/(t.next-floor))*100));
+    document.getElementById('r-tsub').textContent=`${tot.toLocaleString('el-GR')} / ${t.next.toLocaleString('el-GR')} για ${t.next===1000?'🥈 Silver':t.next===3000?'🥇 Gold':t.next===6000?'💎 Diamond':'👑 Platinum'}`;
+    document.getElementById('r-prog').style.width=pct+'%';
+  } else {
+    document.getElementById('r-tsub').textContent='🏆 Ανώτατη κατάταξη!';
+    document.getElementById('r-prog').style.width='100%';
+  }
+  // Birthday check
+  if (d.birthday) {
+    const today = new Date(), bday = new Date(d.birthday + 'T12:00:00');
+    const isBday = today.getDate()===bday.getDate() && today.getMonth()===bday.getMonth();
+    if (isBday) {
+      toast(`🎂 Σήμερα είναι τα γενέθλια του/της ${d.name}! 🎉`,'success');
+      // Auto-add birthday bonus if not already given this year
+      const thisYear = today.getFullYear();
+      const lastBdayKey = '_bday_'+cid+'_'+thisYear;
+      if (!sessionStorage.getItem(lastBdayKey)) {
+        sessionStorage.setItem(lastBdayKey,'1');
+        if(confirm(`🎂 Γενέθλια ${d.name}!\nΘέλεις να προσθέσεις αυτόματα 200 πόντους ως δώρο γενεθλίων;`)) {
+          const db=DB(), newPts=(d.points||0)+200, newTot=(d.totalPoints||d.points||0)+200;
+          await window._updateDoc(window._doc(db,'ipear_customers',cid),{points:newPts,totalPoints:newTot});
+          await window._addDoc(window._col(db,'ipear_transactions'),{customerId:cid,customerUid:d.uid||'',customerEmail:d.email||'',customerName:d.name,card:d.card,type:'add',points:200,amount:0,category:'🎂 Birthday Bonus',note:'Δώρο γενεθλίων',storeId:_storeId||null,storeName:_storeName,date:new Date().toISOString()});
+          cdata.points=newPts; cdata.totalPoints=newTot;
+          renderCust(cdata);
+        }
+      }
+    }
+  }
+  // Blocked state
+  const isBlocked = !!d.blocked;
+  const blockedBadge = document.getElementById('r-blocked-badge');
+  const blockBtn = document.getElementById('block-btn');
+  if (blockedBadge) blockedBadge.style.display = isBlocked ? 'block' : 'none';
+  if (blockBtn) { blockBtn.textContent = isBlocked ? '✅ Unblock' : '🚫 Block'; blockBtn.style.background = isBlocked ? '#4caf50' : '#ff9800'; }
+  document.getElementById('cust-result').classList.add('show');
+}
+
+// ══════════════════════════════════════
+//  BLOCK / UNBLOCK
+// ══════════════════════════════════════
+let _blockCustBusy = false;
+async function blockCust() {
+  if (_blockCustBusy) return;
+  if (!cid) return;
+  const isBlocked = !!cdata?.blocked;
+  const action = isBlocked ? 'ξεμπλοκαριστεί' : 'μπλοκαριστεί';
+  if (!confirm(`⚠️ Ο πελάτης "${cdata?.name}" θα ${action}.\n\n${isBlocked ? 'Θα μπορεί να συνδεθεί ξανά στο app.' : 'Δεν θα μπορεί να συνδεθεί στο app.'}`)) return;
+  _blockCustBusy = true;
+  try {
+    await window._updateDoc(window._doc(DB(),'ipear_customers',cid), { blocked: !isBlocked });
+    cdata.blocked = !isBlocked;
+    renderCust(cdata);
+    toast(isBlocked ? '✅ Ο πελάτης ξεμπλοκαρίστηκε.' : '🚫 Ο πελάτης μπλοκαρίστηκε.', 'success');
+  } catch(e) { toast('❌ ' + e.message, 'error'); }
+  finally { _blockCustBusy = false; }
+}
+
+// ══════════════════════════════════════
+//  ADD POINTS
+// ══════════════════════════════════════
+function calcPts() {
+  const amt=parseFloat(document.getElementById('ma-amt').value)||0;
+  const mul=parseFloat(document.getElementById('ma-cat').value)||1;
+  const pts=Math.round(amt*mul);
+  const el=document.getElementById('pts-calc');
+  el.textContent=pts;
+  el.style.color = amt > 5000 ? '#ff3b30' : amt > 500 ? '#ff9500' : '';
+}
+function openAdd() {
+  document.getElementById('ma-name').textContent=cdata?.name||'';
+  document.getElementById('ma-amt').value='';
+  document.getElementById('ma-note').value='';
+  document.getElementById('pts-calc').textContent='0';
+  document.getElementById('m-add').classList.add('show');
+}
+let _txnBusy = false;
+const _TXN_COOLDOWN = 2000;
+let _txnLastAt = 0;
+async function confirmAdd() {
+  if (_txnBusy) { toast('⏳ Επεξεργασία σε εξέλιξη...','error'); return; }
+  if (Date.now() - _txnLastAt < _TXN_COOLDOWN) { toast('⏳ Περίμενε λίγο...','error'); return; }
+  if (!authState.authenticated) { toast('⛔ Δεν έχεις συνδεθεί!','error'); return; }
+  if (!navigator.onLine) { toast('🔴 Offline','error'); return; }
+  _txnBusy = true; _txnLastAt = Date.now();
+  const amt=parseFloat(document.getElementById('ma-amt').value);
+  const mul=parseFloat(document.getElementById('ma-cat').value)||1;
+  const cat=document.getElementById('ma-cat').options[document.getElementById('ma-cat').selectedIndex].text;
+  const pts=Math.round(amt*mul);
+  const note=document.getElementById('ma-note').value;
+  if (!amt||amt<1) { toast('⚠️ Βάλε ποσό αγοράς','error'); _txnBusy = false; return; }
+  if (!Number.isFinite(amt)) { toast('⚠️ Μη έγκυρο ποσό','error'); _txnBusy = false; return; }
+  if (amt > 5000) { toast('⚠️ Μέγιστο ποσό αγοράς: 5.000€','error'); _txnBusy = false; return; }
+  if (amt > 500 && !confirm(`⚠️ Ποσό ${amt.toLocaleString('el-GR')}€ — Σίγουρα;`)) { _txnBusy = false; return; }
+  const db=DB();
+  const addBtn = document.querySelector('#m-add .btn-green');
+  if (addBtn) { addBtn.disabled=true; addBtn.textContent='⏳'; }
+  try {
+    // ── Atomic Transaction — reads live balance, prevents stale-read overwrites ──
+    let newPts, newTot;
+    await window._runTransaction(db, async (txn) => {
+      const custRef = window._doc(db, 'ipear_customers', cid);
+      const snap = await txn.get(custRef);
+      if (!snap.exists()) throw new Error('Πελάτης δεν βρέθηκε.');
+      const live = snap.data();
+      newPts = (live.points || 0) + pts;
+      newTot = (live.totalPoints || live.points || 0) + pts;
+      txn.update(custRef, { points: newPts, totalPoints: newTot });
+    });
+    await window._addDoc(window._col(db,'ipear_transactions'),
+      {customerId:cid,customerUid:cdata.uid||'',customerEmail:cdata.email||'',customerName:cdata.name,card:cdata.card,type:'add',points:pts,amount:amt,category:cat,note,storeId:_storeId||null,storeName:_storeName,date:new Date().toISOString()});
+    cdata.points=newPts; cdata.totalPoints=newTot;
+    renderCust(cdata); toast(`✅ +${pts} πόντοι για ${cdata.name}`,'success'); closeM();
+    _publishLeaderboard(); // refresh leaderboard after points change
+  } catch(e) { toast('❌ '+e.message,'error'); }
+  finally { _txnBusy = false; if (addBtn) { addBtn.disabled=false; addBtn.textContent='✅ Καταχώρηση'; } }
+}
+
+// ══════════════════════════════════════
+//  REDEEM
+// ══════════════════════════════════════
+function openRedeem() {
+  document.getElementById('mr-name').textContent=cdata?.name||'';
+  document.getElementById('mr-pts').textContent=cdata?.points||0;
+  document.getElementById('m-redeem').classList.add('show');
+}
+async function confirmRedeem() {
+  if (_txnBusy) { toast('⏳ Επεξεργασία σε εξέλιξη...','error'); return; }
+  if (Date.now() - _txnLastAt < _TXN_COOLDOWN) { toast('⏳ Περίμενε λίγο...','error'); return; }
+  if (!authState.authenticated) { toast('⛔ Δεν έχεις συνδεθεί!','error'); return; }
+  if (!navigator.onLine) { toast('🔴 Offline','error'); return; }
+  _txnBusy = true; _txnLastAt = Date.now();
+  const cost = parseInt(document.getElementById('mr-sel').value);
+  if (isNaN(cost) || cost <= 0) { toast('⚠️ Επίλεξε πακέτο εξαργύρωσης.','error'); _txnBusy = false; return; }
+  if (!Number.isInteger(cost)) { toast('⚠️ Μη έγκυρο ποσό πόντων.','error'); _txnBusy = false; return; }
+  const db = DB(), disc = (cost/250)*5;
+  const redeemBtn = document.querySelector('#m-redeem .btn-green');
+  if (redeemBtn) { redeemBtn.disabled=true; redeemBtn.textContent='⏳'; }
+  try {
+    // ── Atomic Transaction — prevents double-click / concurrent deductions ──
+    let newPts;
+    await window._runTransaction(db, async (txn) => {
+      const custRef  = window._doc(db, 'ipear_customers', cid);
+      const custSnap = await txn.get(custRef);
+      if (!custSnap.exists()) throw new Error('Πελάτης δεν βρέθηκε.');
+      const custData = custSnap.data();
+      if (custData.blocked === true) throw new Error('Ο πελάτης είναι blocked.');
+      const currentPts = custData.points || 0;
+      if (currentPts < cost) throw new Error(`Ανεπαρκείς πόντοι (${currentPts} < ${cost})`);
+      newPts = Math.max(0, currentPts - cost);
+      const nowIso = new Date().toISOString();
+      txn.update(custRef, { points: newPts });
+
+      const auditRef = window._doc(db, 'audit_logs', `manual_redeem_${cid}_${nowIso.replace(/[^0-9]/g,'')}`);
+      txn.set(auditRef, {
+        action: 'manual_redeem',
+        source: 'admin',
+        approvedByUid: _adminActorUid || '',
+        approvedAt: nowIso,
+        customerId: cid,
+        customerUid: custData.uid || cdata.uid || '',
+        code: null,
+        pointsDeducted: cost,
+        storeId: _storeId || null,
+        storeName: _storeName
+      });
+    });
+    await window._addDoc(window._col(db,'ipear_transactions'),
+      {customerId:cid,customerUid:cdata.uid||'',customerEmail:cdata.email||'',customerName:cdata.name,card:cdata.card,type:'redeem',points:-cost,discount:disc,storeId:_storeId||null,storeName:_storeName,date:new Date().toISOString()});
+    cdata.points=newPts; renderCust(cdata);
+    toast(`💶 Εξαργύρωση ${disc}€! Αφαιρέθηκαν ${cost} πόντοι.`,'success'); closeM();
+    _publishLeaderboard(); // refresh leaderboard after points change
+  } catch(e) { toast('❌ '+e.message,'error'); }
+  finally { _txnBusy = false; if (redeemBtn) { redeemBtn.disabled=false; redeemBtn.textContent='💶 Εξαργύρωση'; } }
+}
+
+// ══════════════════════════════════════
+//  DELETE
+// ══════════════════════════════════════
+let _deleteCustBusy = false;
+async function deleteCust() {
+  if (_deleteCustBusy) return;
+  if (!cid) return;
+  // ── Double-confirmation: type customer name to prevent accidental cascade delete ──
+  if (!confirm(`⚠️ Διαγραφή πελάτη "${cdata?.name}";\nΌλοι οι πόντοι χάνονται οριστικά!`)) return;
+  const typedName = prompt(`🛑 ΤΕΛΙΚΗ ΕΠΙΒΕΒΑΙΩΣΗ\n\nΓράψε το όνομα του πελάτη για να επιβεβαιώσεις:\n→ "${cdata?.name}"`);
+  if (!typedName || typedName.trim().toLowerCase() !== (cdata?.name || '').trim().toLowerCase()) {
+    alert('❌ Το όνομα δεν ταιριάζει. Η διαγραφή ακυρώθηκε.');
+    return;
+  }
+  _deleteCustBusy = true;
+  try {
+    const db = DB();
+    const phone = cdata?.phone || '';
+    const email = cdata?.email || '';
+    const card  = cdata?.card  || '';
+
+    // ── 1. Delete primary Firestore doc ──────────────────────────────
+    await window._deleteDoc(window._doc(db,'ipear_customers',cid));
+
+    // ── 2. CASCADE: find & delete ALL remaining docs with same phone/email/card ──
+    // Handles migration duplicates (old random-ID doc + new UID-based doc)
+    const uidsToDel = new Set();
+    const idsToDel = new Set([cid]); // track all customer doc IDs for downstream cleanup
+    if (cdata?.uid) uidsToDel.add(cdata.uid);
+    const orphanQueries = [];
+    if (phone) orphanQueries.push(window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('phone','==',phone))));
+    if (email) orphanQueries.push(window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('email','==',email))));
+    if (card)  orphanQueries.push(window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('card','==',card))));
+    const results = await Promise.allSettled(orphanQueries);
+    const orphanDels = [];
+    for (const r of results) {
+      if (r.status !== 'fulfilled' || r.value.empty) continue;
+      r.value.forEach(d => {
+        const od = d.data();
+        if (od.uid) uidsToDel.add(od.uid);
+        idsToDel.add(d.id);
+        orphanDels.push(window._deleteDoc(window._doc(db,'ipear_customers',d.id)));
+      });
+    }
+    if (orphanDels.length) await Promise.allSettled(orphanDels);
+
+    // ── 2b. IAM-FIX: CASCADE related collections (transactions, redemptions, queue) ──
+    try {
+      const relCleanup = [];
+      // Transactions — query by customerId for each known doc ID + by customerEmail/customerUid
+      const txQueries = [];
+      for (const _id of idsToDel) txQueries.push(window._getDocs(window._query(window._col(db,'ipear_transactions'),window._where('customerId','==',_id))));
+      if (email) txQueries.push(window._getDocs(window._query(window._col(db,'ipear_transactions'),window._where('customerEmail','==',email))));
+      for (const _uid of uidsToDel) txQueries.push(window._getDocs(window._query(window._col(db,'ipear_transactions'),window._where('customerUid','==',_uid))));
+      const txResults = await Promise.allSettled(txQueries);
+      const seenTxIds = new Set();
+      for (const r of txResults) {
+        if (r.status !== 'fulfilled' || r.value.empty) continue;
+        r.value.forEach(d => { if (!seenTxIds.has(d.id)) { seenTxIds.add(d.id); relCleanup.push(window._deleteDoc(window._doc(db,'ipear_transactions',d.id))); } });
+      }
+      // Redemptions — query by customerUid
+      for (const _uid of uidsToDel) {
+        const redQ = await window._getDocs(window._query(window._col(db,'ipear_redemptions'),window._where('customerUid','==',_uid)));
+        redQ.forEach(d => relCleanup.push(window._deleteDoc(window._doc(db,'ipear_redemptions',d.id))));
+      }
+      // Referral queue — keyed by UID
+      for (const _uid of uidsToDel) {
+        relCleanup.push(window._deleteDoc(window._doc(db,'ipear_referral_queue',_uid)).catch(() => {}));
+      }
+      // Notifications — query by customerUid (best-effort)
+      for (const _uid of uidsToDel) {
+        try {
+          const nQ = await window._getDocs(window._query(window._col(db,'ipear_notifications'),window._where('customerUid','==',_uid)));
+          nQ.forEach(d => relCleanup.push(window._deleteDoc(window._doc(db,'ipear_notifications',d.id))));
+        } catch(_) {}
+      }
+      // GDPR Art.17: Offer redemptions — query by customerId (auth UID)
+      for (const _uid of uidsToDel) {
+        try {
+          const ofQ = await window._getDocs(window._query(window._col(db,'ipear_offer_redemptions'),window._where('customerId','==',_uid)));
+          ofQ.forEach(d => relCleanup.push(window._deleteDoc(window._doc(db,'ipear_offer_redemptions',d.id))));
+        } catch(_) {}
+      }
+      // GDPR Art.17: Birthday claims — query by customerUid
+      for (const _uid of uidsToDel) {
+        try {
+          const bdQ = await window._getDocs(window._query(window._col(db,'ipear_birthday_claims'),window._where('customerUid','==',_uid)));
+          bdQ.forEach(d => relCleanup.push(window._deleteDoc(window._doc(db,'ipear_birthday_claims',d.id))));
+        } catch(_) {}
+      }
+      if (relCleanup.length) await Promise.allSettled(relCleanup);
+      // GDPR Art.17: Anonymize audit_logs (pseudonymization — keep log, strip PII)
+      for (const _uid of uidsToDel) {
+        try {
+          const auditQ = await window._getDocs(window._query(window._col(db,'audit_logs'),window._where('customerUid','==',_uid)));
+          const anonOps = [];
+          auditQ.forEach(d => anonOps.push(window._updateDoc(window._doc(db,'audit_logs',d.id), {
+            customerId: '[DELETED]', customerUid: '[DELETED]', _anonymizedAt: new Date().toISOString()
+          })));
+          if (anonOps.length) await Promise.allSettled(anonOps);
+        } catch(_) {}
+      }
+    } catch(cascadeErr) { logger.warn('[delete-cascade] partial failure:', cascadeErr?.message); }
+
+    // ── 3. Delete ALL Firebase Auth accounts found ───────────────────
+    // The worker uses Identity Toolkit admin API — without this step the email
+    // stays locked in Firebase Auth and the customer cannot re-register with
+    // the same email. We send BOTH uid (when known) AND email (as fallback)
+    // so the worker can resolve legacy customers without a stored uid.
+    const workerUrl = localStorage.getItem('ipear_worker_url');
+    const workerSec = _getWorkerSecret();
+    let authIssue = null;
+    if (!workerUrl || !workerSec) {
+      authIssue = 'no-worker';
+    } else {
+      const endpoint = workerUrl.replace(/\/$/, '') + '/admin/delete-auth-user';
+      const headers  = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + workerSec };
+      const targets = [];
+      // Always include each known uid
+      for (const uid of uidsToDel) targets.push({ uid, email });
+      // If we never collected a uid, attempt email-only fallback (worker resolves via Identity Toolkit lookup)
+      if (!targets.length && email) targets.push({ email });
+      const results = await Promise.allSettled(targets.map(payload =>
+        fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(payload) })
+          .then(async r => {
+            if (!r.ok) {
+              const body = await r.json().catch(() => ({}));
+              throw new Error(body.error || ('HTTP ' + r.status));
+            }
+            return r.json();
+          })
+      ));
+      const failed = results.filter(r => r.status === 'rejected');
+      if (failed.length) {
+        authIssue = 'partial';
+        logger.warn('[delete-auth] failures:', failed.map(f => f.reason?.message));
+      }
+    }
+
+    document.getElementById('cust-result').classList.remove('show');
+    document.getElementById('sinput').value='';
+    cid=null; cdata=null;
+    if (authIssue === 'no-worker') {
+      toast('⚠️ Πελάτης διαγράφηκε από Firestore, αλλά το Firebase Auth account ΠΑΡΑΜΕΝΕΙ — δεν είναι ρυθμισμένο το Worker secret. Διαγράψτε το χειροκίνητα από το Firebase Console για να μπορέσει ο πελάτης να ξαναγραφτεί.','error');
+    } else if (authIssue === 'partial') {
+      toast('⚠️ Ο πελάτης διαγράφηκε αλλά μέρος των Firebase Auth accounts ίσως παραμένει. Έλεγξε το Firebase Console.','error');
+    } else {
+      toast('🗑 Ο πελάτης διαγράφηκε.','success');
+    }
+    loadStats(); loadAll();
+  } catch(e) { toast('❌ '+e.message,'error'); }
+  finally { _deleteCustBusy = false; }
+}
+
+// ══════════════════════════════════════
+//  COMMUNICATION
+// ══════════════════════════════════════
+function openViber() {
+  if (!cdata?.phone) { toast('⚠️ Δεν υπάρχει τηλέφωνο!','error'); return; }
+  document.getElementById('mv-name').textContent=cdata.name;
+  document.getElementById('mv-phone').textContent=cdata.phone;
+  document.getElementById('m-viber').classList.add('show');
+}
+function openSMS() {
+  if (!cdata?.phone) { toast('⚠️ Δεν υπάρχει τηλέφωνο!','error'); return; }
+  document.getElementById('ms-name').textContent=cdata.name;
+  document.getElementById('ms-phone').textContent=cdata.phone;
+  document.getElementById('m-sms').classList.add('show');
+}
+function openEmail() {
+  if (!cdata?.email) { toast('⚠️ Δεν υπάρχει email!','error'); return; }
+  document.getElementById('me-name').textContent=cdata.name;
+  document.getElementById('me-addr').textContent=cdata.email;
+  document.getElementById('m-email').classList.add('show');
+}
+
+function buildMsg(type, ch) {
+  const fn=(cdata?.name||'Πελάτη').split(' ')[0];
+  const pts=cdata.points||0, tot=cdata.totalPoints||pts;
+  const t=tier(tot);
+  const nl=ch==='viber'?'\n':' ';
+  const msgs = {
+    pts:  `Γεια σου ${fn}!${nl}Έχεις ${pts} διαθέσιμους πόντους στο iPear Loyalty.${nl}Κατάταξη: ${t.icon} ${t.name} (${tot} lifetime).${nl}iPear — ipear.gr 📱`,
+    wel:  `Καλωσήρθες στο iPear Loyalty, ${fn}! 📱✨${nl}Ευχαριστούμε για την εγγραφή σου!${nl}1€ = 10 πόντοι. Συλλέγε & κέρδισε εκπτώσεις!`,
+    pro:  `Γεια σου ${fn}! 🎁${nl}Ειδική προσφορά μόνο για εσένα στο iPear!${nl}Νέα προϊόντα & custom θήκες σε περιμένουν. 📱`,
+  };
+  return msgs[type]||'';
+}
+
+// ── Viber (two-step: template → compose → deep link + clipboard) ──
+function sViber(t) {
+  const body = t === 'cust' ? '' : buildMsg(t, 'viber');
+  document.getElementById('mv-body').value = body;
+  const ph = (cdata?.phone||'').replace(/[\s\-()]/g,'');
+  document.getElementById('mv-phone2').textContent = ph.startsWith('+') ? ph : '+30' + ph;
+  document.getElementById('mv-tpl').style.display = 'none';
+  document.getElementById('mv-compose').style.display = '';
+  document.getElementById('mv-cancel').style.display = 'none';
+}
+function mvBack() {
+  document.getElementById('mv-tpl').style.display = '';
+  document.getElementById('mv-compose').style.display = 'none';
+  document.getElementById('mv-cancel').style.display = '';
+}
+function sendViberDeepLink() {
+  const msg = document.getElementById('mv-body').value.trim();
+  if (!msg) { toast('⚠️ Γράψε μήνυμα!', 'error'); return; }
+  const ph = (cdata?.phone||'').replace(/[\s\-()]/g,'');
+  const intlPh = ph.startsWith('+') ? ph : '+30' + ph;
+  window.open(`viber://chat?number=${encodeURIComponent(intlPh)}`, '_blank');
+  navigator.clipboard.writeText(msg)
+    .then(()  => toast('📱 Άνοιξε Viber! Το μήνυμα αντιγράφηκε στο clipboard.', 'success'))
+    .catch(()  => toast('📱 Άνοιξε Viber! Αντέγραψε το μήνυμα χειροκίνητα.', 'success'));
+  closeM();
+}
+
+// ── SMS (two-step: template → compose → Brevo API via worker) ──
+function sSMS(t) {
+  const body = t === 'cust' ? '' : buildMsg(t, 'sms');
+  document.getElementById('ms-body').value = body;
+  document.getElementById('ms-chars').textContent = body.length + '/160';
+  document.getElementById('ms-err').textContent = '';
+  document.getElementById('ms-tpl').style.display = 'none';
+  document.getElementById('ms-compose').style.display = '';
+  document.getElementById('ms-cancel').style.display = 'none';
+}
+function msBack() {
+  document.getElementById('ms-tpl').style.display = '';
+  document.getElementById('ms-compose').style.display = 'none';
+  document.getElementById('ms-cancel').style.display = '';
+}
+let _smsSendBusy = false;
+async function sendSMSIndividual() {
+  if (_smsSendBusy) return;
+  const workerUrl = localStorage.getItem('ipear_worker_url');
+  const workerSec = _getWorkerSecret();
+  if (!workerUrl || !workerSec) { toast('⚠️ Ορίστε τον Worker URL στις Ειδοποιήσεις πρώτα!', 'error'); closeM(); return; }
+  const message = document.getElementById('ms-body').value.trim();
+  const err = document.getElementById('ms-err');
+  if (!message) { err.textContent = '⚠️ Συμπλήρωσε μήνυμα'; return; }
+  _smsSendBusy = true;
+  const btn = document.getElementById('ms-send-btn');
+  btn.disabled = true; btn.textContent = '⏳ Αποστολή...';
+  err.textContent = '';
+  try {
+    const smsUrl = workerUrl.replace(/\/$/, '') + '/sms';
+    const response = await fetch(smsUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${workerSec}` },
+      body: JSON.stringify({ phone: cdata.phone, message }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    toast(`✅ SMS εστάλη στον/στην ${cdata.name}!`, 'success');
+    closeM();
+  } catch(e) {
+    err.textContent = '❌ ' + (e.message || 'Σφάλμα αποστολής');
+  } finally {
+    btn.disabled = false; btn.textContent = '📤 Αποστολή SMS';
+    _smsSendBusy = false;
+  }
+}
+
+// ── Email individual (two-step: template → compose → Brevo API via worker) ──
+function sEmail(t) {
+  const subj = { pts: 'Οι πόντοι σου — iPear', wel: 'Καλωσήρθες στο iPear Loyalty!', pro: 'Ειδική Προσφορά — iPear' };
+  document.getElementById('me-subject').value = subj[t] || '';
+  document.getElementById('me-body').value = t === 'cust' ? '' : buildMsg(t, 'email');
+  document.getElementById('me-err').textContent = '';
+  const btn = document.getElementById('me-send-btn');
+  btn.disabled = false; btn.textContent = '📤 Αποστολή';
+  document.getElementById('me-tpl').style.display = 'none';
+  document.getElementById('me-compose').style.display = '';
+  document.getElementById('me-cancel').style.display = 'none';
+}
+function meBack() {
+  document.getElementById('me-tpl').style.display = '';
+  document.getElementById('me-compose').style.display = 'none';
+  document.getElementById('me-cancel').style.display = '';
+}
+let _sendEmailIndBusy = false;
+async function sendEmailIndividual() {
+  if (_sendEmailIndBusy) return;
+  const workerUrl = localStorage.getItem('ipear_worker_url');
+  const workerSec = _getWorkerSecret();
+  if (!workerUrl || !workerSec) { toast('⚠️ Ορίστε τον Worker URL στις Ειδοποιήσεις πρώτα!', 'error'); closeM(); return; }
+  const subject = document.getElementById('me-subject').value.trim();
+  const message = document.getElementById('me-body').value.trim();
+  const err = document.getElementById('me-err');
+  if (!subject) { err.textContent = '⚠️ Συμπλήρωσε θέμα'; return; }
+  if (!message) { err.textContent = '⚠️ Συμπλήρωσε μήνυμα'; return; }
+  _sendEmailIndBusy = true;
+  const btn = document.getElementById('me-send-btn');
+  btn.disabled = true; btn.textContent = '⏳ Αποστολή...';
+  err.textContent = '';
+  try {
+    const finalMessage = message
+      .replace(/\{\{name\}\}/g, '{{params.name}}')
+      .replace(/\{\{points\}\}/g, '{{params.points}}');
+    const response = await fetch(workerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${workerSec}` },
+      body: JSON.stringify({
+        recipients: [{ email: cdata.email, name: cdata.name, points: String(cdata.points||0) }],
+        subject,
+        message: finalMessage,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    toast(`✅ Email εστάλη στον/στην ${cdata.name}!`, 'success');
+    closeM();
+  } catch(e) {
+    err.textContent = '❌ ' + (e.message || 'Σφάλμα αποστολής');
+    btn.disabled = false; btn.textContent = '📤 Αποστολή';
+  }
+  finally { _sendEmailIndBusy = false; }
+}
+function sendCustom() {
+  const msg=document.getElementById('cm-txt').value.trim();
+  if (!msg) { toast('⚠️ Γράψε μήνυμα!','error'); return; }
+  const ph=(cdata?.phone||'').replace(/[\s\-()]/g,'');
+  if (msgCh==='viber')  window.open(`viber://forward?text=${encodeURIComponent(msg)}`,'_blank'), toast('📱 Viber!','success');
+  if (msgCh==='sms')    window.open(`sms:${ph}?body=${encodeURIComponent(msg)}`,'_blank'), toast('📱 SMS!','success');
+  if (msgCh==='email')  window.open(`mailto:${cdata?.email}?subject=iPear Loyalty&body=${encodeURIComponent(msg)}`,'_blank'), toast('✉️ Email!','success');
+  document.getElementById('cm-txt').value=''; closeM();
+}
+
+// ══════════════════════════════════════
+//  EMAIL WORKER  →  moved to ./admin/email-worker.js
+// ══════════════════════════════════════
+
+// ══════════════════════════════════════
+//  BULK NOTIFICATIONS  →  moved to ./admin/bulk-notifications.js
+// ══════════════════════════════════════
+
+// ══════════════════════════════════════
+//  ALL CUSTOMERS TABLE
+// ══════════════════════════════════════
+let _activeSegment = null;
+
+let _allCustRows = []; // cached for client-side search filtering
+
+async function loadAll() {
+  if (!authState.authenticated) return;
+  if (!navigator.onLine) return;
+  const db=DB(); if(!db) return;
+  const tb=document.getElementById('ctbody');
+  tb.innerHTML='<tr><td colspan="6" class="empty"><span class="e">⏳</span>Φόρτωση...</td></tr>';
+  try {
+    const snap = (_lastCustSnap && Date.now() - _lastCustSnapAt < 5000) ? _lastCustSnap : await window._getDocs(window._col(db,'ipear_customers'));
+    if (snap.empty) { tb.innerHTML='<tr><td colspan="6" class="empty"><span class="e">📭</span>Κανένας πελάτης ακόμα</td></tr>'; _allCustRows=[]; return; }
+    // Determine which IDs to show (null = all)
+    const filterIds = (_activeSegment && window._segments?.[_activeSegment]) ? new Set(window._segments[_activeSegment]) : null;
+    // Collect all rows, then sort by totalPoints descending
+    const rows = [];
+    snap.forEach(d=>{
+      if (filterIds && !filterIds.has(d.id)) return;
+      const data=d.data(), pts=data.points||0, tot=data.totalPoints||pts;
+      rows.push({ id: d.id, data, pts, tot });
+    });
+    rows.sort((a,b) => b.tot - a.tot || (a.data.name||'').localeCompare(b.data.name||'','el'));
+    _allCustRows = rows;
+    _renderCustRows(rows);
+
+    // ── Auto-publish leaderboard for customer app ──
+    _publishLeaderboard(snap);
+
+  } catch(e) { tb.innerHTML='<tr><td colspan="6">❌ '+escHtml(e.message)+'</td></tr>'; }
+}
+
+function _renderCustRows(rows) {
+  const tb=document.getElementById('ctbody');
+  if (!rows.length) { tb.innerHTML='<tr><td colspan="6" class="empty"><span class="e">🔍</span>Κανένας πελάτης σε αυτό το segment</td></tr>'; return; }
+  let r='';
+  rows.forEach(({id,data,pts,tot})=>{
+    const t=tier(tot);
+    const rowCls = data.blocked ? ' class="row-blocked"' : data.suspicious ? ' class="row-suspicious"' : '';
+    const badge = data.blocked ? ' <span class="watchlist-badge wb-blocked">BLOCKED</span>'
+                : data.suspicious ? ' <span class="watchlist-badge wb-suspicious">SUSPECT</span>' : '';
+    const pushIcon = data.fcmToken ? ' <span class="push-bell" title="Push ενεργό" style="font-size:.7rem;opacity:.7">🔔</span>' : '<span class="push-bell"></span>';
+    r+=`<tr${rowCls} data-uid="${id}">
+      <td><strong>${escHtml(data.card)}</strong></td><td>${escHtml(data.name)}${pushIcon}${badge}</td><td>${escHtml(data.phone)}</td>
+      <td>
+        <strong style="color:#4caf50">${pts.toLocaleString('el-GR')}</strong>
+        <div style="font-size:.72rem;color:var(--gray)">Σύνολο: ${tot.toLocaleString('el-GR')}</div>
+      </td>
+      <td><span class="badge ${t.cls}">${t.icon} ${t.name}</span></td>
+      <td><button class="btn btn-green btn-sm" onclick="quickSel('${escJs(id)}')">Επιλογή</button></td>
+    </tr>`;
+  });
+  tb.innerHTML = r;
+}
+
+function _filterCustTable() {
+  const q = (document.getElementById('cust-search')?.value || '').trim().toLowerCase();
+  if (!q) { _renderCustRows(_allCustRows); return; }
+  const filtered = _allCustRows.filter(({data}) =>
+    (data.name||'').toLowerCase().includes(q) ||
+    (data.card||'').toLowerCase().includes(q) ||
+    (data.phone||'').includes(q) ||
+    (data.email||'').toLowerCase().includes(q)
+  );
+  _renderCustRows(filtered);
+}
+
+// ══════════════════════════════════════
+//  LEADERBOARD PUBLISH  →  moved to ./admin/leaderboard.js
+// ══════════════════════════════════════
+
+function clearSegmentFilter() {
+  _activeSegment = null;
+  const filterBar = document.getElementById('seg-filter-bar');
+  if (filterBar) filterBar.style.display = 'none';
+  loadAll();
+}
+async function quickSel(id) {
+  try {
+    const snap = await window._getDoc(window._doc(DB(),'ipear_customers',id));
+    if (snap.exists()) { cid=id; cdata=snap.data(); showTab('search'); renderCust(cdata); }
+  } catch(e) { toast('❌ '+e.message,'error'); }
+}
+
+// Process pending referral bonuses written by customer self-registration
+const MAX_REFERRALS_PER_USER = 5; // Each user can refer max 5 people
+async function processReferralQueue() {
+  if (!authState.authenticated) return;
+  const db = DB(); if (!db) return;
+  try {
+    const snap = await window._getDocs(
+      window._query(window._col(db,'ipear_referral_queue'), window._where('processed','==',false))
+    );
+    if (snap.empty) return;
+    for (const qDoc of snap.docs) {
+      const q = qDoc.data();
+      const markDone = (extra={}) => window._updateDoc(window._doc(db,'ipear_referral_queue',qDoc.id),
+        {processed:true, processedAt:new Date().toISOString(), ...extra}).catch(()=>{});
+      try {
+        // Verify legitimacy: look up the new customer's doc by stored ID
+        if (!q.newCustomerId) { await markDone({skipped:'no-id'}); continue; }
+        const ncSnap = await window._getDoc(window._doc(db,'ipear_customers',q.newCustomerId));
+        if (!ncSnap.exists()) { await markDone({skipped:'customer-not-found'}); continue; }
+        const ncData = ncSnap.data();
+        // Skip if already processed OR if the stored data no longer matches the customer doc
+        // This prevents duplicate queue entries from paying out more than once
+        if (ncData.referralProcessed ||
+            ncData.referredBy  !== q.referrerCard ||
+            ncData.uid         !== q.newCustomerUid) {
+          await markDone({skipped:'already-processed-or-mismatch'}); continue;
+        }
+
+        // Award referrer +100 pts + transaction (max 5 referrals per user)
+        const refSnap = await window._getDocs(
+          window._query(window._col(db,'ipear_customers'), window._where('card','==',q.referrerCard))
+        );
+        if (!refSnap.empty) {
+          let refId, refData;
+          refSnap.forEach(d => { refId = d.id; refData = d.data(); });
+          const refCount = refData.referralCount || 0;
+          if (refCount >= MAX_REFERRALS_PER_USER) {
+            // Referrer hit the 5-referral cap — revert new customer's 100 pts too
+            const ncCurr = ncData.points || 0;
+            const ncTotCurr = ncData.totalPoints || 0;
+            if (ncCurr >= 100 && ncTotCurr >= 100) {
+              await window._updateDoc(window._doc(db,'ipear_customers',q.newCustomerId),{
+                points: ncCurr - 100, totalPoints: ncTotCurr - 100, referralProcessed: true
+              });
+            }
+            await markDone({skipped:'referral-limit-reached', referrerCard:q.referrerCard});
+            continue;
+          }
+          const rPts = (refData.points||0)+100, rTot = (refData.totalPoints||refData.points||0)+100;
+          await window._updateDoc(window._doc(db,'ipear_customers',refId), {
+            points:rPts, totalPoints:rTot, referralCount: refCount + 1
+          });
+          await window._addDoc(window._col(db,'ipear_transactions'), {
+            customerId:refId, customerUid:refData.uid||'', customerEmail:refData.email||'', customerName:refData.name,
+            card:refData.card, type:'add', points:100, amount:0,
+            category:'🎁 Referral Bonus', note:`Παραπομπή: ${q.newCustomerCard} (${refCount+1}/${MAX_REFERRALS_PER_USER})`, date:new Date().toISOString()
+          });
+        }
+        // Write transaction for the NEW customer (skip if already written by self-registration)
+        try {
+          const existTx = await window._getDocs(window._query(
+            window._col(db,'ipear_transactions'),
+            window._where('customerId','==',q.newCustomerId),
+            window._where('category','==','🎁 Referral Bonus')
+          ));
+          if (existTx.empty) {
+            await window._addDoc(window._col(db,'ipear_transactions'), {
+              customerId:q.newCustomerId, customerUid:q.newCustomerUid||'', customerEmail:q.newCustomerEmail||'', customerName:q.newCustomerName,
+              card:q.newCustomerCard, type:'add', points:100, amount:0,
+              category:'🎁 Referral Bonus', note:'Bonus εγγραφής με referral', date:new Date().toISOString()
+            });
+          }
+        } catch(_) {
+          // Fallback: write anyway (duplicate is better than missing)
+          await window._addDoc(window._col(db,'ipear_transactions'), {
+            customerId:q.newCustomerId, customerUid:q.newCustomerUid||'', customerEmail:q.newCustomerEmail||'', customerName:q.newCustomerName,
+            card:q.newCustomerCard, type:'add', points:100, amount:0,
+            category:'🎁 Referral Bonus', note:'Bonus εγγραφής με referral', date:new Date().toISOString()
+          });
+        }
+        // Lock new customer's doc so duplicate queue entries can't re-process
+        await window._updateDoc(window._doc(db,'ipear_customers',q.newCustomerId), {referralProcessed:true});
+        await markDone();
+      } catch(_) {}
+    }
+  } catch(_) {}
+}
+
+// ══════════════════════════════════════
+//  STATS
+// ══════════════════════════════════════
+let _tierDonutChart = null;
+let _lastCustSnap = null;
+let _lastCustSnapAt = 0;
+let _loadStatsBusy = false;
+async function loadStats() {
+  if (!authState.authenticated) return;
+  if (!navigator.onLine) return;
+  if (_loadStatsBusy) return;
+  const db=DB(); if(!db) return;
+  _loadStatsBusy = true;
+  try {
+    const [csnap, tsnap] = await Promise.all([
+      window._getDocs(window._col(db,'ipear_customers')),
+      window._getDocs(window._col(db,'ipear_transactions'))
+    ]);
+    _lastCustSnap = csnap; _lastCustSnapAt = Date.now();
+    let given=0, redeemed=0, totalAvailPts=0, pushCount=0, blockedCount=0, suspiciousCount=0;
+    const tc={Bronze:0,Silver:0,Gold:0,Diamond:0,Platinum:0};
+    const txByCustomer={};
+    const now = new Date();
+    const d30ago = new Date(now - 30*86400000);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    let signupsThisMonth = 0;
+    const referrers = [];
+    const redeemCounts = {}; // track reward popularity
+
+    csnap.forEach(d=>{
+      const cd=d.data();
+      const t=tier(cd.totalPoints||cd.points||0);
+      tc[t.name]++;
+      totalAvailPts += cd.points||0;
+      if (cd.fcmToken) pushCount++;
+      if (cd.blocked) blockedCount++;
+      if (cd.suspicious) suspiciousCount++;
+      if (cd.createdAt && new Date(cd.createdAt) >= monthStart) signupsThisMonth++;
+      if ((cd.referralCount||0) > 0) referrers.push({ name: cd.name||'—', card: cd.card||'', count: cd.referralCount });
+    });
+
+    const active30Ids = new Set();
+    tsnap.forEach(d=>{
+      const x=d.data();
+      if(x.type==='add') {
+        given+=x.points||0;
+        if(x.customerId) txByCustomer[x.customerId]=(txByCustomer[x.customerId]||0)+1;
+        if(x.date && new Date(x.date)>=d30ago && x.customerId) active30Ids.add(x.customerId);
+      }
+      if(x.type==='redeem') {
+        redeemed+=Math.abs(x.points||0);
+        const lbl = (x.discount||0)+'€';
+        redeemCounts[lbl] = (redeemCounts[lbl]||0) + 1;
+      }
+    });
+
+    // Computed KPIs
+    const redemptionRate = given>0 ? (redeemed/given*100).toFixed(1)+'%' : '0%';
+    const redemDetail = given>0 ? redeemed.toLocaleString('el-GR')+' / '+given.toLocaleString('el-GR')+' πτ' : '';
+    const liability = (totalAvailPts*0.02).toFixed(0)+'€';
+    const loyalCount = Object.values(txByCustomer).filter(n=>n>=3).length;
+    const loyaltyRate = csnap.size>0 ? (loyalCount/csnap.size*100).toFixed(0)+'%' : '0%';
+    const pushPct = csnap.size>0 ? Math.round(pushCount/csnap.size*100) : 0;
+    const active30 = active30Ids.size;
+    const active30Pct = csnap.size>0 ? Math.round(active30/csnap.size*100) : 0;
+
+    // Top redeemed reward
+    let topReward = '—', topRewardCount = 0;
+    for (const [lbl, cnt] of Object.entries(redeemCounts)) {
+      if (cnt > topRewardCount) { topReward = lbl; topRewardCount = cnt; }
+    }
+
+    // ── Populate Dashboard ──
+    document.getElementById('sc').textContent = csnap.size;
+    document.getElementById('dash-signups').innerHTML = '📈 <span class="dash-trend-up">+'+signupsThisMonth+'</span> αυτό τον μήνα';
+    document.getElementById('sk-redem').textContent = redemptionRate;
+    document.getElementById('dash-redem-detail').textContent = redemDetail;
+    document.getElementById('sk-liab').textContent = liability;
+    document.getElementById('dash-liab-pts').textContent = totalAvailPts.toLocaleString('el-GR')+' πόντοι';
+    document.getElementById('sk-clv').textContent = '—'; // filled by renderAnalytics
+    document.getElementById('dash-loyalty-rate').textContent = 'Loyalty Rate: '+loyaltyRate;
+    document.getElementById('dash-active30').textContent = active30;
+    document.getElementById('dash-active30-pct').textContent = active30Pct+'% της βάσης';
+    document.getElementById('dash-push-count').textContent = pushCount+'/'+csnap.size;
+    document.getElementById('dash-push-bar').style.width = pushPct+'%';
+    document.getElementById('dash-push-pct').textContent = pushPct+'% reachable';
+    document.getElementById('dash-top-reward').textContent = topReward;
+    document.getElementById('dash-top-reward-count').textContent = topRewardCount>0 ? topRewardCount+' εξαργυρώσεις' : 'Καμία ακόμα';
+    document.getElementById('dash-blocked').textContent = blockedCount + (suspiciousCount ? ' / '+suspiciousCount : '');
+    document.getElementById('dash-total-tx').textContent = tsnap.size+' συναλλαγές';
+    document.getElementById('su').textContent = new Date().toLocaleString('el-GR');
+
+    // ── Tier Donut Chart (Chart.js) ──
+    const tierData = [
+      { n:'Platinum', i:'👑', c:'#d4af37', v:tc.Platinum },
+      { n:'Diamond',  i:'💎', c:'#6ba3d6', v:tc.Diamond },
+      { n:'Gold',     i:'🥇', c:'#d4a017', v:tc.Gold },
+      { n:'Silver',   i:'🥈', c:'#a8b2c1', v:tc.Silver },
+      { n:'Bronze',   i:'🥉', c:'#cd7f32', v:tc.Bronze },
+    ];
+    const donutEl = document.getElementById('tier-donut-chart');
+    if (donutEl && typeof Chart !== 'undefined') {
+      if (_tierDonutChart) _tierDonutChart.destroy();
+      _tierDonutChart = new Chart(donutEl, {
+        type: 'doughnut',
+        data: {
+          labels: tierData.map(t => t.i+' '+t.n),
+          datasets: [{ data: tierData.map(t => t.v), backgroundColor: tierData.map(t => t.c), borderWidth: 2, borderColor: '#fff' }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          cutout: '62%',
+          plugins: {
+            legend: { position:'bottom', labels: { padding:14, usePointStyle:true, pointStyleWidth:10, font:{size:11,weight:'600'} } },
+            tooltip: { callbacks: { label: ctx => ' '+ctx.label+': '+ctx.parsed+' ('+Math.round(ctx.parsed/csnap.size*100)+'%)' } }
+          }
+        }
+      });
+    }
+    // Mini tier bars below donut
+    const total = csnap.size || 1;
+    document.getElementById('tier-bd').innerHTML = tierData.map(t => `
+      <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:.78rem">
+        <span style="width:18px;text-align:center">${t.i}</span>
+        <span style="width:55px;font-weight:600">${t.n}</span>
+        <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
+          <div style="height:100%;background:${t.c};border-radius:3px;width:${Math.round(t.v/total*100)}%;transition:width .4s"></div>
+        </div>
+        <span style="font-weight:800;width:24px;text-align:right">${t.v}</span>
+      </div>`).join('');
+
+    // ── Top 10 Referrers ──
+    referrers.sort((a,b) => b.count - a.count);
+    const top10ref = referrers.slice(0,10);
+    const refEl = document.getElementById('kpi-top-referrers');
+    if (!top10ref.length) {
+      refEl.innerHTML = '<li style="color:var(--gray);font-size:.85rem;justify-content:center;padding:14px">Κανένας referrer ακόμα</li>';
+    } else {
+      const medals = ['🥇','🥈','🥉'];
+      refEl.innerHTML = top10ref.map((r,i) => `<li>
+        <div class="ref-rank" style="${i>=3?'background:#555;color:#fff;font-size:.72rem':''}">${medals[i]||'#'+(i+1)}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:.85rem">${escHtml(r.name)}</div>
+          <div style="font-size:.72rem;color:var(--gray)">${escHtml(r.card)}</div>
+        </div>
+        <div style="font-weight:900;font-size:1rem;color:${r.count>=5?'#d4af37':'var(--green)'}">${r.count}<span style="font-weight:600;font-size:.72rem;color:var(--gray)">/${MAX_REFERRALS_PER_USER}</span></div>
+      </li>`).join('');
+    }
+
+    // ── Push Notifications Table ──
+    const pushCustomers = [];
+    csnap.forEach(d => {
+      const cd = d.data();
+      if (cd.fcmToken) pushCustomers.push({ name: cd.name||'—', card: cd.card||'', phone: cd.phone||'' });
+    });
+    const pushEl = document.getElementById('push-customers-list');
+    if (!pushCustomers.length) {
+      pushEl.innerHTML = '<div style="color:var(--gray);font-size:.85rem;text-align:center;padding:14px">Κανένας πελάτης με ενεργές ειδοποιήσεις</div>';
+    } else {
+      pushEl.innerHTML = `
+        <table style="width:100%;border-collapse:collapse;font-size:.83rem">
+          <thead><tr style="border-bottom:2px solid var(--border)">
+            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">#</th>
+            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Πελάτης</th>
+            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Κάρτα</th>
+            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Τηλέφωνο</th>
+          </tr></thead>
+          <tbody>${pushCustomers.map((c,i) => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:8px 10px;color:var(--gray)">${i+1}</td>
+              <td style="padding:8px 10px;font-weight:600">${escHtml(c.name)}</td>
+              <td style="padding:8px 10px;font-size:.8rem;color:var(--gray)">${escHtml(c.card)}</td>
+              <td style="padding:8px 10px;font-size:.8rem">${escHtml(c.phone)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <div style="font-size:.75rem;color:var(--gray);margin-top:8px;text-align:right">🔔 ${pushCustomers.length} / ${csnap.size} πελάτες με push ενεργό</div>`;
+    }
+
+    renderSegments(csnap, tsnap);
+    _processBirthdayClaims().catch(e => logger.warn('[birthday-auto]', e.message));
+  } catch(e) { logger.error(e); } finally { _loadStatsBusy = false; }
+}
+
+// ══════════════════════════════════════
+//  BIRTHDAY CLAIMS AUTO-PROCESSOR  →  moved to ./admin/birthday-claims.js
+// ══════════════════════════════════════
+
+// ══════════════════════════════════════
+//  TRANSACTIONS
+// ══════════════════════════════════════
+let _historyBusy = false;
+async function loadTx() {
+  if (!authState.authenticated) return;
+  if (!navigator.onLine) return;
+  if (_historyBusy) { logger.log('[loadTx] ⏳ already loading, ignoring duplicate call'); return; }
+  const db=DB(); if(!db) return;
+  const el=document.getElementById('txlist');
+  const refreshBtn = document.querySelector('button[onclick="loadTx()"]');
+  _historyBusy = true;
+  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.dataset._origText = refreshBtn.innerHTML; refreshBtn.innerHTML = '⏳ Φόρτωση...'; }
+  el.innerHTML='<div class="empty"><span class="e">⏳</span>Φόρτωση...</div>';
+  try {
+    const q=window._query(window._col(db,'ipear_transactions'),window._orderBy('date','desc'),window._limit(30));
+    const snap=await window._getDocs(q);
+    if (snap.empty) { el.innerHTML='<div class="empty"><span class="e">📭</span>Καμία συναλλαγή ακόμα</div>'; return; }
+    let html='';
+    snap.forEach(d=>{
+      const t=d.data();
+      const dt=new Date(t.date);
+      const ds=dt.toLocaleDateString('el-GR')+' '+dt.toLocaleTimeString('el-GR',{hour:'2-digit',minute:'2-digit'});
+      let det, cls;
+      if (t.type==='add')            { cls='add';    det=`🛒 ${t.category||'Αγορά'}`; }
+      else if (t.type==='redeem')    { cls='redeem'; det=`💶 Έκπτωση ${t.discount||''}€`; }
+      else if (t.type==='expire')    { cls='redeem'; det=`⏳ Εκπνοή Πόντων`; }
+      else if (t.type==='tier_downgrade') { cls='redeem'; det=`📉 Tier Downgrade`; }
+      else { cls=t.points>=0?'add':'redeem'; det=t.category||t.type||'Συναλλαγή'; }
+      if (t.note && t.type!=='tier_downgrade') det+=` · ${t.note}`;
+      const ptsSign = t.points>=0?'+':'';
+      html+=`<div class="tx-item">
+        <div><div class="tx-name">${escHtml(t.customerName||'—')}</div><div class="tx-det">${escHtml(t.card||'—')} · ${escHtml(det)}</div></div>
+        <div><div class="tx-pts ${cls}">${ptsSign}${Number(t.points).toLocaleString('el-GR')}</div><div class="tx-date">${ds}</div></div>
+      </div>`;
+    });
+    el.innerHTML=html;
+  } catch(e) {
+    el.innerHTML='<div class="empty">❌ '+escHtml(e.message)+'</div>';
+  } finally {
+    _historyBusy = false;
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.innerHTML = refreshBtn.dataset._origText || '🔄 Ανανέωση'; }
+  }
+}
+
+// ══════════════════════════════════════
+//  OFFERS  →  moved to ./admin/offers.js
+// ══════════════════════════════════════
+
+// ══════════════════════════════════════
+//  VERIFY REDEMPTION CODE  →  moved to ./admin/redemption-verify.js
+// ══════════════════════════════════════
+
+// ════════════════════════════════════════
+//  OFFER APPROVALS  →  moved to ./admin/approvals.js
+// ════════════════════════════════════════
+// ════════════════════════════════════════
+//  PUSH NOTIFICATIONS — Real-time listener  →  moved to ./admin/push-listener.js
+// ════════════════════════════════════════
+
+// confirmOfferVerify  →  moved to ./admin/redemption-verify.js
+
+// ══════════════════════════════════════
+//  BACKUP
+// ══════════════════════════════════════
+async function exportBk() {
+  if (!navigator.onLine) { toast('🔴 Offline','error'); return; }
+  document.getElementById('exspin').classList.add('show');
+  try {
+    const db=DB();
+    const cs=await window._getDocs(window._col(db,'ipear_customers'));
+    const ts=await window._getDocs(window._col(db,'ipear_transactions'));
+    const custs=[],txs=[];
+    cs.forEach(d=>custs.push({id:d.id,...d.data()}));
+    ts.forEach(d=>txs.push({id:d.id,...d.data()}));
+    const bk={exportDate:new Date().toISOString(),version:'1.0',system:'iPear Loyalty',data:{customers:custs,transactions:txs}};
+    const blob=new Blob([JSON.stringify(bk,null,2)],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    const now=new Date();
+    a.download=`iPear_Backup_${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}.json`;
+    a.click(); URL.revokeObjectURL(a.href);
+    toast(`✅ Backup εξήχθη! (${custs.length} πελάτες)`,'success');
+  } catch(e) { toast('❌ '+e.message,'error'); }
+  document.getElementById('exspin').classList.remove('show');
+}
+async function importBk(ev) {
+  const file=ev.target.files[0]; if(!file) return;
+  if (!navigator.onLine) { toast('🔴 Offline','error'); ev.target.value=''; return; }
+  if (!confirm('⚠️ Θα προστεθούν δεδομένα από το backup. Συνέχεια;')) { ev.target.value=''; return; }
+  const reader=new FileReader();
+  reader.onload=async e=>{
+    try {
+      const bk=JSON.parse(e.target.result);
+      if (!bk.data?.customers) { toast('❌ Μη έγκυρο αρχείο!','error'); return; }
+      const db=DB();
+      const exSnap=await window._getDocs(window._col(db,'ipear_customers'));
+      const cards=new Set(); exSnap.forEach(d=>{ if(d.data().card)cards.add(d.data().card); });
+      let added=0,skipped=0,txAdded=0;
+      for(const c of bk.data.customers){
+        const data={...c}; delete data.id;
+        if(cards.has(data.card)){skipped++;continue;}
+        await window._addDoc(window._col(db,'ipear_customers'),data); added++; cards.add(data.card);
+      }
+      for(const t of (bk.data.transactions||[])){
+        const data={...t}; const origId=data.id; delete data.id;
+        await window._setDoc(window._doc(db,'ipear_transactions',origId),data); txAdded++;
+      }
+      toast(`✅ ${added} πελάτες, ${txAdded} συναλλαγές (παράλειψη: ${skipped})`,'success');
+      loadStats(); loadTx(); loadAll();
+    } catch(err){ toast('❌ '+err.message,'error'); }
+    ev.target.value='';
+  };
+  reader.readAsText(file);
+}
+
+// ══════════════════════════════════════
+//  ANALYTICS  →  moved to ./admin/analytics.js
+// ══════════════════════════════════════
+
+// ══════════════════════════════════════
+//  CUSTOMER EDIT
+// ══════════════════════════════════════
+function openEdit() {
+  if (!cdata) return;
+  document.getElementById('edit-cid').value = cid;
+  document.getElementById('ed-name').value  = cdata.name  || '';
+  document.getElementById('ed-phone').value = cdata.phone || '';
+  document.getElementById('ed-email').value = cdata.email || '';
+  document.getElementById('ed-bday').value  = cdata.birthday || '';
+  document.getElementById('m-edit').classList.add('show');
+}
+async function saveEdit() {
+  if (!authState.authenticated) { toast('⛔ Δεν έχεις συνδεθεί!','error'); return; }
+  const name  = document.getElementById('ed-name').value.trim();
+  const phone = document.getElementById('ed-phone').value.trim().replace(/[\s\-()]/g,'');
+  const email = document.getElementById('ed-email').value.trim().toLowerCase();
+  const birthday = document.getElementById('ed-bday').value;
+  if (!name || !phone) { toast('⚠️ Όνομα και τηλέφωνο υποχρεωτικά!','error'); return; }
+  if (!/^6\d{9}$/.test(phone)) { toast('⚠️ Το τηλέφωνο πρέπει να είναι ελληνικός αριθμός κινητού (π.χ. 6912345678)','error'); return; }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast('⚠️ Εισάγετε έγκυρο email','error'); return; }
+  // Validate birthday is not in the future
+  if (birthday && new Date(birthday) > new Date()) { toast('⚠️ Η ημερομηνία γέννησης δεν μπορεί να είναι στο μέλλον','error'); return; }
+  try {
+    await window._updateDoc(window._doc(DB(),'ipear_customers',cid), {name,phone,email,birthday});
+    Object.assign(cdata, {name,phone,email,birthday});
+    renderCust(cdata);
+    toast('✅ Τα στοιχεία ενημερώθηκαν!','success'); closeM();
+    loadAll();
+  } catch(e) { toast('❌ '+e.message,'error'); }
+}
+
+// ══════════════════════════════════════
+//  SEGMENTS
+// ══════════════════════════════════════
+function renderSegments(csnap, tsnap) {
+  const now = new Date();
+  const txByCustomer = {};
+  tsnap.forEach(d => {
+    const tx = d.data();
+    if (!txByCustomer[tx.customerId]) txByCustomer[tx.customerId] = [];
+    txByCustomer[tx.customerId].push(tx);
+  });
+
+  const segs = { champions:[], loyal:[], atRisk:[], dormant:[], newC:[], all:0 };
+  segs.all = csnap.size;
+
+  csnap.forEach(d => {
+    const c = d.data(); const id = d.id;
+    const txs = (txByCustomer[id]||[]).filter(t=>t.type==='add');
+    const createdAt = new Date(c.createdAt||0);
+    const daysSinceJoin = (now-createdAt)/86400000;
+
+    const last30 = txs.filter(t => (now-new Date(t.date))<30*86400000);
+    const lastTx = txs.length ? Math.max(...txs.map(t=>new Date(t.date))) : null;
+    const daysSinceLast = lastTx ? (now-lastTx)/86400000 : 999;
+
+    if (daysSinceJoin <= 30) { segs.newC.push(id); return; }
+    if (last30.length >= 3)  { segs.champions.push(id); return; }
+    if (daysSinceLast <= 60 && (c.totalPoints||0) >= 500) { segs.loyal.push(id); return; }
+    if (daysSinceLast >= 60 && daysSinceLast < 90 && (c.points||0) > 0) { segs.atRisk.push(id); return; }
+    if (daysSinceLast >= 90)  { segs.dormant.push(id); }
+  });
+
+  const defs = [
+    { key:'champions', icon:'🏆', label:'Champions',  color:'#8ae900', bg:'#f0ffe0', desc:'3+ αγορές/μήνα' },
+    { key:'loyal',     icon:'⚡', label:'Loyal',      color:'#2196f3', bg:'#e3f2fd', desc:'Τακτικοί πελάτες' },
+    { key:'newC',      icon:'🆕', label:'Νέοι',       color:'#9c27b0', bg:'#f3e5f5', desc:'< 30 ημέρες' },
+    { key:'atRisk',    icon:'⚠️', label:'At Risk',    color:'#ff9800', bg:'#fff3e0', desc:'60-90 ημέρες αδράνεια' },
+    { key:'dormant',   icon:'😴', label:'Αδρανείς',   color:'#e53935', bg:'#fff3f3', desc:'90+ ημέρες' },
+  ];
+
+  document.getElementById('seg-grid').innerHTML = defs.map(s => `
+    <div style="background:${s.bg};border:1.5px solid ${s.color}33;border-radius:13px;padding:14px 12px;cursor:pointer"
+         title="${s.desc}" onclick="filterBySegment('${s.key}')">
+      <div style="font-size:1.5rem;margin-bottom:6px">${s.icon}</div>
+      <div style="font-size:1.8rem;font-weight:900;color:${s.color};line-height:1">${segs[s.key].length}</div>
+      <div style="font-size:.78rem;font-weight:700;color:#555;margin-top:4px">${s.label}</div>
+      <div style="font-size:.72rem;color:#888;margin-top:2px">${s.desc}</div>
+    </div>
+  `).join('') + `
+    <div style="background:#f5f5f5;border:1.5px solid #ddd;border-radius:13px;padding:14px 12px">
+      <div style="font-size:1.5rem;margin-bottom:6px">👥</div>
+      <div style="font-size:1.8rem;font-weight:900;color:#333;line-height:1">${segs.all}</div>
+      <div style="font-size:.78rem;font-weight:700;color:#555;margin-top:4px">Σύνολο</div>
+      <div style="font-size:.72rem;color:#888;margin-top:2px">Εγγεγραμμένοι</div>
+    </div>`;
+
+  // Store for filter use
+  window._segments = segs;
+}
+
+const _SEG_LABELS = { champions:'🏆 Champions', loyal:'⚡ Loyal', newC:'🆕 Νέοι', atRisk:'⚠️ At Risk', dormant:'😴 Αδρανείς' };
+
+function filterBySegment(key) {
+  if (!window._segments || !window._segments[key]) return;
+  _activeSegment = key;
+  const count = window._segments[key].length;
+  const label = _SEG_LABELS[key] || key;
+  const filterBar = document.getElementById('seg-filter-bar');
+  const filterLabel = document.getElementById('seg-filter-label');
+  if (filterBar)  { filterBar.style.display = 'flex'; }
+  if (filterLabel){ filterLabel.textContent = `🎯 Φίλτρο: ${label} — ${count} πελάτες`; }
+  showTab('customers');
+  loadAll();
+}
+
+// ══════════════════════════════════════
+//  CSV EXPORT
+// ══════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════
+//  PUSH NOTIFICATIONS (FCM)  →  moved to ./admin/push-fcm.js
+// ══════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════
+//  PREVIEW RECIPIENTS & COST (Email + SMS)
+// ══════════════════════════════════════════════════════════════════
+
+const SMS_COST_PER_MSG = 0.05; // €0.05 per SMS (Brevo Greece GSM-7)
+
+async function previewSmsBulk() {
+  const est = document.getElementById('sms-bulk-estimate');
+  est.style.display = 'block';
+  est.innerHTML = '⏳ Μέτρηση παραληπτών...';
+  try {
+    const db = DB(); if (!db) throw new Error('Δεν υπάρχει σύνδεση');
+    const target = document.getElementById('sms-target').value;
+    const snap = await window._getDocs(window._col(db, 'ipear_customers'));
+    let count = 0;
+    snap.forEach(d => {
+      const c = d.data();
+      const phone = (c.phone || '').replace(/[\s\-()]/g, '');
+      if (!phone || phone.length < 10) return;
+      if (target !== 'all') {
+        const t = tier(c.totalPoints || c.points || 0);
+        if (t.name !== target) return;
+      }
+      count++;
+    });
+    const cost = (count * SMS_COST_PER_MSG).toFixed(2);
+    est.innerHTML = `<strong>📱 ${count} παραλήπτες</strong> — Εκτιμώμενο κόστος: <strong style="font-size:1.1rem">€${cost}</strong><br><span style="font-size:.76rem;color:#999">Τιμή: €${SMS_COST_PER_MSG}/SMS × ${count} = €${cost}</span>`;
+  } catch(e) {
+    est.innerHTML = '❌ ' + escHtml(e.message);
+  }
+}
+
+async function previewEmailBulk() {
+  const est = document.getElementById('email-bulk-estimate');
+  est.style.display = 'block';
+  est.innerHTML = '⏳ Μέτρηση παραληπτών...';
+  try {
+    const db = DB(); if (!db) throw new Error('Δεν υπάρχει σύνδεση');
+    const target = document.getElementById('email-target').value;
+    const snap = await window._getDocs(window._col(db, 'ipear_customers'));
+    let count = 0;
+    let withEmail = 0;
+    if (target === 'one') {
+      count = window._emailOneSelected ? 1 : 0;
+    } else {
+      snap.forEach(d => {
+        const c = d.data();
+        if (!c.email || !c.email.includes('@')) return;
+        if (target !== 'all') {
+          const t = tier(c.totalPoints || c.points || 0);
+          if (t.name !== target) return;
+        }
+        withEmail++;
+        if (c.marketingOptIn === true) count++;
+      });
+    }
+    const freeLimit = 300;
+    const overFree = count > freeLimit;
+    const optedOut = target === 'one' ? 0 : (withEmail - count);
+    const consentNote = optedOut > 0
+      ? `<br><span style="font-size:.76rem;color:#c97c00">⚠️ ${optedOut} πελάτ${optedOut === 1 ? 'ης' : 'ες'} με email δεν έχουν δώσει marketing consent — εξαιρούνται (GDPR)</span>`
+      : '';
+    est.innerHTML = `<strong>📧 ${count} παραλήπτες</strong> — Κόστος: <strong style="font-size:1.1rem">${overFree ? '⚠️ Υπέρβαση Free Plan' : 'ΔΩΡΕΑΝ'}</strong>`
+      + `<br><span style="font-size:.76rem;color:#999">Free Plan: ${freeLimit}/ημέρα — ${overFree ? 'Χρειάζεσαι Starter Plan (€19/μο) για ' + count + ' emails' : count + '/' + freeLimit + ' διαθέσιμα σήμερα'}</span>`
+      + consentNote;
+  } catch(e) {
+    est.innerHTML = '❌ ' + escHtml(e.message);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  BULK SMS (Brevo API)
+// ══════════════════════════════════════════════════════════════════
+
+const SMS_BULK_TPLS = {
+  promo:   'Ειδικη προσφορα μονο σημερα στο iPear! Περνα να τη δεις! 📱✨',
+  points:  'Υπενθυμιση: εχεις ποντους στο iPear Loyalty! Ελα να τους εξαργυρωσεις! 🎁',
+  arrival: 'Νεα προιοντα μολις εφτασαν στο iPear! Custom θηκες, gadgets & αξεσουαρ. 📱',
+  repair:  'Χρειαζεσαι επισκευη; Στο iPear αναλαμβανουμε με εγγυηση. Κλεισε ραντεβου! 🔧',
+};
+
+function fillSmsBulkTpl(key) {
+  const ta = document.getElementById('sms-bulk-body');
+  ta.value = SMS_BULK_TPLS[key] || '';
+  document.getElementById('sms-bulk-chars').textContent = ta.value.length + '/160';
+}
+
+let _sendSMSBulkBusy = false;
+async function sendSMSBulk() {
+  if (_sendSMSBulkBusy) return;
+  const workerUrl = localStorage.getItem('ipear_worker_url');
+  const workerSec = _getWorkerSecret();
+  if (!workerUrl || !workerSec) {
+    toast('⚠️ Ρύθμισε πρώτα τον Worker (κουμπί Ρυθμίσεις)!', 'error');
+    document.getElementById('worker-cfg-panel').style.display = 'block';
+    document.getElementById('worker-cfg-toggle').textContent = '▲ Απόκρυψη';
+    return;
+  }
+
+  const target  = document.getElementById('sms-target').value;
+  const message = document.getElementById('sms-bulk-body').value.trim();
+  if (!message) { toast('⚠️ Συμπλήρωσε Μήνυμα!', 'error'); return; }
+
+  const btn  = document.getElementById('send-sms-bulk-btn');
+  const prog = document.getElementById('sms-bulk-progress');
+  const res  = document.getElementById('sms-bulk-result');
+
+  _sendSMSBulkBusy = true;
+  btn.disabled = true; btn.textContent = '⏳ Αποστολή...';
+  prog.style.display = 'block'; prog.textContent = '⏳ Φόρτωση πελατών...';
+  res.innerHTML = '';
+
+  try {
+    const db = DB(); if (!db) throw new Error('Δεν υπάρχει σύνδεση');
+    const snap = await window._getDocs(window._col(db, 'ipear_customers'));
+
+    const recipients = [];
+    snap.forEach(d => {
+      const c = d.data();
+      const phone = (c.phone || '').replace(/[\s\-()]/g, '');
+      if (!phone || phone.length < 10) return;
+      if (c.marketingOptIn !== true) return;
+      if (target !== 'all') {
+        const t = tier(c.totalPoints || c.points || 0);
+        if (t.name !== target) return;
+      }
+      recipients.push({ phone, name: c.name || '' });
+    });
+
+    if (!recipients.length) {
+      prog.style.display = 'none';
+      res.innerHTML = '<div style="background:#fff3f3;border:1px solid #e53935;border-radius:10px;padding:14px;color:#c62828;font-size:.85rem">⚠️ Δεν βρέθηκαν πελάτες με τηλέφωνο για αυτή την κατηγορία.</div>';
+      return;
+    }
+
+    // Confirmation
+    if (!confirm(`Θέλεις σίγουρα να στείλεις SMS σε ${recipients.length} πελάτες;\n\nΚόστος: ~€${(recipients.length * 0.05).toFixed(2)}\nΜήνυμα: ${message.slice(0, 60)}...`)) {
+      prog.style.display = 'none';
+      return;
+    }
+
+    prog.textContent = `📤 Αποστολή σε ${recipients.length} παραλήπτες...`;
+
+    const smsUrl = workerUrl.replace(/\/$/, '') + '/bulk-sms';
+    const response = await fetch(smsUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${workerSec}`,
+      },
+      body: JSON.stringify({ recipients, message }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+
+    prog.style.display = 'none';
+    const failedLine = data.failed > 0
+      ? `<div style="margin-top:4px;color:#e53935">❌ Απέτυχαν: <strong>${data.failed}</strong></div>` : '';
+    res.innerHTML = `<div style="background:linear-gradient(135deg,#f0ffe0,#e8ffcc);border:1px solid #8ae900;border-radius:12px;padding:18px">
+      <div style="font-weight:800;font-size:1.05rem;color:#3a6000;margin-bottom:8px">✅ Μαζικό SMS ολοκληρώθηκε!</div>
+      <div style="font-size:.87rem;color:#555;line-height:1.9">
+        📤 Εστάλησαν: <strong style="color:#3a6000">${data.sent}</strong>
+        ${failedLine}
+        👥 Σύνολο: <strong>${data.total}</strong>
+      </div>
+    </div>`;
+    toast(`✅ SMS εστάλη σε ${data.sent} πελάτες!`, 'success');
+
+  } catch(e) {
+    prog.style.display = 'none';
+    res.innerHTML = `<div style="background:#fff3f3;border:1px solid #e53935;border-radius:10px;padding:14px;color:#c62828;font-size:.85rem">❌ Σφάλμα: ${escHtml(e.message)}</div>`;
+    toast('❌ ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '📱 Αποστολή Μαζικού SMS';
+    _sendSMSBulkBusy = false;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  MAINTENANCE — POINTS EXPIRY & TIER DOWNGRADE
+// ══════════════════════════════════════════════════════════════════
+
+let _expireTargets   = [];
+let _downgradeTargets = [];
+
+async function previewExpirePoints() {
+  const db = DB(); if (!db) return;
+  const btn       = document.getElementById('btn-expire-exec');
+  const previewEl = document.getElementById('expire-preview');
+  btn.style.display = 'none';
+  previewEl.innerHTML = '<div style="text-align:center;padding:16px;color:var(--gray)">⏳ Ανάλυση...</div>';
+
+  try {
+    const [csnap, tsnap] = await Promise.all([
+      window._getDocs(window._col(db,'ipear_customers')),
+      window._getDocs(window._col(db,'ipear_transactions'))
+    ]);
+
+    // Last transaction date per customer
+    const lastTxDate = {};
+    tsnap.forEach(d => {
+      const tx = d.data();
+      if (!tx.customerId || !tx.date) return;
+      const dt = new Date(tx.date);
+      if (!lastTxDate[tx.customerId] || dt > lastTxDate[tx.customerId])
+        lastTxDate[tx.customerId] = dt;
+    });
+
+    const cutoff = new Date();
+    cutoff.setFullYear(cutoff.getFullYear() - 1);
+
+    _expireTargets = [];
+    csnap.forEach(d => {
+      const c = { id: d.id, ...d.data() };
+      if (!c.points || c.points <= 0) return;
+      const last = lastTxDate[c.id] || (c.createdAt ? new Date(c.createdAt) : null);
+      if (!last || last < cutoff) _expireTargets.push({ ...c, lastDate: last });
+    });
+
+    if (!_expireTargets.length) {
+      previewEl.innerHTML = '<div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:14px;font-size:.85rem;text-align:center;color:#3a6e00">✅ Κανένας πελάτης δεν πληροί τα κριτήρια λήξης.</div>';
+      return;
+    }
+
+    const totalPts = _expireTargets.reduce((s,c)=>s+(c.points||0),0);
+    let html = `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:10px 14px;font-size:.82rem;margin-bottom:10px;color:#856404">
+      ⚠️ <strong>${_expireTargets.length}</strong> πελάτες — <strong>${totalPts.toLocaleString('el-GR')}</strong> πόντοι θα μηδενιστούν
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;font-size:.79rem;border-collapse:collapse">
+      <thead><tr style="background:var(--green-pale);font-weight:700">
+        <th style="padding:6px 8px;text-align:left">Πελάτης</th>
+        <th style="padding:6px 8px;text-align:right">Πόντοι</th>
+        <th style="padding:6px 8px;text-align:right">Τελ. Αγορά</th>
+      </tr></thead><tbody>`;
+    for (const c of _expireTargets.slice(0,25)) {
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px">${escHtml(c.name)} <span style="color:var(--gray);font-size:.75rem">${escHtml(c.card)}</span></td>
+        <td style="padding:5px 8px;text-align:right;color:#dc3545;font-weight:700">${(c.points||0).toLocaleString('el-GR')}</td>
+        <td style="padding:5px 8px;text-align:right;color:var(--gray)">${c.lastDate ? c.lastDate.toLocaleDateString('el-GR') : 'Ποτέ'}</td>
+      </tr>`;
+    }
+    if (_expireTargets.length > 25) html += `<tr><td colspan="3" style="text-align:center;padding:7px;color:var(--gray);font-size:.76rem">...και ${_expireTargets.length-25} ακόμα</td></tr>`;
+    html += '</tbody></table></div>';
+
+    previewEl.innerHTML = html;
+    btn.style.display = '';
+  } catch(e) { previewEl.innerHTML = ''; toast('❌ '+e.message,'error'); }
+}
+
+async function executeExpirePoints() {
+  if (!_expireTargets.length) return;
+  if (!confirm(`Μηδενισμός πόντων για ${_expireTargets.length} πελάτες;\nΑυτή η ενέργεια ΔΕΝ αναιρείται.`)) return;
+  const db = DB(); if (!db) return;
+  const btn = document.getElementById('btn-expire-exec');
+  btn.textContent = '⏳ Εκτέλεση...'; btn.disabled = true;
+
+  let done=0, failed=0;
+  for (const c of _expireTargets) {
+    try {
+      await window._updateDoc(window._doc(db,'ipear_customers',c.id), { points: 0 });
+      await window._addDoc(window._col(db,'ipear_transactions'), {
+        customerId: c.id, customerUid: c.uid||'', customerEmail: c.email||'', customerName: c.name, card: c.card,
+        type: 'expire', points: -(c.points||0), amount: 0,
+        category: '⏳ Εκπνοή Πόντων',
+        note: `Μηδενισμός λόγω αδράνειας 12+ μηνών`,
+        storeId: _storeId||null, storeName: _storeName,
+        date: new Date().toISOString()
+      });
+      done++;
+    } catch(_) { failed++; }
+  }
+  _expireTargets = [];
+  btn.style.display = 'none'; btn.disabled = false; btn.textContent = '🗑️ Εφαρμογή';
+  document.getElementById('expire-preview').innerHTML = '';
+  toast(`✅ Εκπνοή: ${done} πελάτες μηδενίστηκαν${failed ? ' · '+failed+' σφάλματα':''}`,'success');
+}
+
+// ── Tier Downgrade ──────────────────────────────────────────────
+
+async function previewTierDowngrade() {
+  const db = DB(); if (!db) return;
+  const btn       = document.getElementById('btn-downgrade-exec');
+  const previewEl = document.getElementById('downgrade-preview');
+  btn.style.display = 'none';
+  previewEl.innerHTML = '<div style="text-align:center;padding:16px;color:var(--gray)">⏳ Ανάλυση...</div>';
+
+  try {
+    const [csnap, tsnap] = await Promise.all([
+      window._getDocs(window._col(db,'ipear_customers')),
+      window._getDocs(window._col(db,'ipear_transactions'))
+    ]);
+
+    const thisYear = new Date().getFullYear();
+    const activeThisYear = new Set();
+    tsnap.forEach(d => {
+      const tx = d.data();
+      if (tx.customerId && tx.date && new Date(tx.date).getFullYear() === thisYear)
+        activeThisYear.add(tx.customerId);
+    });
+
+    _downgradeTargets = [];
+    csnap.forEach(d => {
+      const c = { id: d.id, ...d.data() };
+      if (activeThisYear.has(c.id)) return;
+      const tot = c.totalPoints || c.points || 0;
+      const t = tier(tot);
+      if (t.name === 'Bronze') return;
+      const newTot = t.name==='Platinum' ? 9999 : t.name==='Diamond' ? 5999 : t.name==='Gold' ? 2999 : 999;
+      _downgradeTargets.push({ ...c, currentTier: t, newTier: tier(newTot), newTot });
+    });
+
+    if (!_downgradeTargets.length) {
+      previewEl.innerHTML = '<div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:14px;font-size:.85rem;text-align:center;color:#3a6e00">✅ Κανένας πελάτης δεν πληροί τα κριτήρια downgrade.</div>';
+      return;
+    }
+
+    let html = `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:10px 14px;font-size:.82rem;margin-bottom:10px;color:#856404">
+      ⚠️ <strong>${_downgradeTargets.length}</strong> πελάτες χωρίς αγορά το ${thisYear}
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;font-size:.79rem;border-collapse:collapse">
+      <thead><tr style="background:var(--green-pale);font-weight:700">
+        <th style="padding:6px 8px;text-align:left">Πελάτης</th>
+        <th style="padding:6px 8px;text-align:center">Από</th>
+        <th style="padding:6px 8px;text-align:center">→ Σε</th>
+      </tr></thead><tbody>`;
+    for (const c of _downgradeTargets.slice(0,25)) {
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px">${escHtml(c.name)} <span style="color:var(--gray);font-size:.75rem">${escHtml(c.card)}</span></td>
+        <td style="padding:5px 8px;text-align:center">${c.currentTier.icon} ${escHtml(c.currentTier.name)}</td>
+        <td style="padding:5px 8px;text-align:center;font-weight:700;color:#dc3545">${c.newTier.icon} ${escHtml(c.newTier.name)}</td>
+      </tr>`;
+    }
+    if (_downgradeTargets.length > 25) html += `<tr><td colspan="3" style="text-align:center;padding:7px;color:var(--gray);font-size:.76rem">...και ${_downgradeTargets.length-25} ακόμα</td></tr>`;
+    html += '</tbody></table></div>';
+
+    previewEl.innerHTML = html;
+    btn.style.display = '';
+  } catch(e) { previewEl.innerHTML = ''; toast('❌ '+e.message,'error'); }
+}
+
+async function executeTierDowngrade() {
+  if (!_downgradeTargets.length) return;
+  if (!confirm(`Tier Downgrade για ${_downgradeTargets.length} πελάτες;\nΤα lifetime points τους θα μειωθούν. Αυτή η ενέργεια ΔΕΝ αναιρείται.`)) return;
+  const db = DB(); if (!db) return;
+  const btn = document.getElementById('btn-downgrade-exec');
+  btn.textContent = '⏳ Εκτέλεση...'; btn.disabled = true;
+
+  let done=0, failed=0;
+  for (const c of _downgradeTargets) {
+    try {
+      await window._updateDoc(window._doc(db,'ipear_customers',c.id), { totalPoints: c.newTot });
+      await window._addDoc(window._col(db,'ipear_transactions'), {
+        customerId: c.id, customerUid: c.uid||'', customerEmail: c.email||'', customerName: c.name, card: c.card,
+        type: 'tier_downgrade',
+        points: c.newTot - (c.totalPoints || 0),  // negative: shows actual points reduction in history
+        amount: 0,
+        category: '📉 Tier Downgrade',
+        note: `${c.currentTier.icon} ${c.currentTier.name} → ${c.newTier.icon} ${c.newTier.name} (αδράνεια ${new Date().getFullYear()})`,
+        storeId: _storeId||null, storeName: _storeName,
+        date: new Date().toISOString()
+      });
+      done++;
+    } catch(_) { failed++; }
+  }
+  _downgradeTargets = [];
+  btn.style.display = 'none'; btn.disabled = false; btn.textContent = '📉 Εφαρμογή';
+  document.getElementById('downgrade-preview').innerHTML = '';
+  toast(`✅ Tier Downgrade: ${done} πελάτες ανανεώθηκαν${failed ? ' · '+failed+' σφάλματα':''}`,'success');
+}
+
+// ══════════════════════════════════════
+//  PART 2: GOD-MODE KPI OVERVIEW (Fast aggregation — P-1 fix)
+// ══════════════════════════════════════
+// P-1 fix: use server-side aggregation queries (getCountFromServer + sum())
+// for the two KPIs that don't need per-doc iteration. These resolve in ~50ms
+// regardless of collection size and cost a fraction of a full collection scan
+// (one aggregation read vs. N document reads). loadStats() still runs in
+// parallel for the rich tier/redemption/blocked breakdowns that genuinely
+// need per-doc data.
+let _kpiOverviewBusy = false;
+async function loadKpiOverview() {
+  if (_kpiOverviewBusy) return;
+  if (!authState.authenticated) return;
+  if (!navigator.onLine) return;
+  const db = DB(); if (!db) return;
+  if (typeof window._getCountFromServer !== 'function') return;
+  _kpiOverviewBusy = true;
+  try {
+    const customersCol = window._col(db, 'ipear_customers');
+    const transactionsCol = window._col(db, 'ipear_transactions');
+    const [custCount, txCount, liabAgg] = await Promise.all([
+      window._getCountFromServer(customersCol),
+      window._getCountFromServer(transactionsCol),
+      window._getAggregateFromServer(customersCol, { totalPts: window._sum('points') })
+    ]);
+    const nCust = custCount.data().count;
+    const nTx   = txCount.data().count;
+    const liabPts = liabAgg.data().totalPts || 0;
+    // These DOM nodes are also written by loadStats — that's fine; whoever
+    // finishes last wins, and both produce the same numbers.
+    const sc = document.getElementById('sc');
+    const sl = document.getElementById('sk-liab');
+    const dl = document.getElementById('dash-liab-pts');
+    const dt = document.getElementById('dash-total-tx');
+    if (sc) sc.textContent = nCust;
+    if (sl) sl.textContent = (liabPts * 0.02).toFixed(0) + '€';
+    if (dl) dl.textContent = liabPts.toLocaleString('el-GR') + ' πόντοι';
+    if (dt) dt.textContent = nTx + ' συναλλαγές';
+  } catch(e) {
+    logger.warn('[loadKpiOverview] aggregation failed (will fall back to loadStats):', e.message);
+  } finally {
+    _kpiOverviewBusy = false;
+  }
+}
+
+// ── Orphan Cleanup Scanner ──
+async function _scanOrphans() {
+  const el = document.getElementById('orphan-results');
+  el.innerHTML = '<div style="text-align:center;padding:14px;color:var(--gray)">⏳ Σάρωση βάσης...</div>';
+  const db = DB(); if (!db) return;
+  try {
+    const [csnap, tsnap] = await Promise.all([
+      window._getDocs(window._col(db,'ipear_customers')),
+      window._getDocs(window._col(db,'ipear_transactions'))
+    ]);
+    const customerIds = new Set();
+    const customerMap = {};
+    csnap.forEach(d => { customerIds.add(d.id); customerMap[d.id] = d.data(); });
+
+    // 1. Orphan transactions (customerId not in customers collection)
+    const orphanTxs = [];
+    const txCustomerIds = new Set();
+    tsnap.forEach(d => {
+      const tx = d.data();
+      if (tx.customerId) txCustomerIds.add(tx.customerId);
+      if (tx.customerId && !customerIds.has(tx.customerId)) {
+        orphanTxs.push({ id: d.id, customerId: tx.customerId, name: tx.customerName||'—', type: tx.type, date: tx.date });
+      }
+    });
+
+    // 2. Ghost customers (in DB but 0 transactions ever)
+    const ghostCustomers = [];
+    csnap.forEach(d => {
+      if (!txCustomerIds.has(d.id)) {
+        const cd = d.data();
+        ghostCustomers.push({ id: d.id, name: cd.name||'—', card: cd.card||'', phone: cd.phone||'', created: cd.createdAt||'' });
+      }
+    });
+
+    // Group orphan txs by customerId
+    const orphanGroups = {};
+    orphanTxs.forEach(tx => {
+      if (!orphanGroups[tx.customerId]) orphanGroups[tx.customerId] = { name: tx.name, txs: [] };
+      orphanGroups[tx.customerId].txs.push(tx);
+    });
+
+    let html = '';
+
+    if (Object.keys(orphanGroups).length === 0 && ghostCustomers.length === 0) {
+      html = '<div style="text-align:center;padding:18px;color:var(--green);font-weight:700;font-size:1rem">✅ Η βάση είναι καθαρή — δεν βρέθηκαν ορφανά!</div>';
+    } else {
+      // Orphan transactions
+      if (Object.keys(orphanGroups).length > 0) {
+        html += '<div style="margin-bottom:14px"><div style="font-weight:700;color:#e53935;margin-bottom:8px">⚠️ '+orphanTxs.length+' ορφανές συναλλαγές ('+Object.keys(orphanGroups).length+' διαγραμμένοι πελάτες)</div>';
+        html += '<table style="width:100%;border-collapse:collapse;font-size:.82rem"><thead><tr style="border-bottom:2px solid var(--border)">';
+        html += '<th style="text-align:left;padding:6px 10px;color:var(--gray)">Πελάτης</th>';
+        html += '<th style="text-align:right;padding:6px 10px;color:var(--gray)">Συν/γές</th>';
+        html += '<th style="text-align:center;padding:6px 10px;color:var(--gray)">Ενέργεια</th></tr></thead><tbody>';
+        for (const [cid, grp] of Object.entries(orphanGroups)) {
+          html += '<tr style="border-bottom:1px solid var(--border)">';
+          html += '<td style="padding:8px 10px"><strong>'+escHtml(grp.name)+'</strong><div style="font-size:.72rem;color:var(--gray)">ID: '+escHtml(cid.substring(0,12))+'...</div></td>';
+          html += '<td style="text-align:right;padding:8px 10px">'+grp.txs.length+'</td>';
+          html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#e53935;color:#fff;font-size:.72rem" onclick="_deleteOrphanTxs(\''+escJs(cid)+'\')">🗑️ Διαγραφή</button></td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table></div>';
+      }
+
+      // Ghost customers
+      if (ghostCustomers.length > 0) {
+        html += '<div><div style="font-weight:700;color:#f57c00;margin-bottom:8px">👻 '+ghostCustomers.length+' πελάτες χωρίς καμία συναλλαγή</div>';
+        html += '<table style="width:100%;border-collapse:collapse;font-size:.82rem"><thead><tr style="border-bottom:2px solid var(--border)">';
+        html += '<th style="text-align:left;padding:6px 10px;color:var(--gray)">Όνομα</th>';
+        html += '<th style="text-align:left;padding:6px 10px;color:var(--gray)">Κάρτα</th>';
+        html += '<th style="text-align:left;padding:6px 10px;color:var(--gray)">Εγγραφή</th>';
+        html += '<th style="text-align:center;padding:6px 10px;color:var(--gray)">Ενέργεια</th></tr></thead><tbody>';
+        ghostCustomers.forEach(c => {
+          const created = c.created ? new Date(c.created).toLocaleDateString('el-GR') : '—';
+          html += '<tr style="border-bottom:1px solid var(--border)">';
+          html += '<td style="padding:8px 10px"><strong>'+escHtml(c.name)+'</strong><div style="font-size:.72rem;color:var(--gray)">'+escHtml(c.phone)+'</div></td>';
+          html += '<td style="padding:8px 10px;font-size:.8rem">'+escHtml(c.card)+'</td>';
+          html += '<td style="padding:8px 10px;font-size:.8rem;color:var(--gray)">'+created+'</td>';
+          html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#f57c00;color:#fff;font-size:.72rem" onclick="_deleteGhostCustomer(\''+escJs(c.id)+'\',\''+escJs(c.name)+'\')">🗑️ Διαγραφή</button></td>';
+          html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+      }
+    }
+
+    el.innerHTML = html;
+  } catch(e) { el.innerHTML = '<div style="color:#e53935;padding:10px">❌ '+escHtml(e.message)+'</div>'; }
+}
+
+async function _deleteOrphanTxs(customerId) {
+  if (!confirm('Θα διαγραφούν ΟΛΕΣ οι συναλλαγές αυτού του πελάτη. Συνέχεια;')) return;
+  const db = DB(); if (!db) return;
+  try {
+    const q = window._query(window._col(db,'ipear_transactions'), window._where('customerId','==',customerId));
+    const snap = await window._getDocs(q);
+    let count = 0;
+    for (const d of snap.docs || []) { await window._deleteDoc(d.ref); count++; }
+    if (!count) {
+      const fallbackDocs = [];
+      snap.forEach(d => fallbackDocs.push(d));
+      for (const d of fallbackDocs) { await window._deleteDoc(window._doc(db,'ipear_transactions',d.id)); count++; }
+    }
+    toast('✅ Διαγράφηκαν '+count+' ορφανές συναλλαγές','success');
+    _scanOrphans();
+  } catch(e) { toast('❌ '+e.message,'error'); }
+}
+
+// ── Full System Health Check ──
+async function _runSystemHealthCheck() {
+  const el = document.getElementById('health-results');
+  el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--gray)"><div style="font-size:2rem;margin-bottom:8px">⏳</div>Εκτέλεση ελέγχου...</div>';
+
+  const checks = [];
+  function pass(label, detail) { checks.push({ status:'pass', label, detail }); }
+  function warn(label, detail) { checks.push({ status:'warn', label, detail }); }
+  function fail(label, detail) { checks.push({ status:'fail', label, detail }); }
+
+  // 1. Firebase Connection
+  try {
+    const db = DB();
+    if (db) {
+      const testSnap = await window._getDocs(window._col(db,'ipear_customers'));
+      pass('🔥 Firebase Firestore', 'Σύνδεση OK — '+testSnap.size+' πελάτες');
+    } else {
+      fail('🔥 Firebase Firestore', 'Δεν βρέθηκε σύνδεση DB');
+    }
+  } catch(e) { fail('🔥 Firebase Firestore', e.message); }
+
+  // 2. Worker Health
+  const workerUrl = (localStorage.getItem('ipear_worker_url')||'').replace(/\/$/,'');
+  if (!workerUrl) {
+    warn('⚙️ Cloudflare Worker', 'Δεν έχει ρυθμιστεί Worker URL');
+  } else {
+    try {
+      const r = await fetch(workerUrl+'/health',{signal:AbortSignal.timeout(8000)});
+      if (r.ok) {
+        const d = await r.json();
+        const brevo = d.brevo ? '✅' : '❌';
+        const fcm = d.fcm ? '✅' : '❌';
+        pass('⚙️ Cloudflare Worker', 'Online — Brevo: '+brevo+' FCM: '+fcm);
+      } else {
+        fail('⚙️ Cloudflare Worker', 'HTTP '+r.status);
+      }
+    } catch(e) { fail('⚙️ Cloudflare Worker', 'Unreachable — '+e.message); }
+  }
+
+  // 3. Service Worker
+  if ('serviceWorker' in navigator) {
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      if (regs.length) {
+        pass('📦 Service Workers', regs.length+' registered — scope: '+regs.map(r=>r.scope.split('/').pop()||'/').join(', '));
+      } else {
+        warn('📦 Service Workers', 'Κανένας SW εγγεγραμμένος');
+      }
+    } catch(e) { warn('📦 Service Workers', e.message); }
+  } else {
+    warn('📦 Service Workers', 'Δεν υποστηρίζεται');
+  }
+
+  // 4. Database Integrity
+  try {
+    const db = DB();
+    const [csnap, tsnap] = await Promise.all([
+      window._getDocs(window._col(db,'ipear_customers')),
+      window._getDocs(window._col(db,'ipear_transactions'))
+    ]);
+    const custIds = new Set();
+    let _noPts=0, noName=0, noCard=0, pushCount=0, negPts=0;
+    csnap.forEach(d => {
+      custIds.add(d.id);
+      const c=d.data();
+      if (!c.name) noName++;
+      if (!c.card) noCard++;
+      if ((c.points||0)<0) negPts++;
+      if (c.fcmToken) pushCount++;
+      if ((c.points||0)===0 && (c.totalPoints||0)===0) _noPts++;
+    });
+
+    // Orphan transactions
+    let orphanTx=0;
+    const txCustIds = new Set();
+    tsnap.forEach(d => {
+      const tx=d.data();
+      if(tx.customerId) txCustIds.add(tx.customerId);
+      if(tx.customerId && !custIds.has(tx.customerId)) orphanTx++;
+    });
+
+    // Ghost customers
+    let ghosts=0;
+    csnap.forEach(d => { if(!txCustIds.has(d.id)) ghosts++; });
+
+    // Duplicate cards
+    const cards={};
+    csnap.forEach(d => { const c=d.data().card; if(c) cards[c]=(cards[c]||0)+1; });
+    const dupes = Object.entries(cards).filter(([,v])=>v>1);
+
+    if (orphanTx===0 && dupes.length===0 && negPts===0) {
+      pass('🗄️ Ακεραιότητα Βάσης', csnap.size+' πελάτες, '+tsnap.size+' συναλλαγές — OK');
+    } else {
+      const issues = [];
+      if(orphanTx) issues.push(orphanTx+' ορφανές συναλλαγές');
+      if(dupes.length) issues.push(dupes.length+' διπλές κάρτες');
+      if(negPts) issues.push(negPts+' αρνητικοί πόντοι');
+      warn('🗄️ Ακεραιότητα Βάσης', issues.join(' · '));
+    }
+
+    // Stats summary
+    pass('📊 Στατιστικά Βάσης',
+      'Πελάτες: '+csnap.size+' · Συναλλαγές: '+tsnap.size+' · Push: '+pushCount+'/'+csnap.size+' · Χωρίς αγορά: '+ghosts);
+
+    if(noName) warn('👤 Ελλιπή Στοιχεία', noName+' πελάτες χωρίς όνομα');
+    if(noCard) warn('🪪 Ελλιπή Στοιχεία', noCard+' πελάτες χωρίς κάρτα');
+    if(dupes.length) warn('🔁 Διπλές Κάρτες', dupes.map(([c,n])=>c+' (×'+n+')').join(', '));
+  } catch(e) { fail('🗄️ Ακεραιότητα Βάσης', e.message); }
+
+  // 5. Browser / PWA
+  const online = navigator.onLine;
+  if(online) pass('🌐 Σύνδεση Internet', 'Online'); else fail('🌐 Σύνδεση Internet', 'Offline');
+
+  const storage = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
+  if(storage) {
+    const usedMB = (storage.usage/1024/1024).toFixed(1);
+    const quotaMB = (storage.quota/1024/1024).toFixed(0);
+    pass('💾 Storage', usedMB+'MB χρησιμοποιούνται / '+quotaMB+'MB quota');
+  }
+
+  // 6. Manifest check
+  try {
+    const mResp = await fetch('/manifest.json');
+    if(mResp.ok) pass('📄 Manifest', 'manifest.json ✓');
+    else warn('📄 Manifest', 'HTTP '+mResp.status);
+  } catch(e) { warn('📄 Manifest', 'Δεν βρέθηκε'); }
+
+  // Render results
+  const icons = { pass:'✅', warn:'⚠️', fail:'❌' };
+  const _colors = { pass:'#4caf50', warn:'#f57c00', fail:'#e53935' };
+  const passCount = checks.filter(c=>c.status==='pass').length;
+  const warnCount = checks.filter(c=>c.status==='warn').length;
+  const failCount = checks.filter(c=>c.status==='fail').length;
+
+  let scoreColor = '#4caf50';
+  let scoreEmoji = '🟢';
+  if (failCount > 0) { scoreColor='#e53935'; scoreEmoji='🔴'; }
+  else if (warnCount > 0) { scoreColor='#f57c00'; scoreEmoji='🟡'; }
+
+  let html = `<div style="text-align:center;margin-bottom:16px">
+    <div style="font-size:2.2rem;font-weight:900;color:${scoreColor}">${scoreEmoji} ${passCount}/${checks.length}</div>
+    <div style="font-size:.82rem;color:var(--gray)">
+      <span style="color:#4caf50;font-weight:700">${passCount} pass</span> ·
+      <span style="color:#f57c00;font-weight:700">${warnCount} warnings</span> ·
+      <span style="color:#e53935;font-weight:700">${failCount} failures</span>
+    </div>
+  </div>`;
+
+  html += '<div style="display:flex;flex-direction:column;gap:6px">';
+  checks.forEach(c => {
+    html += `<div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:${c.status==='fail'?'#fff5f5':c.status==='warn'?'#fff8e6':'#f5fff5'};border-radius:10px;border:1px solid ${c.status==='fail'?'#ffcdd2':c.status==='warn'?'#ffe0b2':'#c8e6c9'}">
+      <span style="font-size:1.1rem;flex-shrink:0">${icons[c.status]}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:.88rem;color:var(--black)">${c.label}</div>
+        <div style="font-size:.78rem;color:var(--gray);margin-top:2px">${c.detail}</div>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  html += '<div style="font-size:.72rem;color:var(--gray);text-align:right;margin-top:10px">Τελευταίος έλεγχος: '+new Date().toLocaleString('el-GR')+'</div>';
+
+  el.innerHTML = html;
+}
+
+async function _deleteGhostCustomer(id, name) {
+  if (!confirm('Θα διαγραφεί ο πελάτης «'+name+'» (χωρίς συναλλαγές). Συνέχεια;')) return;
+  const db = DB(); if (!db) return;
+  try {
+    await window._deleteDoc(window._doc(db,'ipear_customers',id));
+    toast('✅ Διαγράφηκε: '+name,'success');
+    _scanOrphans();
+    loadStats();
+  } catch(e) { toast('❌ '+e.message,'error'); }
+}
+
+// ══════════════════════════════════════
+//  PART 3: WORKER HEALTH CHECK  →  moved to ./admin/email-worker.js
+// ══════════════════════════════════════
+
+// ══════════════════════════════════════
+//  PART 5: KILL SWITCH (MAINTENANCE MODE)
+// ══════════════════════════════════════
+let _maintenanceUnsub = null;
+let _maintenanceMode = false;
+
+function startMaintenanceListener() {
+  if (_maintenanceUnsub || window.DEMO) return;
+  const db = DB(); if (!db) return;
+  const ref = window._doc(db, 'settings', 'system');
+  _maintenanceUnsub = window._onSnapshot(ref, snap => {
+    if (!snap.exists()) { _updateKillSwitchUI(false); return; }
+    const data = snap.data();
+    _maintenanceMode = !!data.maintenance;
+    _updateKillSwitchUI(_maintenanceMode);
+  }, err => logger.warn('[maintenance] listener error:', err));
+}
+
+function _updateKillSwitchUI(active) {
+  const wrap = document.getElementById('kill-switch-wrap');
+  const toggle = document.getElementById('ks-toggle');
+  const text = document.getElementById('ks-status-text');
+  if (!wrap) return;
+  if (active) {
+    wrap.classList.add('active-maint');
+    toggle.classList.add('on');
+    text.textContent = 'ΕΝΕΡΓΟ — οι εξαργυρώσεις είναι απενεργοποιημένες σε όλα τα κανάλια';
+  } else {
+    wrap.classList.remove('active-maint');
+    toggle.classList.remove('on');
+    text.textContent = 'Απενεργοποιημένο — οι εξαργυρώσεις λειτουργούν κανονικά';
+  }
+}
+
+async function toggleKillSwitch() {
+  if (!authState.authenticated) return;
+  const db = DB(); if (!db) return;
+  const newVal = !_maintenanceMode;
+  const msg = newVal
+    ? 'Θέλεις σίγουρα να ΕΝΕΡΓΟΠΟΙΗΣΕΙΣ τη Λειτουργία Συντήρησης;\n\nΟι εξαργυρώσεις θα απενεργοποιηθούν σε ΟΛΑ τα κανάλια (customer app, tablet).'
+    : 'Απενεργοποίηση Λειτουργίας Συντήρησης;\n\nΟι εξαργυρώσεις θα ξαναλειτουργήσουν κανονικά.';
+  if (!confirm(msg)) return;
+  try {
+    await window._setDoc(window._doc(db, 'settings', 'system'), {
+      maintenance: newVal,
+      maintenanceUpdatedAt: new Date().toISOString(),
+      maintenanceUpdatedBy: _adminActorUid || 'admin'
+    });
+    toast(newVal ? '🔴 Λειτουργία Συντήρησης ΕΝΕΡΓΗ' : '✅ Λειτουργία Συντήρησης ΑΠΕΝΕΡΓΟΠΟΙΗΘΗΚΕ', newVal ? 'error' : 'success');
+  } catch(e) { toast('❌ ' + e.message, 'error'); }
+}
+
+async function exportCSV() {
+  const db=DB(); if(!db) return;
+  try {
+    const snap = await window._getDocs(window._col(db,'ipear_customers'));
+    const rows = [['Κάρτα','Ονοματεπώνυμο','Τηλέφωνο','Email','Πόντοι','Lifetime Πόντοι','Tier','Γενέθλια','Ημ. Εγγραφής']];
+    snap.forEach(d => {
+      const c = d.data();
+      const t = tier(c.totalPoints||c.points||0);
+      rows.push([
+        c.card||'', c.name||'', c.phone||'', c.email||'',
+        c.points||0, c.totalPoints||0, t.name,
+        c.birthday||'',
+        c.createdAt ? new Date(c.createdAt).toLocaleDateString('el-GR') : ''
+      ]);
+    });
+    const bom = '﻿'; // UTF-8 BOM for Excel
+    const csvSafe = v => { let s = String(v).replace(/"/g,'""'); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return `"${s}"`; };
+    const csv = bom + rows.map(r => r.map(csvSafe).join(',')).join('\r\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `ipear-pelates-${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    toast('✅ CSV εξήχθη επιτυχώς!','success');
+  } catch(e) { toast('❌ '+e.message,'error'); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  WINDOW EXPORTS — required for inline HTML event handlers (onclick, etc.)
+// ═══════════════════════════════════════════════════════════════════════════
+window.unlock = unlock;
+window.adminLogout = adminLogout;
+window.showTab = showTab;
+window.search = search;
+window.quickSel = quickSel;
+window.openAdd = openAdd;
+window.confirmAdd = confirmAdd;
+window.openRedeem = openRedeem;
+window.confirmRedeem = confirmRedeem;
+window.openEdit = openEdit;
+window.saveEdit = saveEdit;
+window.blockCust = blockCust;
+window.deleteCust = deleteCust;
+window.verifyCode = verifyCode;
+window.confirmVerify = confirmVerify;
+window.confirmOfferVerify = confirmOfferVerify;
+window.register = register;
+window.loadStats = loadStats;
+window.loadAnalytics = loadAnalytics;
+window.loadTx = loadTx;
+window.openSMS = openSMS;
+window.openEmail = openEmail;
+window.openViber = openViber;
+window.closeM = closeM;
+window.meBack = meBack;
+window.msBack = msBack;
+window.mvBack = mvBack;
+window.fillTpl = fillTpl;
+window.fillEmailTpl = fillEmailTpl;
+window.fillPushTpl = fillPushTpl;
+window.fillSmsBulkTpl = fillSmsBulkTpl;
+window.sendCustom = sendCustom;
+window.sendSMSIndividual = sendSMSIndividual;
+window.sendEmailIndividual = sendEmailIndividual;
+window.sendViberDeepLink = sendViberDeepLink;
+window.prepBulk = prepBulk;
+window.sendSMSBulk = sendSMSBulk;
+window.sendEmailBulk = sendEmailBulk;
+window.previewSmsBulk = previewSmsBulk;
+window.previewEmailBulk = previewEmailBulk;
+window.sendPushNotification = sendPushNotification;
+window.sEmail = sEmail;
+window.sSMS = sSMS;
+window.sViber = sViber;
+window.selectEmailOne = selectEmailOne;
+window.searchEmailOne = searchEmailOne;
+window.toggleEmailTargetSearch = toggleEmailTargetSearch;
+window.setAnPeriod = setAnPeriod;
+window.renderAnalytics = renderAnalytics;
+window.exportCSV = exportCSV;
+window.exportBk = exportBk;
+window.importBk = importBk;
+window.openOfferModal = openOfferModal;
+window.saveOffer = saveOffer;
+window.deleteOffer = deleteOffer;
+window.toggleOffer = toggleOffer;
+window.openOfferEdit = openOfferEdit;
+window.sendOfferPush = sendOfferPush;
+window.previewOfferImage = previewOfferImage;
+window.removeOfferImage = removeOfferImage;
+window.approveOffer = approveOffer;
+window.rejectOffer = rejectOffer;
+window.openDrillDown = openDrillDown;
+window.filterBySegment = filterBySegment;
+window.clearSegmentFilter = clearSegmentFilter;
+window.calcPts = calcPts;
+window._filterCustTable = _filterCustTable;
+window.toggleWorkerConfig = toggleWorkerConfig;
+window.saveWorkerConfig = saveWorkerConfig;
+window.testWorkerConnection = testWorkerConnection;
+window.checkWorkerHealth = checkWorkerHealth;
+window.toggleKillSwitch = toggleKillSwitch;
+window.previewExpirePoints = previewExpirePoints;
+window.executeExpirePoints = executeExpirePoints;
+window.previewTierDowngrade = previewTierDowngrade;
+window.executeTierDowngrade = executeTierDowngrade;
+window._scanOrphans = _scanOrphans;
+window._deleteGhostCustomer = _deleteGhostCustomer;
+window._deleteOrphanTxs = _deleteOrphanTxs;
+window._runSystemHealthCheck = _runSystemHealthCheck;
+window.loadDeletionRequests = loadDeletionRequests;
+window.gdprDeleteCustomer = gdprDeleteCustomer;

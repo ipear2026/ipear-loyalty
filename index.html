@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover">
+<title>iPear Loyalty</title>
+
+<!-- PWA manifest -->
+<link rel="manifest" href="manifest-customer.json">
+
+<!-- iOS PWA -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="iPear Loyalty">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-startup-image" href="icon-512.png">
+
+<!-- Android / general -->
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#8ae900">
+<meta name="color-scheme" content="light only">
+<meta name="description" content="Το πρόγραμμα επιβράβευσης iPear">
+<meta name="robots" content="noindex, nofollow">
+
+<style>
+/* Hide bottom nav until app screen is active */
+#s-app:not(.active) .bottom-nav { display: none !important; }
+</style>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer integrity="sha384-3zSEDfvllQohrq0PHL1fOXJuC/jSOO34H46t6UQfobFOmxE5BpjjaIJY5F2/bMnU" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js" defer integrity="sha384-Rv68Y7adOjMMJc1/xFMcdNvXre/HF51to4GZjBALmXr7ABnVl5V4UajJwBu7zbhN" crossorigin="anonymous"></script>
+
+<!-- ═══ TELEMETRY: Client-side error reporting to Worker /client-error ═══ -->
+<script>
+(function(){
+  var _W = 'https://email-worker.ipear2026.workers.dev';
+  var _Q = []; var _F = false;
+  function _send(payload) {
+    if (_F) return;
+    _F = true;
+    try {
+      var body = JSON.stringify(Object.assign({
+        page: location.pathname,
+        ua: navigator.userAgent,
+        ts: new Date().toISOString(),
+        build: (window.CUSTOMER_BUILD_TAG || window.TABLET_BUILD_TAG || 'unknown')
+      }, payload));
+      if (navigator.sendBeacon) { navigator.sendBeacon(_W + '/client-error', body); }
+      else { fetch(_W + '/client-error', { method:'POST', body:body, headers:{'Content-Type':'application/json'}, keepalive:true }).catch(function(){}); }
+    } catch(_){}
+  }
+  window.onerror = function(msg, src, line, col, err) {
+    _send({ type:'onerror', message:String(msg).slice(0,500), source:(src||'').slice(-120), line:line, col:col, stack:(err&&err.stack||'').slice(0,800) });
+  };
+  window.addEventListener('unhandledrejection', function(ev) {
+    var r = ev.reason;
+    var m = String(r&&r.message||r||'');
+    if (m.indexOf('messaging/unsupported-browser') !== -1) return;
+    _send({ type:'rejection', message:m.slice(0,500), stack:(r&&r.stack||'').slice(0,800) });
+  });
+})();
+</script>
+
+<link rel="stylesheet" href="./src/styles/customer.css">
+</head>
+<body>
+
+<!-- LANDSCAPE BLOCK OVERLAY -->
+<div id="landscape-block" role="alert">
+  <div class="lb-icon">📱</div>
+  <div class="lb-title">Γύρισε το κινητό κάθετα</div>
+  <div class="lb-sub">Η εφαρμογή iPear λειτουργεί<br>μόνο σε portrait mode</div>
+</div>
+
+<!-- LOADING -->
+<div id="loading">
+  <div class="ld-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+  <div class="ld-sub">Loyalty Program</div>
+  <div class="spin" style="margin-top:8px"></div>
+</div>
+
+<!-- SPLASH SCREEN (Login → App) -->
+<div id="splash-screen">
+  <div class="splash-scene">
+    <div class="splash-item" data-i="0">📱</div>
+    <div class="splash-item" data-i="1">🎧</div>
+    <div class="splash-item" data-i="2">⌚</div>
+    <div class="splash-item" data-i="3">🖌️</div>
+    <div class="splash-item" data-i="4">✨</div>
+    <div class="splash-item" data-i="5">🍐</div>
+    <div class="splash-lid">🎁</div>
+    <div class="splash-box">📦</div>
+  </div>
+
+  <div class="splash-progress-wrap">
+    <div class="splash-progress"><div class="splash-progress-fill" id="splash-fill"></div></div>
+    <div class="splash-progress-lbl" id="splash-lbl">Ετοιμάζουμε τα δεδομένα σου…</div>
+  </div>
+</div>
+
+<!-- REDEMPTION OVERLAY -->
+<div id="redeem-overlay" role="dialog" aria-modal="true" aria-label="Εξαργύρωση πόντων">
+  <div class="ro-wrap">
+    <button class="ro-close" onclick="cancelRedemption()" aria-label="Κλείσιμο">×</button>
+    <div class="ro-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+    <div class="ro-sub">Loyalty Reward</div>
+    <div class="ro-reward" id="ro-reward">5€ Έκπτωση</div>
+    <div class="ro-pts-lbl" id="ro-pts">1000 πόντοι</div>
+
+    <div class="ro-qr-wrap">
+      <div class="ro-laser"></div>
+      <div class="ro-qr-box">
+        <div id="ro-qr"></div>
+      </div>
+    </div>
+    <div class="ro-scan-hint">Σάρωσε με το tablet</div>
+
+    <div class="ro-or"><span>ή κωδικός</span></div>
+
+    <div class="ro-code-box">
+      <div class="ro-code-hint">Κωδικός Εξαργύρωσης</div>
+      <div class="ro-code" id="ro-code">— — —</div>
+    </div>
+
+    <div class="ro-timer-row">
+      <div class="ro-timer-dot" id="ro-dot"></div>
+      <div class="ro-timer" id="ro-timer" role="timer" aria-live="polite" aria-atomic="true">Λήγει σε 5:00</div>
+    </div>
+    <div class="ro-instruction">📲 Δείξε το QR ή τον κωδικό στον υπάλληλο<br>του καταστήματος iPear</div>
+
+    <button class="ro-cancel" onclick="cancelRedemption()">Ακύρωση</button>
+  </div>
+</div>
+
+<!-- ── OFFER BOTTOM SHEET ── -->
+<div id="offer-sheet" role="dialog" aria-modal="true" aria-label="Λεπτομέρειες προσφοράς">
+  <div class="os-backdrop" onclick="closeOfferSheet()"></div>
+  <div class="os-panel">
+    <div class="os-handle"></div>
+    <div id="os-img-wrap"></div>
+    <button class="os-close" onclick="closeOfferSheet()" aria-label="Κλείσιμο προσφοράς">✕</button>
+    <div class="os-content">
+      <div class="ocf-badge-row" id="os-badges"></div>
+      <div class="os-title" id="os-title"></div>
+      <div class="os-desc" id="os-desc"></div>
+      <div class="os-rules" id="os-rules"></div>
+      <div class="os-date" id="os-date"></div>
+      <button class="os-cta" id="os-cta" onclick="offerRedeemStep1()">🎁 Εξαργύρωση</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── OFFER CONFIRM MODAL ── -->
+<div id="offer-confirm" role="dialog" aria-modal="true" aria-label="Επιβεβαίωση εξαργύρωσης προσφοράς">
+  <div class="oc-box">
+    <div class="oc-icon">🎁</div>
+    <div class="oc-title">Πώς θέλεις να εξαργυρώσεις;</div>
+    <div class="oc-sub">Επίλεξε αν βρίσκεσαι στο κατάστημα ή θέλεις κουπόνι για το e-shop.</div>
+    <div class="oc-options">
+      <button class="oc-option" onclick="offerGenerateQR()">
+        <span class="oc-opt-icon">🏪</span>
+        <span class="oc-opt-title">Στο κατάστημα</span>
+        <span class="oc-opt-desc">QR κωδικός · 10 λεπτά</span>
+      </button>
+      <button class="oc-option oc-option-eshop" onclick="offerGenerateEshopCoupon()">
+        <span class="oc-opt-icon">🛒</span>
+        <span class="oc-opt-title">Στο e-shop</span>
+        <span class="oc-opt-desc">Κουπόνι έκπτωσης</span>
+      </button>
+    </div>
+    <button class="oc-btn-cancel-full" onclick="closeOfferConfirm()">Ακύρωση</button>
+  </div>
+</div>
+
+<!-- ── OFFER QR OVERLAY ── -->
+<div id="offer-qr-overlay" role="dialog" aria-modal="true" aria-label="QR κωδικός προσφοράς">
+  <div class="ro-wrap">
+    <button class="ro-close" onclick="cancelOfferQR()" aria-label="Κλείσιμο">×</button>
+    <div class="ro-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+    <div class="oq-title" id="oq-title">Προσφορά</div>
+    <div class="oq-sub" id="oq-sub">Δείξε το QR στον υπάλληλο</div>
+    <div class="ro-qr-wrap">
+      <div class="ro-laser"></div>
+      <div class="ro-qr-box"><div id="oq-qr"></div></div>
+    </div>
+    <div class="ro-scan-hint">Σάρωσε με το tablet</div>
+    <div class="ro-or"><span>ή κωδικός</span></div>
+    <div class="ro-code-box">
+      <div class="ro-code-hint">Κωδικός Προσφοράς</div>
+      <div class="ro-code" id="oq-code">— — —</div>
+    </div>
+    <div class="ro-timer-row">
+      <div class="ro-timer-dot" id="oq-dot"></div>
+      <div class="ro-timer" id="oq-timer" role="timer" aria-live="polite" aria-atomic="true">Λήγει σε 10:00</div>
+    </div>
+    <div class="ro-instruction">📲 Δείξε το QR ή τον κωδικό στον υπάλληλο<br>του καταστήματος iPear</div>
+
+    <button class="ro-cancel" onclick="cancelOfferQR()">Ακύρωση</button>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<!-- ══ SCREEN: EMAIL + PASSWORD ══ -->
+<div id="s-phone" class="screen">
+  <div class="login-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+  <div class="login-sub">Loyalty Program</div>
+  <div class="login-box">
+    <div id="demo-hint" class="demo-hint" style="display:none">🧪 <strong>Demo Mode</strong><br>Email: <strong>notis@ipear.gr</strong> · Κωδικός: <strong>demo1234</strong></div>
+
+    <!-- STEP 1: email (always visible) -->
+    <div id="auth-step1">
+      <h2>Είσοδος</h2>
+      <p>Εισάγετε το email και τον κωδικό σας.</p>
+      <input class="field" type="email" id="phone-in" placeholder="Email" inputmode="email" autocomplete="email" aria-label="Email" onkeydown="if(event.key==='Enter')document.getElementById('auth-pass').focus()">
+      <div style="position:relative;margin-bottom:12px">
+        <input class="field" type="password" id="auth-pass" placeholder="Κωδικός" autocomplete="current-password" aria-label="Κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" onkeydown="if(event.key==='Enter')submitPhone()">
+        <button type="button" id="pass-eye" onclick="togglePassVis()" aria-label="Εμφάνιση/Απόκρυψη κωδικού" style="position:absolute;right:14px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:4px;color:#aaa">
+          <svg id="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;margin:-2px 0 14px;cursor:pointer;user-select:none">
+        <span style="position:relative;width:22px;height:22px;flex-shrink:0">
+          <input type="checkbox" id="rem-me" style="opacity:0;position:absolute;inset:0;margin:0;cursor:pointer;width:100%;height:100%">
+          <span id="rem-box" style="position:absolute;inset:0;border:2px solid #ddd;border-radius:6px;background:#fff;transition:all .15s;pointer-events:none">
+            <svg id="rem-check" viewBox="0 0 12 10" style="position:absolute;inset:2px;opacity:0;transition:opacity .15s"><polyline points="1,5 4.5,9 11,1" fill="none" stroke="#8ae900" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+        </span>
+        <span style="font-size:.85rem;font-weight:600;color:#555">Να με θυμάσαι σε αυτή τη συσκευή</span>
+      </label>
+      <button class="btn-main" id="phone-btn" onclick="submitPhone()">Είσοδος →</button>
+      <div class="err-msg" id="phone-err"></div>
+      <button type="button" onclick="openForgotPass()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">Ξέχασα τον κωδικό μου</button>
+      <div style="border-top:1px solid var(--bd);margin-top:14px;padding-top:14px;text-align:center">
+        <span style="font-size:.82rem;color:var(--grl);font-weight:600">Νέος χρήστης;</span>
+        <button type="button" onclick="openRegister()" style="background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;padding:4px 8px;text-decoration:underline">Δημιουργία λογαριασμού →</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: First-time — create password -->
+    <div id="auth-step2" style="display:none">
+      <h2>Δημιούργησε Κωδικό</h2>
+      <p id="auth-step2-sub">Πρώτη σύνδεση; Ορίσε τον κωδικό σου.</p>
+      <div style="position:relative;margin-bottom:12px">
+        <input class="field" type="password" id="auth-newpass1" placeholder="Νέος κωδικός (min 6 χαρακτήρες)" aria-label="Νέος κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" onkeydown="if(event.key==='Enter')document.getElementById('auth-newpass2').focus()">
+      </div>
+      <div style="position:relative;margin-bottom:12px">
+        <input class="field" type="password" id="auth-newpass2" placeholder="Επιβεβαίωση κωδικού" aria-label="Επιβεβαίωση νέου κωδικού" style="margin-bottom:0;width:100%" onkeydown="if(event.key==='Enter')submitCreatePass()">
+      </div>
+      <div class="err-msg" id="auth-step2-err"></div>
+      <button class="btn-main" onclick="submitCreatePass()">Δημιουργία →</button>
+      <button type="button" onclick="backToLogin()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">← Πίσω</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SCREEN: FORGOT PASSWORD ══ -->
+<div id="s-forgot-pass" class="screen">
+  <div class="login-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+  <div class="login-sub">Loyalty Program</div>
+  <div class="login-box">
+    <h2>Ξέχασα τον κωδικό</h2>
+    <p>Εισάγετε το email σας και θα σας στείλουμε σύνδεσμο επαναφοράς.</p>
+    <input class="field" type="email" id="forgot-email" placeholder="Email" inputmode="email" autocomplete="email" aria-label="Email λογαριασμού" onkeydown="if(event.key==='Enter')submitForgotPass()">
+    <button class="btn-main" id="forgot-btn" onclick="submitForgotPass()">Αποστολή →</button>
+    <div class="err-msg" id="forgot-err"></div>
+    <div id="forgot-ok" style="display:none;background:var(--gp);border:1px solid var(--g);border-radius:12px;padding:14px;font-size:.85rem;font-weight:600;color:#3a6000;text-align:center;margin-top:8px;line-height:1.7">
+      ✅ Το email εστάλη!<br>
+      <span style="font-weight:400;color:#555">Ελέγξτε τα εισερχόμενά σας.<br>
+      <strong>Αν δεν το βλέπετε, ελέγξτε τον φάκελο Spam / Ανεπιθύμητα.</strong></span>
+    </div>
+    <div style="background:#f8f8f8;border-radius:12px;padding:12px 14px;margin-top:14px;font-size:.78rem;color:#777;line-height:1.6;text-align:center">
+      💡 <strong>Πρώτη φορά;</strong> Αν δεν έχεις ορίσει ποτέ κωδικό,<br>
+      επέστρεψε στη σύνδεση και απλά πάτα <strong>Είσοδος →</strong><br>
+      — το σύστημα θα σε καθοδηγήσει να δημιουργήσεις κωδικό.
+    </div>
+    <button type="button" onclick="showScreen('s-phone');backToLogin()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:12px;width:100%;text-align:center;padding:6px">← Επιστροφή στη σύνδεση</button>
+  </div>
+</div>
+
+<!-- ══ SCREEN: REGISTER ══ -->
+<div id="s-register" class="screen">
+  <div class="login-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+  <div class="login-sub">Loyalty Program</div>
+  <div class="login-box">
+    <h2>Δημιουργία Λογαριασμού</h2>
+    <p style="margin-bottom:14px;color:var(--gr)">Εγγράψου δωρεάν και κέρδισε πόντους σε κάθε αγορά!</p>
+    <input class="field" type="text" id="reg-name" placeholder="Ονοματεπώνυμο *" autocomplete="name" aria-label="Ονοματεπώνυμο" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-phone').focus()">
+    <input class="field" type="tel" id="reg-phone" placeholder="Κινητό (π.χ. 6912345678) *" inputmode="numeric" pattern="[0-9]*" maxlength="10" autocomplete="tel" aria-label="Αριθμός κινητού" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-email').focus()">
+    <input class="field" type="email" id="reg-email" placeholder="Email *" inputmode="email" autocomplete="email" aria-label="Διεύθυνση email" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-pass1').focus()">
+    <div style="position:relative;margin-bottom:12px">
+      <input class="field" type="password" id="reg-pass1" placeholder="Κωδικός (min 6 χαρακτήρες) *" autocomplete="new-password" aria-label="Κωδικός πρόσβασης" aria-required="true" style="margin-bottom:0;width:100%" onkeydown="if(event.key==='Enter')document.getElementById('reg-pass2').focus()">
+    </div>
+    <div style="position:relative;margin-bottom:12px">
+      <input class="field" type="password" id="reg-pass2" placeholder="Επιβεβαίωση κωδικού *" autocomplete="new-password" aria-label="Επιβεβαίωση κωδικού" aria-required="true" style="margin-bottom:0;width:100%" onkeydown="if(event.key==='Enter')submitRegister()">
+    </div>
+    <div style="margin-bottom:12px">
+      <div style="font-size:.78rem;font-weight:700;color:var(--grl);margin-bottom:6px;padding-left:2px">Ημερομηνία Γέννησης (προαιρετικό)</div>
+      <div style="display:grid;grid-template-columns:1fr 2fr 1.4fr;gap:8px">
+        <select id="reg-bday-d" class="field" style="margin-bottom:0;padding:13px 10px;appearance:none;-webkit-appearance:none;text-align:center;cursor:pointer">
+          <option value="">Μέρα</option>
+        </select>
+        <select id="reg-bday-m" class="field" style="margin-bottom:0;padding:13px 10px;appearance:none;-webkit-appearance:none;cursor:pointer">
+          <option value="">Μήνας</option>
+          <option value="1">Ιανουάριος</option><option value="2">Φεβρουάριος</option>
+          <option value="3">Μάρτιος</option><option value="4">Απρίλιος</option>
+          <option value="5">Μάιος</option><option value="6">Ιούνιος</option>
+          <option value="7">Ιούλιος</option><option value="8">Αύγουστος</option>
+          <option value="9">Σεπτέμβριος</option><option value="10">Οκτώβριος</option>
+          <option value="11">Νοέμβριος</option><option value="12">Δεκέμβριος</option>
+        </select>
+        <select id="reg-bday-y" class="field" style="margin-bottom:0;padding:13px 10px;appearance:none;-webkit-appearance:none;text-align:center;cursor:pointer">
+          <option value="">Έτος</option>
+        </select>
+      </div>
+    </div>
+    <input class="field" type="text" id="reg-ref" placeholder="Κωδικός Παραπομπής π.χ. IP-00001 (προαιρετικό)" style="text-transform:uppercase">
+    <div style="margin:14px 0 6px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:.78rem;color:var(--gr);line-height:1.5">
+        <input type="checkbox" id="reg-terms" style="margin-top:3px;min-width:18px;min-height:18px;accent-color:var(--g)">
+        <span>Αποδέχομαι τους <a href="/terms.html" target="_blank" style="color:var(--gd);text-decoration:underline">Όρους Χρήσης</a> και την <a href="/privacy.html" target="_blank" style="color:var(--gd);text-decoration:underline">Πολιτική Απορρήτου</a>. *</span>
+      </label>
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:.78rem;color:var(--gr);line-height:1.5">
+        <input type="checkbox" id="reg-marketing" style="margin-top:3px;min-width:18px;min-height:18px;accent-color:var(--g)">
+        <span>Θέλω να λαμβάνω προσφορές μέσω SMS, email ή push. <strong style="color:var(--g)">Κέρδισε +50 Bonus Πόντους τώρα!</strong></span>
+      </label>
+    </div>
+    <div class="err-msg" id="reg-err"></div>
+    <button class="btn-main" id="reg-btn" onclick="submitRegister()">Εγγραφή →</button>
+    <button type="button" onclick="showScreen('s-phone')" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">← Πίσω στη σύνδεση</button>
+  </div>
+</div>
+
+<!-- ══ SCREEN: OTP VERIFY ══ -->
+<div id="s-otp" class="screen">
+  <div class="login-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+  <div class="login-sub">Loyalty Program</div>
+  <div class="login-box">
+    <div style="text-align:center;margin-bottom:18px">
+      <div style="font-size:2.8rem;line-height:1;margin-bottom:10px">📱</div>
+      <h2 style="margin:0 0 6px">Επαλήθευση Κινητού</h2>
+      <p style="color:var(--grl);font-size:.85rem;margin:0;line-height:1.6">Στείλαμε κωδικό 6 ψηφίων στο<br><strong id="otp-phone-display" style="color:var(--bk);font-size:.95rem"></strong></p>
+    </div>
+    <input class="field" type="text" id="otp-input" placeholder="• • • • • •" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" aria-label="Κωδικός επαλήθευσης 6 ψηφίων" style="text-align:center;font-size:1.9rem;letter-spacing:10px;font-weight:900;padding:16px 10px" onkeydown="if(event.key==='Enter')submitOTP()">
+    <div class="err-msg" id="otp-err"></div>
+    <button class="btn-main" id="otp-btn" onclick="submitOTP()">Επαλήθευση →</button>
+    <div style="text-align:center;margin-top:14px;min-height:28px">
+      <span id="otp-resend-timer" style="font-size:.82rem;color:var(--grl);font-weight:600"></span>
+      <button id="otp-resend-btn" onclick="resendOTP()" style="display:none;background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;text-decoration:underline;padding:0">🔄 Επανάληψη SMS</button>
+    </div>
+    <button type="button" onclick="cancelOTP()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">← Πίσω στην εγγραφή / Αλλαγή αριθμού</button>
+  </div>
+</div>
+
+
+<!-- ══ SCREEN: APP ══ -->
+<div id="s-app" class="screen">
+
+  <!-- APP HEADER -->
+  <header class="app-header">
+    <button class="ah-qr" onclick="switchTab('card')" aria-label="Η κάρτα μου / QR">
+      <svg viewBox="0 0 24 24" fill="currentColor">
+        <path d="M3 3h8v8H3zm2 2v4h4V5z"/>
+        <path d="M13 3h8v8h-8zm2 2v4h4V5z"/>
+        <path d="M3 13h8v8H3zm2 2v4h4v-4z"/>
+        <rect x="13" y="13" width="3" height="3"/>
+        <rect x="18" y="13" width="3" height="3"/>
+        <rect x="13" y="18" width="3" height="3"/>
+        <rect x="18" y="18" width="3" height="3"/>
+        <rect x="15.5" y="15.5" width="3" height="3"/>
+      </svg>
+    </button>
+    <div class="ah-brand" onclick="switchTab('home')" title="Αρχική" role="button" tabindex="0" onkeydown="if(event.key==='Enter')switchTab('home')">
+      <img src="logo.png" alt="iPear" class="logo-img logo-sm">
+    </div>
+    <div class="ah-pts" onclick="switchTab('home')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')switchTab('home')">
+      <span class="ah-pts-n" id="hdr-pts">—</span>
+      <span>πόντοι</span>
+    </div>
+  </header>
+
+  <!-- TAB PANES -->
+  <div class="app-body">
+
+    <!-- ── HOME ── -->
+    <div id="t-home" class="tab-pane active">
+      <div class="tab-inner">
+        <div class="hero-card tier-metal-shine">
+          <div class="hero-greeting" id="hero-greeting">Καλωσήρθες πίσω</div>
+          <div class="hero-name" id="h-name">—</div>
+          <div class="hero-pts-row">
+            <div class="hero-pts" id="h-pts">0</div>
+            <div class="hero-pts-lbl" id="hero-pts-lbl">πόντοι</div>
+          </div>
+          <div class="hero-tier">
+            <span id="h-tier-icon">🥉</span>
+            <span class="hero-tier-name" id="h-tier-name">Bronze</span>
+          </div>
+          <div class="hero-prog-wrap" id="h-prog-wrap">
+            <div class="hero-prog-lbl">
+              <span id="h-prog-lbl">Πρόοδος</span>
+              <span id="h-prog-pct">0%</span>
+            </div>
+            <div class="hero-prog"><div class="hero-prog-fill" id="h-prog-fill" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <div class="sec-hdr">
+          <div class="sec-title">Rewards</div>
+          <a class="sec-link" role="button" tabindex="0" onclick="switchTab('rewards')" onkeydown="if(event.key==='Enter')switchTab('rewards')">Όλα →</a>
+        </div>
+        <div class="rewards-scroll" id="h-rewards-scroll"></div>
+
+        <div class="sec-hdr" style="margin-top:20px">
+          <div class="sec-title">Ενεργές Προσφορές</div>
+          <a class="sec-link" role="button" tabindex="0" onclick="switchTab('offers')" onkeydown="if(event.key==='Enter')switchTab('offers')">Όλες →</a>
+        </div>
+        <div id="h-offers-preview"></div>
+
+        <a href="https://ipear.gr" target="_blank" rel="noopener noreferrer" class="eshop-banner">
+          <div class="eshop-banner-inner">
+            <div class="eshop-banner-left">
+              <div class="eshop-banner-icon">🛒</div>
+            </div>
+            <div class="eshop-banner-body">
+              <div class="eshop-banner-title">iPear e-Shop</div>
+              <div class="eshop-banner-sub">Θήκες, Αξεσουάρ, Επισκευές & Custom θήκες</div>
+            </div>
+            <div class="eshop-banner-arrow">→</div>
+          </div>
+          <div class="eshop-banner-cta">ipear.gr</div>
+        </a>
+
+      </div>
+    </div>
+
+    <!-- ── CARD / QR ── -->
+    <div id="t-card" class="tab-pane">
+      <div class="tab-inner">
+        <div class="loyalty-card tier-metal-shine">
+          <div class="lc-top">
+            <div class="lc-brand"><img src="logo.png" alt="iPear" class="logo-img logo-xs logo-white"> <span style="font-size:.65rem;color:rgba(255,255,255,.55);font-weight:500">Loyalty</span></div>
+            <div class="lc-tier-badge">
+              <span id="lc-tier-icon">🥉</span>
+              <span class="lc-tier-name" id="lc-tier-name">Bronze</span>
+            </div>
+          </div>
+          <div class="lc-middle">
+            <div class="lc-tier-icon" id="lc-tier-icon-big">🥉</div>
+          </div>
+          <div class="lc-bottom">
+            <div class="lc-card-num" id="lc-card-num">IP-— — — — —</div>
+            <div class="lc-bottom-row">
+              <div>
+                <div class="lc-name-lbl">Κάτοχος</div>
+                <div class="lc-name" id="lc-name">—</div>
+              </div>
+              <div>
+                <div class="lc-pts-lbl" id="lc-pts-lbl">Πόντοι</div>
+                <div class="lc-pts" id="lc-pts">0</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="qr-box">
+          <div class="qr-hint">Σάρωσε για αναγνώριση</div>
+          <div id="qr-canvas"></div>
+          <div class="qr-card-num" id="qr-card-num">—</div>
+          <div class="qr-instruction">Δείξε αυτόν τον κωδικό στον υπάλληλο iPear<br>για γρήγορη αναγνώριση χωρίς πληκτρολόγηση</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── REWARDS ── -->
+    <div id="t-rewards" class="tab-pane">
+      <div class="tab-inner">
+        <div class="rewards-pts-bar">
+          <div>
+            <div class="rpb-lbl" id="rpb-lbl">Διαθέσιμοι Πόντοι</div>
+            <div class="rpb-val" id="rw-pts">0</div>
+          </div>
+          <div style="font-size:2rem" id="rw-tier-icon">🥉</div>
+        </div>
+        <div id="rw-list"></div>
+        <div style="background:#f8f8f8;border-radius:8px;padding:14px 16px;font-size:.78rem;color:var(--grl);line-height:1.6;text-align:center;margin-top:4px">
+          💡 Η εξαργύρωση γίνεται αποκλειστικά στο κατάστημα iPear.<br>
+          Θα λάβεις κωδικό 6 ψηφίων ισχύος 5 λεπτών.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── OFFERS ── -->
+    <div id="t-offers" class="tab-pane">
+      <div class="tab-inner">
+        <div style="font-size:18px;font-weight:800;color:var(--bk);margin-bottom:16px">Ενεργές Προσφορές</div>
+        <div id="offers-list" style="padding-top:0"></div>
+      </div>
+    </div>
+
+    <!-- ── PROFILE ── -->
+    <div id="t-profile" class="tab-pane">
+      <div class="tab-inner">
+        <div class="profile-head tier-metal-shine">
+          <div class="ph-av" id="pr-av">?</div>
+          <div>
+            <div class="ph-name" id="pr-name">—</div>
+            <div class="ph-card" id="pr-card">IP-—</div>
+            <div class="ph-tier"><span id="pr-tier">🥉 Bronze</span></div>
+          </div>
+        </div>
+
+        <div class="prof-section">
+          <div class="prof-sec-title">🤝 Φέρε Φίλο</div>
+          <div class="ref-desc">Μοιράσου τον κωδικό σου και κερδίσετε και οι δύο <strong>100 πόντους</strong> όταν εγγραφεί στο iPear Loyalty!</div>
+          <div class="ref-code-box">
+            <div class="ref-code-val" id="ref-code">—</div>
+            <button class="ref-copy-btn" onclick="copyReferral()">📋 Αντιγραφή</button>
+          </div>
+          <div id="ref-counter" style="display:flex;align-items:center;justify-content:space-between;background:linear-gradient(90deg,rgba(138,233,0,.10),rgba(107,184,0,.06));border:1.5px solid rgba(138,233,0,.25);border-radius:10px;padding:10px 14px;margin-bottom:12px">
+            <div style="font-size:.78rem;font-weight:700;color:var(--gr)">Επιτυχημένες Συστάσεις</div>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span id="ref-count-val" style="font-size:1rem;font-weight:900;color:var(--gd)">0</span><span style="font-size:.82rem;font-weight:700;color:var(--grl)">/5</span>
+            </div>
+          </div>
+          <button class="ref-share-btn" onclick="shareReferral()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
+            Κοινοποίηση στους φίλους σου
+          </button>
+          <div class="ref-reward-note">Ισχύει για νέες εγγραφές στο κατάστημα iPear</div>
+        </div>
+
+        <div class="prof-section">
+          <div class="prof-sec-title">🏆 Κατάταξη</div>
+          <div class="tier-prog-card">
+            <div class="tpc-row">
+              <div class="tpc-left">
+                <div class="tpc-icon" id="pr-ticon">🥉</div>
+                <div>
+                  <div class="tpc-name" id="pr-tname">Bronze</div>
+                  <div class="tpc-sub" id="pr-tsub">—</div>
+                </div>
+              </div>
+              <div class="tpc-pct" id="pr-tpct">0%</div>
+            </div>
+            <div class="tpc-prog"><div class="tpc-prog-fill" id="pr-tprog" style="width:0%"></div></div>
+          </div>
+          <div style="font-size:.75rem;color:var(--grl);line-height:1.6;text-align:center">
+            🥉 Bronze (0) → 🥈 Silver (1.000) → 🥇 Gold (3.000) → 💎 Diamond (6.000) → 👑 Platinum (10.000)
+          </div>
+        </div>
+
+        <div class="prof-section">
+          <div class="prof-sec-title" style="display:flex;justify-content:space-between;align-items:center">
+            <span>🏆 Κορυφαίοι Πελάτες</span>
+            <span style="font-size:.62rem;color:var(--grl);font-weight:600;letter-spacing:.5px;display:flex;align-items:center;gap:4px"><span style="width:6px;height:6px;border-radius:50%;background:#8ae900;animation:pulse 1.5s infinite"></span>LIVE</span>
+          </div>
+          <div id="lb-container">
+            <div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">Φόρτωση...</div>
+          </div>
+        </div>
+
+        <div class="prof-section">
+          <div class="prof-sec-title">📋 Ιστορικό Συναλλαγών</div>
+          <div id="pr-history"><div style="text-align:center;color:var(--grl);padding:16px;font-size:.85rem">Φόρτωση...</div></div>
+        </div>
+
+        <div class="prof-section" id="push-section" style="display:none">
+          <div class="prof-sec-title">🔔 Ειδοποιήσεις</div>
+          <p style="font-size:.82rem;color:var(--grl);line-height:1.6;margin-bottom:12px">
+            Ενεργοποίησε τις ειδοποιήσεις για να λαμβάνεις προσφορές, bonus πόντους και ενημερώσεις κατευθείαν στην οθόνη σου.
+          </p>
+          <button id="push-btn" data-push-state="off" onclick="window._togglePush&&window._togglePush()" style="
+            width:100%;padding:13px;background:linear-gradient(135deg,#6bb800,#8ae900);
+            color:#111111;font-weight:700;font-size:.9rem;border:none;border-radius:8px;
+            cursor:pointer;letter-spacing:.2px;transition:background .2s,color .2s
+          ">🔔 Ενεργοποίηση Push Notifications</button>
+        </div>
+
+        <div class="prof-section" id="install-app-section" style="display:none">
+          <div class="prof-sec-title">📱 Εγκατάσταση</div>
+          <p style="font-size:.82rem;color:var(--grl);line-height:1.6;margin-bottom:12px">
+            Πρόσθεσε το iPear Loyalty στην αρχική οθόνη σου για γρήγορη πρόσβαση χωρίς browser.
+          </p>
+          <button id="install-app-btn" onclick="_installApp()" style="
+            width:100%;padding:13px;background:linear-gradient(135deg,#6bb800,#8ae900);
+            color:#111111;font-weight:700;font-size:.9rem;border:none;border-radius:8px;
+            cursor:pointer;letter-spacing:.2px;display:flex;align-items:center;justify-content:center;gap:8px
+          ">📱 Εγκατάσταση Εφαρμογής</button>
+        </div>
+
+        <a href="https://g.page/r/YOUR_REVIEW_LINK" target="_blank" rel="noopener noreferrer" id="google-review-cta" style="
+          display:flex;align-items:center;gap:14px;
+          margin-bottom:16px;padding:16px 18px;
+          background:linear-gradient(135deg,#fff8e1 0%,#fff3cd 100%);
+          border:1px solid #ffd54f;border-radius:10px;
+          text-decoration:none;color:#111111;
+          box-shadow:0 2px 8px rgba(255,193,7,.1);
+          transition:transform .15s,box-shadow .15s;
+        ">
+          <div style="
+            width:46px;height:46px;border-radius:8px;flex-shrink:0;
+            background:linear-gradient(135deg,#fbbc04,#f9a825);
+            display:flex;align-items:center;justify-content:center;
+            font-size:1.5rem;box-shadow:0 2px 6px rgba(251,188,4,.2)
+          ">⭐</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:700;font-size:.92rem;line-height:1.3;margin-bottom:3px">Σου αρέσει το iPear;</div>
+            <div style="font-size:.78rem;color:#666;line-height:1.4">Αξιολόγησέ μας στη Google — μας βοηθάς πολύ! 🙏</div>
+          </div>
+          <div style="flex-shrink:0;font-size:1.1rem;color:#f9a825">→</div>
+        </a>
+
+        <button class="logout-btn" id="logout-btn" onclick="logout()">Αποσύνδεση</button>
+        <button class="logout-btn" style="color:#ff3b30;border-color:#ff3b30;margin-top:8px" onclick="requestAccountDeletion()">🗑 Διαγραφή Λογαριασμού</button>
+      </div>
+    </div>
+
+  </div><!-- /app-body -->
+
+  <!-- BOTTOM NAV -->
+  <nav class="bottom-nav">
+    <button class="bn active" id="nav-home" onclick="switchTab('home')">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+      <span>Αρχική</span>
+    </button>
+    <button class="bn" id="nav-card" onclick="switchTab('card')">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z"/></svg>
+      <span>Κάρτα</span>
+    </button>
+    <button class="bn" id="nav-rewards" onclick="switchTab('rewards')">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M20 6h-2.18c.07-.44.18-.88.18-1.36C18 2.55 16.45 1 14.55 1c-1.04 0-1.96.5-2.55 1.32L12 3.6l-.45-.28C10.96 2.5 10.04 2 9 2 7.09 2 5.5 3.6 5.5 5.5c0 .5.11.95.18 1.4H2v2h20V6zM4 19c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-9H4v9zm2-7h12v7H6v-7z"/></svg>
+      <span>Rewards</span>
+    </button>
+    <button class="bn" id="nav-offers" onclick="switchTab('offers')">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+      <span>Προσφορές</span>
+    </button>
+    <button class="bn" id="nav-profile" onclick="switchTab('profile')">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+      <span>Προφίλ</span>
+    </button>
+  </nav>
+
+</div><!-- /s-app -->
+
+<!-- ═══ PUSH ONBOARDING OVERLAY (post-registration) ═══ -->
+<div id="push-onboard" style="
+  display:none;position:fixed;inset:0;z-index:9998;
+  background:rgba(0,0,0,.55);backdrop-filter:blur(4px);
+  align-items:center;justify-content:center;padding:24px;
+  font-family:'Zona Pro',sans-serif;
+">
+  <div style="
+    background:#fff;border-radius:12px;padding:28px 24px;max-width:340px;width:100%;
+    text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.15);animation:slideUp .35s cubic-bezier(.4,0,.2,1)
+  ">
+    <div style="font-size:2.8rem;margin-bottom:8px">🔔</div>
+    <div style="font-weight:900;font-size:1.1rem;color:#111111;margin-bottom:8px">Ειδοποιήσεις</div>
+    <p style="font-size:.84rem;color:#666;line-height:1.6;margin-bottom:20px">
+      Θέλεις να λαμβάνεις ειδοποιήσεις για προσφορές, bonus πόντους και νέα από το iPear;
+    </p>
+    <button onclick="_acceptPushOnboard()" style="
+      width:100%;padding:14px;background:linear-gradient(135deg,#6bb800,#8ae900);
+      color:#111111;font-weight:700;font-size:.95rem;border:none;border-radius:8px;
+      cursor:pointer;margin-bottom:10px;font-family:inherit
+    ">Ναι, ενεργοποίηση!</button>
+    <button onclick="_dismissPushOnboard()" style="
+      width:100%;padding:12px;background:none;border:1px solid #ddd;border-radius:8px;
+      color:#999;font-weight:600;font-size:.85rem;cursor:pointer;font-family:inherit
+    ">Όχι τώρα</button>
+  </div>
+</div>
+
+<!-- ═══ PWA INSTALL BANNER ═══ -->
+<div id="pwa-banner" style="
+  display:none; position:fixed; bottom:0; left:0; right:0; z-index:9999;
+  background:#fff; border-top:1px solid #e8e8e8;
+  box-shadow:0 -8px 32px rgba(0,0,0,.12);
+  padding:16px 20px calc(16px + env(safe-area-inset-bottom,0px));
+  font-family:'Zona Pro',sans-serif;
+  animation: slideUp .35s cubic-bezier(.4,0,.2,1);
+">
+  <button class="pb-close" onclick="dismissPWA()" aria-label="Κλείσιμο" style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;color:#999;cursor:pointer;padding:4px;line-height:1">✕</button>
+  <div style="display:flex; align-items:center; gap:14px; margin-bottom:14px">
+    <img src="icon-192.png" alt="iPear" style="width:52px;height:52px;border-radius:10px;flex-shrink:0">
+    <div>
+      <div style="font-weight:900;font-size:1rem;color:#111111">iPear Loyalty</div>
+      <div style="font-size:.78rem;color:#767676;margin-top:2px">Εγκατάστησε το app στο κινητό σου</div>
+    </div>
+  </div>
+
+  <!-- iOS instructions -->
+  <div id="pwa-ios" style="display:none;background:#f5f5f5;border-radius:8px;padding:14px 16px">
+    <div style="font-size:.82rem;font-weight:700;color:#111111;margin-bottom:10px">📲 Πώς να το προσθέσεις:</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;gap:10px;font-size:.8rem;color:#333">
+        <span style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:4px 8px;font-size:.75rem;font-weight:700;white-space:nowrap">1</span>
+        Πάτα το κουμπί
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="2.5" style="flex-shrink:0"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+        <strong>Share</strong> στο Safari
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;font-size:.8rem;color:#333">
+        <span style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:4px 8px;font-size:.75rem;font-weight:700;white-space:nowrap">2</span>
+        Επίλεξε <strong>«Προσθήκη στην Αρχική Οθόνη»</strong>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;font-size:.8rem;color:#333">
+        <span style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:4px 8px;font-size:.75rem;font-weight:700;white-space:nowrap">3</span>
+        Πάτα <strong>«Προσθήκη»</strong> — έτοιμο! ✅
+      </div>
+    </div>
+  </div>
+
+  <!-- Android / Chrome install button -->
+  <div id="pwa-android" style="display:none">
+    <button id="pwa-install-btn" onclick="triggerInstall()"
+      style="width:100%;padding:15px;background:#8ae900;color:#111111;border:none;border-radius:8px;font-family:inherit;font-weight:700;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Εγκατάσταση App
+    </button>
+  </div>
+</div>
+
+<!-- ═══ ES MODULE ENTRY POINT ═══ -->
+<script type="module" src="/src/main.js"></script>
+
+</body>
+</html>

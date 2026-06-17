@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iPear Loyalty — Admin Panel</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#8ae900">
+<meta name="color-scheme" content="light only">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="iPear Admin">
+<meta name="robots" content="noindex, nofollow">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('[sw] registration failed:', e.message)));
+}
+</script>
+
+<!-- ═══ TELEMETRY: Client-side error reporting to Worker /client-error ═══ -->
+<script>
+(function(){
+  var _W = 'https://email-worker.ipear2026.workers.dev';
+  var _F = false;
+  function _send(payload) {
+    if (_F) return;
+    _F = true;
+    try {
+      var body = JSON.stringify(Object.assign({
+        page: location.pathname,
+        ua: navigator.userAgent,
+        ts: new Date().toISOString(),
+        build: (window.ADMIN_BUILD_TAG || 'unknown')
+      }, payload));
+      if (navigator.sendBeacon) { navigator.sendBeacon(_W + '/client-error', body); }
+      else { fetch(_W + '/client-error', { method:'POST', body:body, headers:{'Content-Type':'application/json'}, keepalive:true }).catch(function(){}); }
+    } catch(_){}
+  }
+  window.onerror = function(msg, src, line, col, err) {
+    _send({ type:'onerror', message:String(msg).slice(0,500), source:(src||'').slice(-120), line:line, col:col, stack:(err&&err.stack||'').slice(0,800) });
+  };
+  window.addEventListener('unhandledrejection', function(ev) {
+    var r = ev.reason;
+    _send({ type:'rejection', message:String(r&&r.message||r||'').slice(0,500), stack:(r&&r.stack||'').slice(0,800) });
+  });
+})();
+</script>
+
+</head>
+<body>
+
+<!-- ═══ LOCK SCREEN ═══ -->
+<div id="lock">
+  <div class="lock-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
+  <div class="lock-sub">Admin Panel</div>
+  <div class="lock-card">
+    <div id="lock-demo" style="display:none;background:#edffc5;border:1px solid #8ae900;border-radius:11px;padding:10px 14px;font-size:.78rem;text-align:center;line-height:1.6;margin-bottom:16px">
+      🧪 <strong>Demo:</strong> admin@ipear.gr / admin1234
+    </div>
+    <input type="email" id="lock-email" placeholder="Email" autocomplete="email"
+      onkeydown="if(event.key==='Enter')document.getElementById('lock-in').focus()">
+    <div style="position:relative">
+      <input type="password" id="lock-in" placeholder="Κωδικός" autocomplete="current-password"
+        style="padding-right:44px;margin-bottom:14px" onkeydown="if(event.key==='Enter')unlock()">
+      <button type="button" id="lock-eye" aria-label="Εμφάνιση/Απόκρυψη κωδικού"
+        onclick="var i=document.getElementById('lock-in');var on=i.type==='password';i.type=on?'text':'password';var p=this.querySelector('path');var c=this.querySelector('circle');if(p&&c){p.setAttribute('d',on?'M2 12s4-7 10-7c2 0 4 .6 5.6 1.5M22 12s-4 7-10 7c-2 0-4-.6-5.6-1.5M2 2l20 20':'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z');c.style.display=on?'none':'';}"
+        style="position:absolute;right:14px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:4px;color:#aaa;width:32px;height:32px;display:flex;align-items:center;justify-content:center">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+    <button id="lock-btn" onclick="unlock()">Είσοδος →</button>
+    <div class="lock-err" id="lock-err"></div>
+  </div>
+</div>
+
+<!-- ═══ HEADER ═══ -->
+<header>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span class="h-brand"><img src="logo.png" alt="iPear" class="logo-img logo-sm logo-white"></span>
+    <span class="h-badge">Admin</span>
+    <span id="store-badge" style="display:none;background:linear-gradient(135deg,var(--green),var(--green-dark));color:#0a0a0a;padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:800;letter-spacing:.5px"></span>
+  </div>
+  <div class="h-right">
+    <button id="admin-logout-btn" onclick="adminLogout()" title="Αποσύνδεση" style="display:none;align-items:center;gap:6px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:8px;padding:6px 12px;font-family:inherit;font-size:.78rem;font-weight:700;color:#555;cursor:pointer">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      Αποσύνδεση
+    </button>
+    <div id="worker-health" title="Worker Status" style="display:none;align-items:center;gap:5px;cursor:pointer" onclick="checkWorkerHealth()">
+      <span style="font-size:.72rem;color:#888;font-weight:600" id="worker-health-txt">Worker</span>
+      <div class="health-dot unknown" id="worker-health-dot"></div>
+    </div>
+    <span class="conn-txt" id="ctxt">Firebase</span>
+    <div class="conn-dot" id="cdot"></div>
+  </div>
+</header>
+
+<!-- ═══ TABS ═══ -->
+<div class="tabs">
+  <button class="tab active" onclick="showTab('search')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg> Αναζήτηση</button>
+  <button class="tab" onclick="showTab('register')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Εγγραφή</button>
+  <button class="tab" onclick="showTab('customers')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Πελάτες</button>
+  <button class="tab" onclick="showTab('transactions')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg> Συναλλαγές</button>
+  <button class="tab" onclick="showTab('approvals')" id="tab-btn-approvals" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Εγκρίσεις <span id="approvals-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
+  <button class="tab" onclick="showTab('offers')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg> Προσφορές</button>
+  <button class="tab" onclick="showTab('marketing')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg> Μάρκετινγκ</button>
+  <button class="tab" onclick="showTab('stats')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Στατιστικά</button>
+  <button class="tab" onclick="showTab('system')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Σύστημα</button>
+  <button class="tab" onclick="showTab('gdpr')" id="tab-btn-gdpr" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> GDPR <span id="gdpr-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
+</div>
+
+<div class="container">
+
+  <!-- ── SEARCH TAB ── -->
+  <div id="tab-search" class="tc show">
+
+    <!-- VERIFY CODE CARD -->
+    <div class="card" style="margin-bottom:18px;background:linear-gradient(135deg,#0a0a0a,#142200);border:2px solid #8ae900">
+      <h2 style="color:white;margin-bottom:10px">
+        <span style="background:#8ae900;color:#0a0a0a;width:34px;height:34px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0">🎟️</span>
+        &nbsp;<span style="color:#8ae900">Επαλήθευση</span>&nbsp;Κωδικού
+      </h2>
+      <p style="color:#888;font-size:.84rem;margin-bottom:14px;line-height:1.5">Εισάγετε τον 6-ψήφιο κωδικό εξαργύρωσης από το κινητό του πελάτη.</p>
+      <div style="display:flex;gap:10px">
+        <input type="text" id="rcode-in" maxlength="7" placeholder="000 000" inputmode="numeric"
+          style="flex:1;padding:13px 17px;border:2px solid #8ae900;border-radius:11px;font-family:var(--font);font-size:1.4rem;font-weight:800;text-align:center;background:#1a1a1a;color:#8ae900;letter-spacing:6px;outline:none"
+          oninput="this.value=this.value.replace(/[^0-9 ]/g,'')"
+          onkeydown="if(event.key==='Enter')verifyCode()">
+        <button class="btn btn-green" onclick="verifyCode()" style="padding:13px 24px;font-size:1rem">✅ Επαλήθευση</button>
+      </div>
+      <div id="rcode-result" style="margin-top:14px;display:none"></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="ico">🔍</span> Αναζήτηση Πελάτη</h2>
+      <div class="search-box">
+        <input type="text" id="sinput" placeholder="Όνομα, τηλέφωνο ή αρ. κάρτας..." onkeydown="if(event.key==='Enter')search()">
+        <button class="btn btn-primary" onclick="search()">Αναζήτηση <div class="spin" id="sspin"></div></button>
+      </div>
+
+      <div id="cust-result">
+        <div class="cust-head">
+          <div class="c-avatar" id="r-av">—</div>
+          <div class="c-info">
+            <div class="c-name" id="r-name">—</div>
+            <div class="c-meta">📞 <span id="r-phone">—</span> &nbsp; <span id="r-ew">✉️ <span id="r-email">—</span></span></div>
+            <div class="c-meta" style="margin-top:3px">📅 Εγγραφή: <span id="r-date">—</span></div>
+          </div>
+          <div class="c-card" id="r-card">IP-????</div>
+        </div>
+
+        <div class="pts-row">
+          <div class="pts-box accent">
+            <div class="val" id="r-pts">0</div>
+            <div class="lbl">Διαθέσιμοι</div>
+          </div>
+          <div class="pts-box">
+            <div class="val" id="r-tot">0</div>
+            <div class="lbl">Lifetime</div>
+          </div>
+          <div class="pts-box">
+            <div class="val" id="r-tv">—</div>
+            <div class="lbl">Κατάταξη</div>
+          </div>
+        </div>
+
+        <div class="tier-bar">
+          <div class="t-icon" id="r-ticon">🥉</div>
+          <div class="t-info">
+            <div class="t-name" id="r-tname">Bronze</div>
+            <div class="t-sub"  id="r-tsub">—</div>
+            <div class="prog-bar"><div class="prog-fill" id="r-prog" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <div class="act-grid">
+          <button class="btn btn-green btn-full" onclick="openAdd()">➕ ΠΡΟΣΘΗΚΗ ΠΟΝΤΩΝ</button>
+          <button class="btn btn-primary btn-full" onclick="openRedeem()">💶 ΕΞΑΡΓΥΡΩΣΗ</button>
+        </div>
+
+        <div class="comm-sec">
+          <h4>📞 Επικοινωνία</h4>
+          <div class="comm-grid">
+            <button class="btn btn-outline btn-sm" onclick="openViber()">📱 Viber</button>
+            <button class="btn btn-outline btn-sm" onclick="openSMS()">💬 SMS</button>
+            <button class="btn btn-outline btn-sm" onclick="openEmail()">✉️ Email</button>
+          </div>
+        </div>
+
+        <div id="r-blocked-badge" style="display:none;background:#ff3b30;color:#fff;font-weight:900;font-size:.82rem;text-align:center;border-radius:10px;padding:7px 14px;margin-top:10px;letter-spacing:.5px">🚫 ΑΠΟΚΛΕΙΣΜΕΝΟΣ ΛΟΓΑΡΙΑΣΜΟΣ</div>
+        <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm" onclick="openEdit()">✏️ Επεξεργασία</button>
+          <button class="btn btn-sm" id="block-btn" onclick="blockCust()" style="background:#ff9800;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer">🚫 Block</button>
+          <button class="btn btn-red btn-sm" onclick="deleteCust()">🗑 Διαγραφή</button>
+        </div>
+      </div>
+
+      <div id="no-res" style="display:none">
+        <div class="empty"><span class="e">🔍</span>Δεν βρέθηκε πελάτης.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── REGISTER TAB ── -->
+  <div id="tab-register" class="tc">
+    <div class="card" style="max-width:600px;margin:0 auto">
+      <h2><span class="ico">➕</span> Νέος Πελάτης</h2>
+      <div class="form-row">
+        <div class="fg"><label>Ονοματεπώνυμο *</label><input type="text" id="rn" placeholder="π.χ. Νίκος Παπαδόπουλος"></div>
+        <div class="fg"><label>Τηλέφωνο *</label><input type="tel" id="rp" placeholder="π.χ. 6912345678"></div>
+      </div>
+      <div class="form-row">
+        <div class="fg"><label>Αριθμός Κάρτας *</label><input type="text" id="rc" placeholder="π.χ. IP-00001"></div>
+        <div class="fg"><label>Email * <span style="font-weight:400;color:var(--gray);text-transform:none;letter-spacing:0">— απαιτείται για σύνδεση στο app</span></label><input type="email" id="re" placeholder="π.χ. nikos@email.com"></div>
+      </div>
+      <div class="form-row">
+        <div class="fg"><label>🎂 Ημερομηνία Γέννησης</label><input type="date" id="rbday"></div>
+      </div>
+      <div class="fg">
+        <label>Κωδικός Παραπομπής <span style="color:var(--gray);font-weight:500;text-transform:none;letter-spacing:0">— προαιρετικό, από άλλον πελάτη</span></label>
+        <input type="text" id="rref" placeholder="π.χ. IP-00001" style="text-transform:uppercase">
+      </div>
+      <div class="chk">
+        <input type="checkbox" id="rterms">
+        <label for="rterms">Ο πελάτης αποδέχεται τους Όρους Χρήσης & Απορρήτου του iPear Loyalty *</label>
+      </div>
+      <div id="reg-store-badge" style="display:none;background:linear-gradient(135deg,var(--green),var(--green-dark));color:#0a0a0a;padding:8px 14px;border-radius:10px;font-size:.82rem;font-weight:800;margin-bottom:12px;text-align:center"></div>
+      <button class="btn btn-green btn-full" id="reg-btn" onclick="register()" style="font-size:1rem;padding:15px">
+        ✅ Εγγραφή Πελάτη <div class="spin" id="rspin"></div>
+      </button>
+    </div>
+  </div>
+
+  <!-- ── CUSTOMERS LIST TAB ── -->
+  <div id="tab-customers" class="tc">
+    <div class="card">
+      <h2>
+        <span class="ico">👥</span> Όλοι οι Πελάτες
+        <input id="cust-search" type="text" placeholder="🔍 Αναζήτηση (όνομα, κάρτα, τηλ)..." oninput="_filterCustTable()" style="margin-left:auto;padding:8px 14px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:.82rem;width:260px;outline:none;transition:border-color .15s" onfocus="this.style.borderColor='#6bb800'" onblur="this.style.borderColor='var(--border)'">
+        <button class="btn btn-sm btn-primary" style="margin-left:8px" onclick="clearSegmentFilter()">🔄 Ανανέωση</button>
+      </h2>
+      <div id="seg-filter-bar" style="display:none;align-items:center;gap:10px;background:#fff3e0;border:1.5px solid #ff9800;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:.88rem;font-weight:700;color:#e65100">
+        <span id="seg-filter-label">🎯 Φίλτρο segment</span>
+        <button onclick="clearSegmentFilter()" style="margin-left:auto;background:none;border:1.5px solid #e65100;border-radius:8px;padding:4px 10px;font-family:inherit;font-size:.78rem;font-weight:700;color:#e65100;cursor:pointer">✕ Καθαρισμός</button>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Κάρτα</th><th>Ονοματεπώνυμο</th><th>Τηλέφωνο</th><th>Πόντοι</th><th>Tier</th><th>Ενέργεια</th></tr></thead>
+          <tbody id="ctbody"><tr><td colspan="6" class="empty"><span class="e">⏳</span>Φόρτωση...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── STATS TAB (merged) ── -->
+  <div id="tab-stats" class="tc">
+
+    <!-- ═══ UNIFIED DASHBOARD ═══ -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h2 style="font-size:1.15rem;font-weight:900;display:flex;align-items:center;gap:10px;margin:0">
+        <span style="background:var(--green);color:var(--black);width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:.95rem">⚡</span>
+        Dashboard
+      </h2>
+      <button class="btn btn-sm btn-primary" onclick="loadStats();loadAnalytics()">🔄 Ανανέωση</button>
+    </div>
+
+    <!-- Row 1: Core KPIs (dark cards) -->
+    <div class="dash-grid">
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="sc">—</div>
+        <div class="dash-kpi-lbl">Σύνολο Πελατών</div>
+        <div class="dash-kpi-sub" id="dash-signups">—</div>
+      </div>
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="sk-redem" style="color:#8ae900">—</div>
+        <div class="dash-kpi-lbl">Redemption Rate</div>
+        <div class="dash-kpi-sub" id="dash-redem-detail">—</div>
+      </div>
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="sk-liab" style="color:#ff9500">—</div>
+        <div class="dash-kpi-lbl">Liability (€)</div>
+        <div class="dash-kpi-sub" id="dash-liab-pts">—</div>
+      </div>
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="sk-clv" style="color:#ba68c8">—</div>
+        <div class="dash-kpi-lbl">Μέσο CLV</div>
+        <div class="dash-kpi-sub" id="dash-loyalty-rate">—</div>
+      </div>
+    </div>
+
+    <!-- Row 2: Engagement KPIs (dark cards) -->
+    <div class="dash-grid">
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="dash-active30" style="color:#4fc3f7">—</div>
+        <div class="dash-kpi-lbl">Ενεργοί 30 Ημερών</div>
+        <div class="dash-kpi-sub" id="dash-active30-pct">—</div>
+      </div>
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="dash-push-count" style="color:#8ae900">—</div>
+        <div class="dash-kpi-lbl">🔔 Push Reach</div>
+        <div class="push-reach-bar"><div class="push-reach-fill" id="dash-push-bar" style="width:0%"></div></div>
+        <div class="dash-kpi-sub" id="dash-push-pct">—</div>
+      </div>
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="dash-top-reward">—</div>
+        <div class="dash-kpi-lbl">Top Reward</div>
+        <div class="dash-kpi-sub" id="dash-top-reward-count">—</div>
+      </div>
+      <div class="dash-kpi">
+        <div class="dash-kpi-val" id="dash-blocked" style="color:#ff3b30">—</div>
+        <div class="dash-kpi-lbl">Blocked / Ύποπτοι</div>
+        <div class="dash-kpi-sub" id="dash-total-tx">—</div>
+      </div>
+    </div>
+
+    <!-- Row 3: Tier Donut + Top Referrers -->
+    <div class="two-col" style="margin-bottom:18px">
+      <div class="card" style="padding:18px">
+        <h2 style="font-size:.95rem;margin-bottom:12px"><span class="ico" style="width:28px;height:28px;font-size:.8rem">🏆</span> Κατανομή Tiers</h2>
+        <div style="position:relative;height:220px;display:flex;align-items:center;justify-content:center">
+          <canvas id="tier-donut-chart"></canvas>
+        </div>
+        <div id="tier-bd" style="margin-top:10px"></div>
+      </div>
+      <div class="card" style="padding:18px">
+        <h2 style="font-size:.95rem;margin-bottom:12px"><span class="ico" style="width:28px;height:28px;font-size:.8rem">🏅</span> Top 10 Referrers</h2>
+        <ul class="top-referrers-list" id="kpi-top-referrers" style="max-height:320px;overflow-y:auto">
+          <li style="color:var(--gray);font-size:.85rem;justify-content:center">⏳ Φόρτωση...</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Push Notifications Status -->
+    <div class="card" style="margin-bottom:18px;padding:18px">
+      <h2 style="font-size:.95rem;margin-bottom:12px"><span class="ico" style="width:28px;height:28px;font-size:.8rem">🔔</span> Push Notifications — Ενεργοί Πελάτες</h2>
+      <div id="push-customers-list" style="max-height:350px;overflow-y:auto">
+        <div style="color:var(--gray);font-size:.85rem;text-align:center;padding:14px">⏳ Φόρτωση...</div>
+      </div>
+    </div>
+
+    <!-- Orphan Cleanup -->
+    <div class="card" style="margin-bottom:18px;padding:18px">
+      <h2 style="font-size:.95rem;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+        <span><span class="ico" style="width:28px;height:28px;font-size:.8rem">🧹</span> Εκκαθάριση Βάσης</span>
+        <button class="btn btn-sm btn-primary" onclick="_scanOrphans()">Σάρωση</button>
+      </h2>
+      <p style="font-size:.8rem;color:var(--gray);margin-bottom:12px">Βρίσκει ορφανές συναλλαγές (χωρίς αντίστοιχο πελάτη) και πελάτες χωρίς καμία συναλλαγή.</p>
+      <div id="orphan-results" style="font-size:.85rem;color:var(--gray);text-align:center;padding:10px">Πάτα «Σάρωση» για έλεγχο</div>
+    </div>
+
+    <!-- Segments -->
+    <div class="card" style="margin-bottom:18px">
+      <h2><span class="ico">🎯</span> Segments Πελατών</h2>
+      <div id="seg-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-top:14px">
+        <div class="empty"><span class="e">⏳</span>Φόρτωση...</div>
+      </div>
+    </div>
+
+    <div style="font-size:0.72rem;color:var(--gray);margin-bottom:14px;text-align:right">Ενημέρωση: <span id="su">—</span></div>
+
+    <!-- Divider -->
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+      <span style="font-size:.78rem;color:var(--gray);font-weight:600;letter-spacing:.05em">ΑΝΑΛΥΣΗ ΤΖΙΡΟΥ</span>
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+    </div>
+
+    <!-- Period filter + threshold -->
+    <div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;align-items:center">
+      <button class="chip active" id="an-chip-all"    onclick="setAnPeriod('all')">📅 Όλα</button>
+      <button class="chip"        id="an-chip-year"   onclick="setAnPeriod('year')">📆 Τρέχον Έτος</button>
+      <button class="chip"        id="an-chip-month"  onclick="setAnPeriod('month')">🗓️ Τρέχον Μήνας</button>
+      <button class="chip"        id="an-chip-custom" onclick="setAnPeriod('custom')">📌 Εύρος</button>
+      <!-- Custom date range inputs (hidden until 'custom' selected) -->
+      <div id="an-custom-range" style="display:none;align-items:center;gap:6px;flex-wrap:wrap">
+        <input type="date" id="an-from"
+          style="padding:5px 8px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font);font-size:.82rem"
+          onchange="renderAnalytics()">
+        <span style="font-size:.8rem;color:var(--gray)">→</span>
+        <input type="date" id="an-to"
+          style="padding:5px 8px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font);font-size:.82rem"
+          onchange="renderAnalytics()">
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <span style="font-size:.8rem;color:var(--gray)">Όριο Έκπτωσης:</span>
+        <input type="number" id="an-threshold" value="20" min="1" max="100"
+          style="width:60px;padding:6px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font);font-size:.9rem;text-align:center"
+          onchange="renderAnalytics()">
+        <span style="font-size:.8rem;color:var(--gray)">%</span>
+      </div>
+    </div>
+
+    <!-- Financial KPIs (6 cards, responsive) -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:13px;margin-bottom:18px" id="fin-kpi-grid">
+      <div class="card" style="text-align:center;padding:18px 12px">
+        <div style="font-size:.78rem;color:var(--gray);margin-bottom:6px">💰 Τζίρος</div>
+        <div id="an-revenue" style="font-size:1.7rem;font-weight:800;color:var(--black)">—</div>
+      </div>
+      <div class="card" style="text-align:center;padding:18px 12px">
+        <div style="font-size:.78rem;color:var(--gray);margin-bottom:6px">🏷️ Εκπτώσεις</div>
+        <div id="an-discounts" style="font-size:1.7rem;font-weight:800;color:#e53935">—</div>
+        <div id="an-disc-pct" style="font-size:.82rem;color:#e53935;margin-top:2px">—</div>
+      </div>
+      <div class="card" style="text-align:center;padding:18px 12px">
+        <div style="font-size:.78rem;color:var(--gray);margin-bottom:6px">💵 Καθαρός Τζίρος</div>
+        <div id="an-net" style="font-size:1.7rem;font-weight:800;color:#4caf50">—</div>
+        <div style="font-size:.75rem;color:var(--gray);margin-top:2px">μετά εκπτώσεων</div>
+      </div>
+      <div class="card" style="text-align:center;padding:18px 12px">
+        <div style="font-size:.78rem;color:var(--gray);margin-bottom:6px">🛒 AOV</div>
+        <div id="an-aov" style="font-size:1.7rem;font-weight:800;color:var(--black)">—</div>
+      </div>
+      <div class="card" style="text-align:center;padding:18px 12px">
+        <div style="font-size:.78rem;color:var(--gray);margin-bottom:6px">😴 Αδρανείς</div>
+        <div id="an-inactive" style="font-size:1.7rem;font-weight:800;color:#f57c00">—</div>
+        <div style="font-size:.75rem;color:var(--gray);margin-top:2px">90+ ημέρες</div>
+      </div>
+      <div class="card" style="text-align:center;padding:18px 12px">
+        <div style="font-size:.78rem;color:var(--gray);margin-bottom:6px">👤 Avg Αγορές/Πελάτη</div>
+        <div id="an-freq" style="font-size:1.7rem;font-weight:800;color:var(--black)">—</div>
+        <div style="font-size:.75rem;color:var(--gray);margin-top:2px">αγορές</div>
+      </div>
+    </div>
+
+    <!-- Alerts -->
+    <div id="an-alerts" style="margin-bottom:18px"></div>
+
+    <!-- Bar chart -->
+    <div class="card" style="margin-bottom:18px">
+      <h2 style="margin-bottom:14px"><span class="ico">📊</span> Τζίρος vs Εκπτώσεις ανά Πελάτη (Top 8)</h2>
+      <div style="position:relative;height:260px"><canvas id="an-chart"></canvas></div>
+    </div>
+
+    <!-- Per-customer table -->
+    <div class="card" style="margin-bottom:18px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+        <h2 style="margin:0"><span class="ico">👥</span> Ανάλυση ανά Πελάτη</h2>
+        <select id="an-sort" onchange="renderAnalytics()"
+          style="padding:7px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font);font-size:.82rem">
+          <option value="revenue">Τζίρος ↓</option>
+          <option value="discount">Εκπτώσεις ↓</option>
+          <option value="pct">% Έκπτωση ↓</option>
+          <option value="aov">AOV ↓</option>
+          <option value="frequency">Αγορές ↓</option>
+          <option value="points">Πόντοι ↓</option>
+        </select>
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:.83rem">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border)">
+              <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Πελάτης</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">Τζίρος</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">Εκπτώσεις</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">%</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">AOV</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">Αγορές</th>
+              <th style="text-align:right;padding:8px 6px;color:#8ae900;font-weight:600">🏅 Πόντοι</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">Τελευταία</th>
+              <th style="width:30px"></th>
+            </tr>
+          </thead>
+          <tbody id="an-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Category heatmap -->
+    <div class="card">
+      <h2 style="margin-bottom:14px"><span class="ico">🗺️</span> Απόδοση ανά Κατηγορία</h2>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:.83rem">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border)">
+              <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Κατηγορία</th>
+              <th style="text-align:left;padding:8px 6px;color:var(--gray);font-weight:600">Τζίρος</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">Συναλλαγές</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">AOV</th>
+              <th style="text-align:right;padding:8px 6px;color:var(--gray);font-weight:600">Μικτό Περιθώριο</th>
+            </tr>
+          </thead>
+          <tbody id="an-cat-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── TRANSACTIONS TAB ── -->
+  <div id="tab-transactions" class="tc">
+    <div class="card">
+      <h2>
+        <span class="ico">📜</span> Πρόσφατες Συναλλαγές
+        <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="loadTx()">🔄 Ανανέωση</button>
+      </h2>
+      <div class="tx-list" id="txlist"><div class="empty"><span class="e">⏳</span>Φόρτωση...</div></div>
+    </div>
+  </div>
+
+  <!-- ── APPROVALS TAB ── -->
+  <div id="tab-approvals" class="tc">
+    <div class="card">
+      <h2><span class="ico">🔔</span> Εκκρεμείς Εγκρίσεις Προσφορών</h2>
+      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Οι προσφορές που περιμένουν έγκριση από το tablet εμφανίζονται εδώ σε πραγματικό χρόνο.</p>
+      <div id="approvals-list"><div class="empty"><span class="e">✅</span>Δεν υπάρχουν εκκρεμείς εγκρίσεις</div></div>
+    </div>
+  </div>
+
+  <!-- ── MARKETING TAB (Ειδοποιήσεις + Προσφορές) ── -->
+  <div id="tab-marketing" class="tc">
+
+    <!-- COST OVERVIEW -->
+    <div class="card" style="margin-bottom:18px">
+      <h2><span class="ico">💰</span> Κόστος Επικοινωνιών</h2>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+        <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:12px;padding:14px 16px;text-align:center">
+          <div style="font-size:1.6rem;margin-bottom:4px">🔔</div>
+          <div style="font-weight:800;font-size:.95rem;color:var(--green-dark)">Push</div>
+          <div style="font-size:1.3rem;font-weight:900;color:var(--green);margin:4px 0">ΔΩΡΕΑΝ</div>
+          <div style="font-size:.72rem;color:var(--gray);line-height:1.4">Απεριόριστα μηνύματα<br>μέσω FCM (Google)</div>
+        </div>
+        <div style="background:#f0f4ff;border:1px solid #a0b4ff;border-radius:12px;padding:14px 16px;text-align:center">
+          <div style="font-size:1.6rem;margin-bottom:4px">📧</div>
+          <div style="font-weight:800;font-size:.95rem;color:#3a50b0">Email</div>
+          <div style="font-size:1.3rem;font-weight:900;color:#3a50b0;margin:4px 0">ΔΩΡΕΑΝ*</div>
+          <div style="font-size:.72rem;color:var(--gray);line-height:1.4">Free Plan: 300/ημέρα<br>Starter €19/μο: 20.000/μήνα</div>
+        </div>
+        <div style="background:#fff8e1;border:1px solid #ffd54f;border-radius:12px;padding:14px 16px;text-align:center">
+          <div style="font-size:1.6rem;margin-bottom:4px">📱</div>
+          <div style="font-weight:800;font-size:.95rem;color:#a07800">SMS (Brevo)</div>
+          <div style="font-size:1.3rem;font-weight:900;color:#a07800;margin:4px 0" id="sms-cost-rate">€0.05/SMS</div>
+          <div style="font-size:.72rem;color:var(--gray);line-height:1.4">Ελλάδα, GSM-7 160 χαρ.<br>Pay-as-you-go credits</div>
+        </div>
+        <div style="background:#f0fff4;border:1px solid #81c784;border-radius:12px;padding:14px 16px;text-align:center">
+          <div style="font-size:1.6rem;margin-bottom:4px">💬</div>
+          <div style="font-weight:800;font-size:.95rem;color:#2e7d32">Viber</div>
+          <div style="font-size:1.3rem;font-weight:900;color:#2e7d32;margin:4px 0">ΔΩΡΕΑΝ</div>
+          <div style="font-size:.72rem;color:var(--gray);line-height:1.4">Χειροκίνητο, deep link<br>μέσω εφαρμογής Viber</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:.78rem;color:var(--gray)">💡 <strong>Σύσταση:</strong> Push για καθημερινά, Email για σημαντικά, SMS μόνο για επείγοντα.</span>
+      </div>
+    </div>
+
+    <!-- EMAIL AUTOMATED -->
+    <div class="card" style="margin-bottom:18px">
+      <h2><span class="ico">📧</span> Email — Αυτόματη Αποστολή</h2>
+
+      <!-- Worker config -->
+      <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:10px;padding:13px 16px;margin-bottom:16px;font-size:.82rem;color:#333;line-height:1.7;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <span>⚙️ <strong>Cloudflare Worker</strong> — αποθηκεύεται μόνο σε αυτή τη συσκευή</span>
+        <button onclick="toggleWorkerConfig()" id="worker-cfg-toggle"
+                style="background:none;border:1px solid var(--green);border-radius:7px;color:var(--green-dark);font-family:var(--font);font-size:.78rem;font-weight:700;cursor:pointer;padding:4px 10px">
+          ▼ Ρυθμίσεις
+        </button>
+      </div>
+      <div id="worker-cfg-panel" style="display:none;margin-bottom:18px">
+        <div class="form-row">
+          <div class="fg">
+            <label>Worker URL</label>
+            <input type="url" id="worker-url" placeholder="https://email-worker.YOURNAME.workers.dev" style="font-size:.82rem" autocomplete="off">
+          </div>
+          <div class="fg">
+            <label>Admin Secret</label>
+            <input type="password" id="worker-secret" placeholder="το μυστικό που έβαλες στον Worker" autocomplete="new-password">
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button class="btn btn-sm btn-primary" onclick="saveWorkerConfig()">💾 Αποθήκευση</button>
+          <button class="btn btn-sm btn-outline" onclick="testWorkerConnection()">🔌 Έλεγχος</button>
+          <span id="worker-cfg-status" style="font-size:.8rem"></span>
+        </div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);margin-bottom:18px"></div>
+
+      <!-- Compose -->
+      <div class="form-row">
+        <div class="fg">
+          <label>Αποστολή σε</label>
+          <select id="email-target" onchange="toggleEmailTargetSearch(this.value)">
+            <option value="all">Όλους (με email)</option>
+            <option value="Bronze">Bronze 🥉</option>
+            <option value="Silver">Silver 🥈</option>
+            <option value="Gold">Gold 🥇</option>
+            <option value="Diamond">Diamond 💎</option>
+            <option value="Platinum">Platinum 👑</option>
+            <option value="one">👤 Συγκεκριμένος πελάτης</option>
+          </select>
+        </div>
+        <!-- Single customer search (shown only when "one" selected) -->
+        <div class="fg" id="email-one-wrap" style="display:none">
+          <label>Αναζήτηση πελάτη <span style="font-weight:400;color:var(--gray);font-size:.75rem">— όνομα, κάρτα ή τηλέφωνο</span></label>
+          <input type="text" id="email-one-search" placeholder="π.χ. Νότης ή IP-00001 ή 6912345678"
+            oninput="searchEmailOne(this.value)" autocomplete="off"
+            style="margin-bottom:6px">
+          <div id="email-one-results" style="border:1.5px solid var(--border);border-radius:9px;max-height:180px;overflow-y:auto;display:none;background:#fff"></div>
+          <div id="email-one-selected" style="display:none;background:var(--green-pale);border:1.5px solid var(--green);border-radius:9px;padding:10px 14px;font-size:.85rem;margin-top:4px"></div>
+        </div>
+        <div class="fg">
+          <label>Θέμα Email</label>
+          <input type="text" id="email-subject" placeholder="π.χ. 🎁 Ειδική Προσφορά — Μόνο για εσένα!">
+        </div>
+      </div>
+      <div class="fg">
+        <label>Μήνυμα <span style="font-weight:400;color:var(--gray);text-transform:none;font-size:.78rem">— χρησιμοποίησε <code style="background:#f5f5f5;padding:1px 5px;border-radius:4px">{{name}}</code> και <code style="background:#f5f5f5;padding:1px 5px;border-radius:4px">{{points}}</code></span></label>
+        <textarea id="email-body" rows="5" placeholder="Γεια σου {{name}},&#10;&#10;Θέλαμε να σε ενημερώσουμε ότι έχεις {{points}} πόντους..."></textarea>
+      </div>
+
+      <!-- Quick email templates -->
+      <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:16px">
+        <button class="chip" onclick="fillEmailTpl('promo')">🎁 Προσφορά</button>
+        <button class="chip" onclick="fillEmailTpl('points')">📊 Πόντοι</button>
+        <button class="chip" onclick="fillEmailTpl('birthday')">🎂 Γενέθλια</button>
+        <button class="chip" onclick="fillEmailTpl('inactive')">😴 Αδρανείς</button>
+        <button class="chip" onclick="fillEmailTpl('newtier')">🏆 Νέο Tier</button>
+        <button class="chip" onclick="fillEmailTpl('holiday')">🎄 Εορτές</button>
+      </div>
+
+      <!-- Live cost estimate -->
+      <div id="email-bulk-estimate" style="display:none;background:#f0f4ff;border:1px solid #a0b4ff;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:.84rem;color:#3a50b0;line-height:1.6"></div>
+      <button class="btn btn-outline btn-full" onclick="previewEmailBulk()" style="margin-bottom:8px;font-size:.9rem;padding:12px">
+        🔍 Προεπισκόπηση Παραληπτών & Κόστος
+      </button>
+      <button class="btn btn-green btn-full" id="send-email-btn" onclick="sendEmailBulk()" style="font-size:1rem;padding:14px">
+        📧 Αποστολή Email <div class="spin" id="email-spin"></div>
+      </button>
+      <div id="email-progress" style="margin-top:10px;font-size:.84rem;color:var(--gray);display:none">⏳ Φόρτωση...</div>
+      <div id="email-result" style="margin-top:12px"></div>
+    </div>
+
+    <!-- PUSH NOTIFICATIONS -->
+    <div class="card" style="margin-bottom:18px">
+      <h2><span class="ico">🔔</span> Push Notifications — Άμεση Αποστολή</h2>
+      <p style="color:var(--gray);font-size:.85rem;line-height:1.6;margin-bottom:16px">
+        Στείλε push notification απευθείας στις συσκευές των πελατών που έχουν ενεργοποιήσει τις ειδοποιήσεις.
+        Δεν χρειάζεται SMS — εμφανίζεται κατευθείαν στην οθόνη τους.
+      </p>
+
+      <!-- Info: uses Cloudflare Worker (no server key needed here) -->
+      <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:10px;padding:13px 16px;margin-bottom:16px;font-size:.82rem;color:#333;line-height:1.7">
+        ✅ Χρησιμοποιεί τον <strong>Cloudflare Worker</strong> σου (FCM V1 API). Δεν χρειάζεται server key εδώ — αρκεί το Worker URL από τις ρυθμίσεις Email παραπάνω.
+      </div>
+
+      <!-- Compose push -->
+      <div class="fg" style="margin-bottom:10px">
+        <label>Τίτλος Push</label>
+        <input type="text" id="push-title" placeholder="π.χ. 🎁 Νέα Προσφορά iPear!" maxlength="80">
+      </div>
+      <div class="fg" style="margin-bottom:10px">
+        <label>Μήνυμα</label>
+        <textarea id="push-body" rows="3" placeholder="π.χ. Έχεις 500 πόντους! Έλα να τους εξαργυρώσεις μέχρι το τέλος του μήνα. 🍐" style="resize:vertical"></textarea>
+      </div>
+
+      <!-- Quick templates -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
+        <button class="chip" onclick="fillPushTpl('promo')">🎁 Προσφορά</button>
+        <button class="chip" onclick="fillPushTpl('points')">📊 Πόντοι</button>
+        <button class="chip" onclick="fillPushTpl('bday')">🎂 Γενέθλια</button>
+        <button class="chip" onclick="fillPushTpl('new')">✨ Νέο Προϊόν</button>
+      </div>
+
+      <button class="btn btn-green btn-full" id="send-push-btn" onclick="sendPushNotification()" style="font-size:1rem;padding:14px">
+        🔔 Αποστολή Push Notification
+      </button>
+      <div id="push-result" style="margin-top:12px"></div>
+    </div>
+
+    <!-- BULK SMS (Brevo API) -->
+    <div class="card" style="margin-bottom:18px">
+      <h2><span class="ico">📱</span> Μαζικό SMS — Brevo API</h2>
+      <p style="color:var(--gray);font-size:.85rem;line-height:1.6;margin-bottom:16px">
+        Στείλε SMS μαζικά σε πελάτες μέσω Brevo. Κόστος ~€0.04-0.07/SMS. Το κείμενο μετατρέπεται αυτόματα σε κεφαλαία (GSM-7) για 160 χαρακτήρες ανά SMS.
+      </p>
+
+      <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:10px;padding:13px 16px;margin-bottom:16px;font-size:.82rem;color:#856404;line-height:1.7">
+        ⚠️ <strong>Χρέωση:</strong> Κάθε SMS χρεώνεται ξεχωριστά μέσω Brevo credits. Βεβαιώσου ότι έχεις αρκετά credits πριν στείλεις.
+      </div>
+
+      <div class="form-row">
+        <div class="fg">
+          <label>Αποστολή σε</label>
+          <select id="sms-target">
+            <option value="all">Όλους (με τηλέφωνο)</option>
+            <option value="Bronze">Bronze 🥉</option>
+            <option value="Silver">Silver 🥈</option>
+            <option value="Gold">Gold 🥇</option>
+            <option value="Diamond">Diamond 💎</option>
+            <option value="Platinum">Platinum 👑</option>
+          </select>
+        </div>
+      </div>
+      <div class="fg" style="margin-bottom:10px">
+        <label>Μήνυμα <span style="color:var(--gray);font-size:.8rem">(max 160 χαρακτήρες — GSM-7 αυτόματη μετατροπή)</span></label>
+        <textarea id="sms-bulk-body" rows="4" maxlength="160" placeholder="π.χ. Ειδική προσφορά μόνο σήμερα στο iPear! Πέρνα να τη δεις! 📱" oninput="document.getElementById('sms-bulk-chars').textContent=this.value.length+'/160'"></textarea>
+        <div id="sms-bulk-chars" style="text-align:right;font-size:.78rem;color:var(--gray)">0/160</div>
+      </div>
+
+      <!-- Quick templates -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
+        <button class="chip" onclick="fillSmsBulkTpl('promo')">🎁 Προσφορά</button>
+        <button class="chip" onclick="fillSmsBulkTpl('points')">📊 Πόντοι</button>
+        <button class="chip" onclick="fillSmsBulkTpl('arrival')">📱 Νέα Άφιξη</button>
+        <button class="chip" onclick="fillSmsBulkTpl('repair')">🔧 Επισκευές</button>
+      </div>
+
+      <!-- Live cost estimate -->
+      <div id="sms-bulk-estimate" style="display:none;background:#fff8e1;border:1px solid #ffd54f;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:.84rem;color:#856404;line-height:1.6"></div>
+      <button class="btn btn-outline btn-full" onclick="previewSmsBulk()" style="margin-bottom:8px;font-size:.9rem;padding:12px">
+        🔍 Προεπισκόπηση Παραληπτών & Κόστος
+      </button>
+      <button class="btn btn-green btn-full" id="send-sms-bulk-btn" onclick="sendSMSBulk()" style="font-size:1rem;padding:14px">
+        📱 Αποστολή Μαζικού SMS
+      </button>
+      <div id="sms-bulk-progress" style="margin-top:10px;font-size:.84rem;color:var(--gray);display:none"></div>
+      <div id="sms-bulk-result" style="margin-top:12px"></div>
+    </div>
+
+    <!-- VIBER MANUAL (SMS is handled by Brevo Bulk above) -->
+    <div class="two-col">
+      <div class="card">
+        <h2><span class="ico">💬</span> Viber — Χειροκίνητο</h2>
+        <p style="font-size:.8rem;color:var(--gray);margin-bottom:14px;line-height:1.6">Ανοίγει το Viber στη συσκευή σου. Κάνε κλικ στο 📤 για κάθε πελάτη. <strong>Δωρεάν.</strong></p>
+        <div class="fg">
+          <label>Αποστολή σε</label>
+          <select id="ntarget">
+            <option value="all">Όλους τους πελάτες</option>
+            <option value="Bronze">Μόνο Bronze 🥉</option>
+            <option value="Silver">Μόνο Silver 🥈</option>
+            <option value="Gold">Μόνο Gold 🥇</option>
+            <option value="Diamond">Μόνο Diamond 💎</option>
+            <option value="Platinum">Μόνο Platinum 👑</option>
+          </select>
+        </div>
+        <!-- Method is always Viber now (SMS handled by Brevo Bulk) -->
+        <select id="nmethod" style="display:none"><option value="viber" selected>Viber</option></select>
+        <div class="fg">
+          <label>Μήνυμα</label>
+          <textarea id="nmsg" rows="4" placeholder="Γράψε το μήνυμά σου..."></textarea>
+        </div>
+        <button class="btn btn-green btn-full" onclick="prepBulk()">📋 Προετοιμασία Λίστας</button>
+        <div id="bulk-list" style="margin-top:14px;max-height:300px;overflow-y:auto"></div>
+      </div>
+      <div class="card">
+        <h2><span class="ico">📋</span> Πρότυπα Viber</h2>
+        <div class="msg-tpl" onclick="fillTpl('promo')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('promo')"><strong>🎁 Ειδική Προσφορά</strong><span>Προσφορά ή νέο προϊόν</span></div>
+        <div class="msg-tpl" onclick="fillTpl('points')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('points')"><strong>📊 Ενημέρωση Πόντων</strong><span>Γενικό μήνυμα για πόντους</span></div>
+        <div class="msg-tpl" onclick="fillTpl('holiday')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('holiday')"><strong>🎄 Ευχές Εορτών</strong><span>Χριστουγεννιάτικες ευχές</span></div>
+        <div class="msg-tpl" onclick="fillTpl('arrival')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('arrival')"><strong>📱 Νέα Άφιξη</strong><span>Νέα προϊόντα στο κατάστημα</span></div>
+        <div class="msg-tpl" onclick="fillTpl('repair')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('repair')"><strong>🔧 Επισκευές</strong><span>Υπενθύμιση για επισκευή</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── OFFERS TAB ── -->
+  <div id="tab-offers" class="tc">
+    <div class="card">
+      <h2>
+        <span class="ico">🎁</span> Προσφορές
+        <button class="btn btn-green btn-sm" style="margin-left:auto" onclick="openOfferModal()">➕ Νέα Προσφορά</button>
+      </h2>
+      <p style="color:var(--gray);font-size:0.84rem;margin-bottom:16px;line-height:1.5">Οι ενεργές προσφορές εμφανίζονται αυτόματα στο customer app ως banner και στο tab "Προσφορές".</p>
+      <div id="offers-list"><div class="empty"><span class="e">⏳</span>Φόρτωση...</div></div>
+    </div>
+  </div>
+
+  <!-- ══ SYSTEM TAB (Συντήρηση + Backup) ══ -->
+  <div id="tab-system" class="tc">
+    <!-- KILL SWITCH -->
+    <div class="kill-switch-wrap" id="kill-switch-wrap">
+      <div style="font-size:2rem;flex-shrink:0">🔴</div>
+      <div class="ks-label">
+        <h3>Λειτουργία Συντήρησης (Kill Switch)</h3>
+        <p id="ks-status-text">Απενεργοποιημένο — οι εξαργυρώσεις λειτουργούν κανονικά</p>
+      </div>
+      <div class="toggle-sw" id="ks-toggle" onclick="toggleKillSwitch()" style="width:52px;height:28px;flex-shrink:0">
+        
+      </div>
+    </div>
+
+    <div class="two-col">
+
+      <!-- Points Expiry -->
+      <div class="card">
+        <h2><span class="ico">⏳</span> Εκπνοή Πόντων</h2>
+        <p style="color:var(--gray);font-size:.88rem;line-height:1.6;margin-bottom:16px">
+          Μηδενισμός πόντων για πελάτες που δεν έχουν επισκεφτεί το κατάστημα τους τελευταίους
+          <strong>12 μήνες</strong>. Καταγράφεται συναλλαγή τύπου «Εκπνοή» για κάθε πελάτη.
+        </p>
+        <div style="display:flex;gap:8px;margin-bottom:14px">
+          <button class="btn btn-outline" style="flex:1" onclick="previewExpirePoints()">🔍 Προεπισκόπηση</button>
+          <button class="btn" id="btn-expire-exec" onclick="executeExpirePoints()"
+            style="flex:1;display:none;background:#dc3545;color:#fff;border-color:#dc3545">🗑️ Εφαρμογή</button>
+        </div>
+        <div id="expire-preview"></div>
+      </div>
+
+      <!-- Tier Downgrade -->
+      <div class="card">
+        <h2><span class="ico">📉</span> Tier Downgrade</h2>
+        <p style="color:var(--gray);font-size:.88rem;line-height:1.6;margin-bottom:16px">
+          Μείωση tier κατά 1 επίπεδο για πελάτες χωρίς καμία αγορά στο
+          <strong>τρέχον ημερολογιακό έτος</strong>. Τα lifetime points μειώνονται στο max του κατώτερου tier.
+        </p>
+        <div style="display:flex;gap:8px;margin-bottom:14px">
+          <button class="btn btn-outline" style="flex:1" onclick="previewTierDowngrade()">🔍 Προεπισκόπηση</button>
+          <button class="btn" id="btn-downgrade-exec" onclick="executeTierDowngrade()"
+            style="flex:1;display:none;background:#dc3545;color:#fff;border-color:#dc3545">📉 Εφαρμογή</button>
+        </div>
+        <div id="downgrade-preview"></div>
+      </div>
+
+    </div>
+
+    <!-- ═══ SYSTEM HEALTH CHECK ═══ -->
+    <div style="border-top:1px solid var(--border);margin:18px 0"></div>
+    <div class="card" style="margin-bottom:18px">
+      <h2 style="display:flex;align-items:center;justify-content:space-between">
+        <span><span class="ico">🔧</span> System Health Check</span>
+        <button class="btn btn-sm btn-primary" onclick="_runSystemHealthCheck()">▶️ Εκτέλεση</button>
+      </h2>
+      <p style="color:var(--gray);font-size:.84rem;line-height:1.6;margin-bottom:14px">
+        Ολοκληρωμένος έλεγχος βάσης δεδομένων, Worker, Service Workers, και ακεραιότητας συστήματος.
+      </p>
+      <div id="health-results" style="font-size:.85rem">
+        <div style="text-align:center;color:var(--gray);padding:16px">Πάτα «Εκτέλεση» για πλήρη διαγνωστικό</div>
+      </div>
+    </div>
+
+    <!-- ── BACKUP (inside System) ── -->
+    <div style="display:flex;align-items:center;gap:12px;margin:18px 0">
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+      <span style="font-size:.78rem;color:var(--gray);font-weight:600;letter-spacing:.05em">BACKUP & ΕΠΑΝΑΦΟΡΑ</span>
+      <div style="flex:1;height:1px;background:var(--border)"></div>
+    </div>
+    <div class="two-col">
+      <div class="card">
+        <h2><span class="ico">💾</span> Εξαγωγή Backup</h2>
+        <p style="color:var(--gray);font-size:0.88rem;line-height:1.6;margin-bottom:18px">Εξαγωγή όλων των δεδομένων σε αρχείο JSON. Συνίσταται τουλάχιστον εβδομαδιαία.</p>
+        <button class="btn btn-green btn-full" onclick="exportBk()" style="margin-bottom:10px">
+          📥 Εξαγωγή Backup (JSON) <div class="spin" id="exspin"></div>
+        </button>
+        <button class="btn btn-outline btn-full" onclick="exportCSV()" style="margin-bottom:10px">
+          📊 Εξαγωγή Πελατών (CSV/Excel)
+        </button>
+        <div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:11px;font-size:0.8rem;color:#3a6e00">
+          ✅ Φύλαξε το αρχείο σε ασφαλές μέρος (cloud, USB).
+        </div>
+      </div>
+      <div class="card">
+        <h2><span class="ico">📤</span> Επαναφορά Backup</h2>
+        <p style="color:var(--gray);font-size:0.88rem;line-height:1.6;margin-bottom:18px">Επαναφορά από αρχείο JSON. Δεν διαγράφονται υπάρχοντα δεδομένα — προσθέτονται μόνο νέα.</p>
+        <button class="btn btn-primary btn-full" onclick="document.getElementById('impin').click()" style="margin-bottom:10px">
+          📤 Επαναφορά από Backup
+        </button>
+        <input type="file" id="impin" accept=".json" style="display:none" onchange="importBk(event)">
+        <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:11px;font-size:0.8rem;color:#856404">
+          ⚠️ Αν υπάρχουν ίδιες κάρτες θα παραληφθούν αυτόματα.
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ── GDPR DELETION REQUESTS TAB ── -->
+  <div id="tab-gdpr" class="tc">
+    <div class="card">
+      <h2><span class="ico">🗑</span> Αιτήματα Διαγραφής (GDPR Art. 17)</h2>
+      <p style="color:var(--gray);font-size:.88rem;line-height:1.6;margin-bottom:16px">
+        Πελάτες που ζήτησαν οριστική διαγραφή λογαριασμού από την εφαρμογή.
+        Η διαγραφή είναι <strong>μη αναστρέψιμη</strong> — ελέγξτε πριν εκτελέσετε.
+      </p>
+      <button class="btn btn-outline" onclick="loadDeletionRequests()" style="margin-bottom:16px">🔄 Ανανέωση</button>
+      <div id="gdpr-list" style="font-size:.88rem;color:var(--gray)">Πάτα «Ανανέωση» για φόρτωση.</div>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<!-- ═══ MODALS ═══ -->
+
+<!-- ADD POINTS -->
+<div class="modal-bg" id="m-add" role="dialog" aria-modal="true" aria-label="Προσθήκη πόντων">
+  <div class="modal">
+    <h3>➕ Προσθήκη Πόντων</h3>
+    <p style="margin-bottom:14px;color:var(--gray)">Πελάτης: <strong id="ma-name" style="color:var(--black)"></strong></p>
+    <div class="form-row">
+      <div class="fg"><label>Ποσό Αγοράς (€)</label><input type="number" id="ma-amt" min="1" step="1" placeholder="π.χ. 50" oninput="calcPts()"></div>
+      <div class="fg">
+        <label>Κατηγορία</label>
+        <select id="ma-cat" onchange="calcPts()">
+          <option value="10">📱 Αξεσουάρ (×10)</option>
+          <option value="10">🎮 Gadget (×10)</option>
+          <option value="15">🎨 Custom Θήκη (×15)</option>
+          <option value="15">🔧 Επισκευή (×15)</option>
+        </select>
+      </div>
+    </div>
+    <div class="pts-preview">
+      <div class="pv" id="pts-calc">0</div>
+      <div class="pl">Πόντοι που θα προστεθούν</div>
+    </div>
+    <div class="fg"><label>Σχόλιο / Αρ. Απόδειξης (προαιρετικό)</label><input type="text" id="ma-note" placeholder="π.χ. Απόδειξη #1234"></div>
+    <div class="modal-act">
+      <button class="btn btn-green" onclick="confirmAdd()">✅ Καταχώρηση</button>
+      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+    </div>
+  </div>
+</div>
+
+<!-- REDEEM -->
+<div class="modal-bg" id="m-redeem" role="dialog" aria-modal="true" aria-label="Εξαργύρωση πόντων">
+  <div class="modal">
+    <h3>💶 Εξαργύρωση</h3>
+    <p style="margin-bottom:14px;color:var(--gray)">Πελάτης: <strong id="mr-name" style="color:var(--black)"></strong><br>Διαθέσιμοι: <strong id="mr-pts" style="color:var(--green-dark)"></strong> πόντοι</p>
+    <div class="fg">
+      <label>Επιλογή Reward</label>
+      <select id="mr-sel">
+        <option value="250">🎟️ 5€ Έκπτωση — 250 πόντοι</option>
+        <option value="500">💵 10€ Έκπτωση — 500 πόντοι</option>
+        <option value="750">💳 15€ Έκπτωση — 750 πόντοι</option>
+        <option value="1000">👑 20€ Έκπτωση — 1.000 πόντοι</option>
+      </select>
+    </div>
+    <div class="modal-act">
+      <button class="btn btn-green" onclick="confirmRedeem()">💶 Εξαργύρωση</button>
+      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+    </div>
+  </div>
+</div>
+
+<!-- VIBER -->
+<div class="modal-bg" id="m-viber" role="dialog" aria-modal="true" aria-label="Αποστολή Viber">
+  <div class="modal">
+    <h3>📱 Viber</h3>
+    <p style="color:var(--gray);font-size:0.88rem;margin-bottom:14px"><strong id="mv-name"></strong> — <span id="mv-phone"></span></p>
+    <div id="mv-tpl">
+      <div class="msg-tpl" onclick="sViber('pts')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')sViber('pts')"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
+      <div class="msg-tpl" onclick="sViber('wel')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')sViber('wel')"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
+      <div class="msg-tpl" onclick="sViber('pro')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')sViber('pro')"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
+      <div class="msg-tpl" onclick="sViber('cust')"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
+    </div>
+    <div id="mv-compose" style="display:none">
+      <div class="fg">
+        <label>Μήνυμα</label>
+        <textarea id="mv-body" class="inp" rows="5" placeholder="Μήνυμα Viber..."></textarea>
+      </div>
+      <div style="background:#f0f4ff;border:1px solid #c8d8ff;border-radius:10px;padding:10px;font-size:.82rem;color:#555;margin-top:6px">
+        💡 Θα ανοίξει το Viber με τον αριθμό <strong id="mv-phone2"></strong>. Το μήνυμα αντιγράφεται αυτόματα στο clipboard.
+      </div>
+      <div class="modal-act" style="margin-top:12px">
+        <button class="btn btn-green" onclick="sendViberDeepLink()">📱 Ανοίξε Viber</button>
+        <button class="btn btn-outline" onclick="mvBack()">← Πίσω</button>
+      </div>
+    </div>
+    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:10px" id="mv-cancel">Ακύρωση</button>
+  </div>
+</div>
+
+<!-- SMS -->
+<div class="modal-bg" id="m-sms" role="dialog" aria-modal="true" aria-label="Αποστολή SMS">
+  <div class="modal">
+    <h3>💬 SMS</h3>
+    <p style="color:var(--gray);font-size:0.88rem;margin-bottom:14px"><strong id="ms-name"></strong> — <span id="ms-phone"></span></p>
+    <div id="ms-tpl">
+      <div class="msg-tpl" onclick="sSMS('pts')"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
+      <div class="msg-tpl" onclick="sSMS('wel')"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
+      <div class="msg-tpl" onclick="sSMS('pro')"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
+      <div class="msg-tpl" onclick="sSMS('cust')"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
+    </div>
+    <div id="ms-compose" style="display:none">
+      <div class="fg">
+        <label>Μήνυμα <span style="color:var(--gray);font-size:.8rem">(max 160 χαρακτήρες — GSM-7 αυτόματη μετατροπή)</span></label>
+        <textarea id="ms-body" class="inp" rows="5" maxlength="160" placeholder="Μήνυμα SMS..." oninput="document.getElementById('ms-chars').textContent=this.value.length+'/160'"></textarea>
+        <div id="ms-chars" style="text-align:right;font-size:.78rem;color:var(--gray)">0/160</div>
+      </div>
+      <div id="ms-err" style="color:#e53935;font-size:.85rem;margin-top:4px;min-height:18px"></div>
+      <div class="modal-act" style="margin-top:8px">
+        <button class="btn btn-green" id="ms-send-btn" onclick="sendSMSIndividual()">📤 Αποστολή SMS</button>
+        <button class="btn btn-outline" onclick="msBack()">← Πίσω</button>
+      </div>
+    </div>
+    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:10px" id="ms-cancel">Ακύρωση</button>
+  </div>
+</div>
+
+<!-- EMAIL INDIVIDUAL -->
+<div class="modal-bg" id="m-email" role="dialog" aria-modal="true" aria-label="Αποστολή Email">
+  <div class="modal">
+    <h3>✉️ Email</h3>
+    <p style="color:var(--gray);font-size:0.88rem;margin-bottom:14px"><strong id="me-name"></strong> — <span id="me-addr"></span></p>
+    <div id="me-tpl">
+      <div class="msg-tpl" onclick="sEmail('pts')"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
+      <div class="msg-tpl" onclick="sEmail('wel')"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
+      <div class="msg-tpl" onclick="sEmail('pro')"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
+      <div class="msg-tpl" onclick="sEmail('cust')"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
+    </div>
+    <div id="me-compose" style="display:none">
+      <div class="fg" style="margin-bottom:8px">
+        <label>Θέμα</label>
+        <input type="text" id="me-subject" class="inp" placeholder="Θέμα email...">
+      </div>
+      <div class="fg">
+        <label>Μήνυμα <span style="color:var(--gray);font-size:.8rem">(χρησιμοποίησε {{name}} και {{points}})</span></label>
+        <textarea id="me-body" class="inp" rows="6" placeholder="Μήνυμα..."></textarea>
+      </div>
+      <div id="me-err" style="color:#e53935;font-size:.85rem;margin-top:4px;min-height:18px"></div>
+      <div class="modal-act" style="margin-top:8px">
+        <button class="btn btn-green" id="me-send-btn" onclick="sendEmailIndividual()">📤 Αποστολή</button>
+        <button class="btn btn-outline" onclick="meBack()">← Πίσω</button>
+      </div>
+    </div>
+    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:10px" id="me-cancel">Ακύρωση</button>
+  </div>
+</div>
+
+<!-- OFFER MODAL -->
+<div class="modal-bg" id="m-offer" role="dialog" aria-modal="true" aria-label="Διαχείριση προσφοράς">
+  <div class="modal">
+    <h3 id="offer-modal-title">🎁 Νέα Προσφορά</h3>
+    <input type="hidden" id="offer-edit-id">
+    <div class="form-row">
+      <div class="fg"><label>Emoji</label><input type="text" id="of-emoji" placeholder="🎁" maxlength="2" style="font-size:1.4rem;text-align:center"></div>
+      <div class="fg"><label>Τίτλος *</label><input type="text" id="of-title" placeholder="π.χ. Διπλοί Πόντοι"></div>
+    </div>
+    <div class="fg"><label>Περιγραφή *</label><textarea id="of-desc" rows="3" placeholder="π.χ. Αυτό το Σαββατοκύριακο κέρδισε διπλούς πόντους σε κάθε αγορά!"></textarea></div>
+    <div class="fg">
+      <label>Φωτογραφία Background <span style="font-weight:400;color:var(--gray)">(προαιρετικό)</span></label>
+      <input type="hidden" id="of-image">
+      <input type="file" id="of-image-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="previewOfferImage(event)">
+      <div id="of-img-area" onclick="document.getElementById('of-image-file').click()" style="border:2px dashed var(--border);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:border-color .2s;position:relative" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='var(--border)'">
+        <div id="of-img-placeholder" style="color:var(--gray);font-size:.88rem">📷 Κλικ για επιλογή φωτογραφίας</div>
+        <div id="of-img-preview" style="display:none">
+          <img id="of-img-thumb" style="max-height:130px;max-width:100%;border-radius:9px;object-fit:cover;display:block;margin:0 auto">
+          <button onclick="removeOfferImage(event)" style="margin-top:8px;background:#fee2e2;color:#dc2626;border:none;border-radius:7px;padding:4px 12px;font-size:.78rem;font-weight:700;cursor:pointer;font-family:inherit">✕ Αφαίρεση</button>
+        </div>
+      </div>
+      <div style="font-size:.72rem;color:var(--gray);margin-top:5px">JPG / PNG / WebP · μέγιστο 10MB · αποθηκεύεται αυτόματα (συμπιεσμένο) στη βάση σου</div>
+    </div>
+    <div class="form-row">
+      <div class="fg"><label>Bonus πόντοι <span style="font-weight:400;color:var(--gray)">(0 = χωρίς bonus)</span></label><input type="number" id="of-points" min="0" step="50" value="0" placeholder="π.χ. 500"></div>
+      <div class="fg" style="display:flex;align-items:flex-end;padding-bottom:6px">
+        <div class="chk" style="margin:0"><input type="checkbox" id="of-single"><label for="of-single">Μία χρήση ανά πελάτη</label></div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="fg">
+        <label>E-shop κουπόνι <span style="font-weight:400;color:var(--gray)">(0 = χωρίς κουπόνι)</span></label>
+        <div style="display:flex;gap:8px">
+          <select id="of-eshop-type" style="flex:0 0 auto;min-width:100px;padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:inherit;font-size:.88rem;background:#fff">
+            <option value="percent">% Ποσοστό</option>
+            <option value="fixed_cart">€ Σταθερό</option>
+          </select>
+          <input type="number" id="of-eshop-amount" min="0" step="1" value="0" placeholder="π.χ. 10" style="flex:1">
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="fg"><label>Από</label><input type="date" id="of-start"></div>
+      <div class="fg"><label>Έως</label><input type="date" id="of-end"></div>
+    </div>
+    <div class="chk">
+      <input type="checkbox" id="of-active" checked>
+      <label for="of-active">Ενεργή — εμφανίζεται στο customer app</label>
+    </div>
+    <div class="modal-act">
+      <button class="btn btn-green" onclick="saveOffer()">✅ Αποθήκευση</button>
+      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+    </div>
+  </div>
+</div>
+
+<!-- PUSH AFTER OFFER MODAL -->
+<div class="modal-bg" id="m-offer-push" role="dialog" aria-modal="true" aria-label="Push ειδοποίηση προσφοράς">
+  <div class="modal" style="max-width:400px;text-align:center">
+    <div style="font-size:2.5rem;margin-bottom:12px">🔔</div>
+    <h3 style="margin-bottom:8px">Αποστολή Push Notification;</h3>
+    <p style="font-size:.88rem;color:var(--gray);line-height:1.6;margin-bottom:6px">Η προσφορά αποθηκεύτηκε επιτυχώς!</p>
+    <p style="font-size:.84rem;color:var(--gray);line-height:1.5;margin-bottom:20px">Θέλεις να ειδοποιήσεις <strong>όλους τους πελάτες</strong> με push notification για τη νέα προσφορά;</p>
+    <div id="offer-push-preview" style="background:var(--light);border:1px solid var(--border);border-radius:11px;padding:14px;text-align:left;margin-bottom:18px">
+      <div style="font-size:.72rem;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:6px">Προεπισκόπηση</div>
+      <div style="font-weight:800;font-size:.92rem" id="offer-push-title"></div>
+      <div style="font-size:.82rem;color:var(--gray);margin-top:3px" id="offer-push-body"></div>
+    </div>
+    <div id="offer-push-result" style="margin-bottom:12px"></div>
+    <div class="modal-act" style="justify-content:center;gap:10px">
+      <button class="btn btn-outline" onclick="closeM()">Όχι, ευχαριστώ</button>
+      <button class="btn btn-green" id="offer-push-send-btn" onclick="sendOfferPush()">🔔 Αποστολή</button>
+    </div>
+  </div>
+</div>
+
+<!-- ANALYTICS DRILL-DOWN -->
+<div class="modal-bg" id="m-analytics-drill" role="dialog" aria-modal="true" aria-label="Ανάλυση δεδομένων">
+  <div class="modal" style="max-width:680px;width:94vw">
+    <h3>📊 <span id="drill-name"></span></h3>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px">
+      <div style="background:var(--light);border-radius:10px;padding:12px;text-align:center">
+        <div style="font-size:.75rem;color:var(--gray);margin-bottom:4px">Τζίρος</div>
+        <div id="drill-revenue" style="font-size:1.25rem;font-weight:800"></div>
+      </div>
+      <div style="background:var(--light);border-radius:10px;padding:12px;text-align:center">
+        <div style="font-size:.75rem;color:var(--gray);margin-bottom:4px">Εκπτώσεις</div>
+        <div id="drill-discounts" style="font-size:1.25rem;font-weight:800;color:#e53935"></div>
+      </div>
+      <div style="background:var(--light);border-radius:10px;padding:12px;text-align:center">
+        <div style="font-size:.75rem;color:var(--gray);margin-bottom:4px">% Έκπτωση</div>
+        <div id="drill-pct" style="font-size:1.25rem;font-weight:800"></div>
+      </div>
+    </div>
+    <div style="position:relative;height:200px;margin-bottom:16px"><canvas id="drill-chart"></canvas></div>
+    <h4 style="margin-bottom:10px;font-size:.88rem;color:var(--gray);font-weight:600">Ιστορικό Συναλλαγών</h4>
+    <div id="drill-tx" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:10px"></div>
+    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:14px">Κλείσιμο</button>
+  </div>
+</div>
+
+<!-- CUSTOMER EDIT -->
+<div class="modal-bg" id="m-edit" role="dialog" aria-modal="true" aria-label="Επεξεργασία πελάτη">
+  <div class="modal">
+    <h3>✏️ Επεξεργασία Πελάτη</h3>
+    <input type="hidden" id="edit-cid">
+    <div class="form-row">
+      <div class="fg"><label>Ονοματεπώνυμο *</label><input type="text" id="ed-name" placeholder="π.χ. Νίκος Παπαδόπουλος"></div>
+      <div class="fg"><label>Τηλέφωνο *</label><input type="tel" id="ed-phone" placeholder="π.χ. 6912345678"></div>
+    </div>
+    <div class="fg"><label>Email</label><input type="email" id="ed-email" placeholder="π.χ. nikos@email.com"></div>
+    <div class="fg"><label>🎂 Ημερομηνία Γέννησης</label><input type="date" id="ed-bday"></div>
+    <div class="modal-act">
+      <button class="btn btn-green" onclick="saveEdit()">✅ Αποθήκευση</button>
+      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+    </div>
+  </div>
+</div>
+
+<!-- CUSTOM MSG -->
+<div class="modal-bg" id="m-custom" role="dialog" aria-modal="true" aria-label="Προσαρμοσμένη ενέργεια">
+  <div class="modal">
+    <h3>✍️ Προσωπικό Μήνυμα</h3>
+    <div class="fg"><label>Κείμενο</label><textarea id="cm-txt" rows="5" placeholder="Γράψε το μήνυμά σου..."></textarea></div>
+    <div class="modal-act">
+      <button class="btn btn-green" onclick="sendCustom()">📤 Αποστολή</button>
+      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+
+<script type="module" src="/src/admin-main.js"></script>
+<div class="build-version-stamp" id="build-stamp"></div>
+<script>document.getElementById('build-stamp').textContent=window.ADMIN_BUILD_TAG||'unknown';</script>
+</body>
+</html>

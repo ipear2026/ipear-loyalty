@@ -1,0 +1,5 @@
+# iPear Loyalty — Cloudflare Pages Redirects
+
+# Backwards compat: old /customer URL → new index
+/customer  /  302
+/customer.html  /  302
