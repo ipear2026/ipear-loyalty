@@ -13,40 +13,10 @@
 <meta name="apple-mobile-web-app-title" content="iPear Admin">
 <meta name="robots" content="noindex, nofollow">
 <!-- Chart.js loaded via dynamic npm import inside stats.js + analytics.js (lazy, on stats/analytics tab open) -->
-<script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('[sw] registration failed:', e.message)));
-}
-</script>
-
-<!-- ═══ TELEMETRY: Client-side error reporting to Worker /client-error ═══ -->
-<script>
-(function(){
-  var _W = 'https://email-worker.ipear2026.workers.dev';
-  var _F = false;
-  function _send(payload) {
-    if (_F) return;
-    _F = true;
-    try {
-      var body = JSON.stringify(Object.assign({
-        page: location.pathname,
-        ua: navigator.userAgent,
-        ts: new Date().toISOString(),
-        build: (window.ADMIN_BUILD_TAG || 'unknown')
-      }, payload));
-      if (navigator.sendBeacon) { navigator.sendBeacon(_W + '/client-error', body); }
-      else { fetch(_W + '/client-error', { method:'POST', body:body, headers:{'Content-Type':'application/json'}, keepalive:true }).catch(function(){}); }
-    } catch(_){}
-  }
-  window.onerror = function(msg, src, line, col, err) {
-    _send({ type:'onerror', message:String(msg).slice(0,500), source:(src||'').slice(-120), line:line, col:col, stack:(err&&err.stack||'').slice(0,800) });
-  };
-  window.addEventListener('unhandledrejection', function(ev) {
-    var r = ev.reason;
-    _send({ type:'rejection', message:String(r&&r.message||r||'').slice(0,500), stack:(r&&r.stack||'').slice(0,800) });
-  });
-})();
-</script>
+<!-- Phase B/3b: Service Worker registration + client-error telemetry + build stamp
+     extracted to /admin-bootstrap.js so the CSP can drop script-src 'unsafe-inline'.
+     The file is served from /public (Vite copies it to dist root). -->
+<script src="/admin-bootstrap.js"></script>
 
 </head>
 <body>
@@ -1153,6 +1123,6 @@ if ('serviceWorker' in navigator) {
 
 <script type="module" src="/src/admin-main.js"></script>
 <div class="build-version-stamp" id="build-stamp"></div>
-<script>document.getElementById('build-stamp').textContent=window.ADMIN_BUILD_TAG||'unknown';</script>
+<!-- Build-stamp text is set by /admin-bootstrap.js — no inline script needed. -->
 </body>
 </html>
