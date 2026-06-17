@@ -111,6 +111,11 @@ service cloud.firestore {
       //   (B) Migration:         docId == auth.uid, copy of pre-existing
       //                          random-id doc owned by the same email
       // Admin can create anything.
+      //
+      // The top-level predicate stays isAuth() so Path A (fresh signup,
+      // points=0, no migration) can land before the user clicks the email
+      // verification link. Path B (the email-match clone of a legacy doc) is
+      // gated by isVerifiedAuth() inside the branch — see CRITICAL-2 note.
       allow create: if isAdmin() || (
         isAuth() &&
         customerId == request.auth.uid &&
@@ -152,7 +157,16 @@ service cloud.firestore {
           // Path B: migration of legacy doc into uid-keyed doc.
           // Points/totalPoints/blocked MUST match the source doc exactly,
           // and the source doc MUST belong to the same auth email.
+          //
+          // CRITICAL-2: requires isVerifiedAuth() — without this gate, an
+          // attacker who registers a Firebase Auth account using a legacy
+          // customer's email (Firebase Auth allows registering any email; the
+          // legacy doc has no associated Auth user) can fork the victim's
+          // entire point balance into an attacker-owned uid-keyed doc and
+          // claim ownership via the uid path of ownsCustomer(). isUidBindOnly()
+          // plugged the UPDATE binding path; this plugs the CREATE/fork path.
           (
+            isVerifiedAuth() &&
             request.resource.data.keys().hasOnly([
               'uid','email','name','phone','card','points','totalPoints',
               'birthday','referredBy','blocked','referralProcessed',
@@ -265,10 +279,17 @@ service cloud.firestore {
         request.resource.data.customerUid == request.auth.uid &&
         request.resource.data.customerId  is string &&
         (
-          // Customer doc at customerId is owned + funded + not blocked
+          // Customer doc at customerId is owned + funded + not blocked.
+          // CRITICAL-3: the email-match branch is gated by isVerifiedAuth() so
+          // an unverified account whose token.email happens to match a legacy
+          // customer's email cannot mint a redemption that drains the legacy
+          // customer's points and gives the attacker a real-€ discount QR.
+          // The uid-match branch stays on isAuth() because uid binding itself
+          // is already verified-email-gated via isUidBindOnly().
           (exists(/databases/$(database)/documents/ipear_customers/$(request.resource.data.customerId)) &&
-           (custFromRedemption().data.uid   == request.auth.uid ||
-            custFromRedemption().data.email == request.auth.token.email) &&
+           (custFromRedemption().data.uid == request.auth.uid ||
+            (isVerifiedAuth() &&
+             custFromRedemption().data.email == request.auth.token.email)) &&
            custFromRedemption().data.blocked == false &&
            custFromRedemption().data.points  >= request.resource.data.points)
           ||

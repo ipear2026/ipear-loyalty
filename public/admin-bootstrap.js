@@ -10,6 +10,11 @@
 //    1. Service Worker registration
 //    2. Global error / unhandledrejection telemetry → Worker /client-error
 //    3. Build-stamp text (mirrors window.ADMIN_BUILD_TAG into #build-stamp)
+//    4. HIGH-3: Event delegation dispatcher — restores behavior of the
+//       inline oninput/onchange/onfocus/onblur/onmouseover/onmouseout
+//       handlers that were removed from admin.html so the CSP could drop
+//       `script-src 'unsafe-inline'`. Triggers are encoded as data-on-<evt>
+//       attributes with a small action vocabulary.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // 1. Service Worker registration
@@ -79,3 +84,82 @@ if (document.readyState === 'loading') {
 } else {
   _setBuildStamp();
 }
+
+// 4. Event delegation for CSP-safe handlers (HIGH-3)
+//
+// Action vocabulary (value of data-on-<evt> attribute):
+//   numeric-sanitize     — strip non-digits from the input value
+//   focus-green          — set borderColor to #6bb800
+//   blur-default         — set borderColor to var(--border)
+//   hover-green          — set borderColor to var(--green)
+//   hover-default        — set borderColor to var(--border)
+//   count-chars          — write `<len>` or `<len>/<max>` into the element
+//                          identified by data-counter-target; max comes from
+//                          data-counter-max (optional).
+//   call:<fnName>        — invoke window.<fnName>() with no args
+//   call:<fnName>:value  — invoke window.<fnName>(el.value)
+//   call:<fnName>:event  — invoke window.<fnName>(ev)
+(function () {
+  function _run(action, el, ev) {
+    switch (action) {
+      case 'numeric-sanitize':
+        el.value = String(el.value || '').replace(/[^0-9 ]/g, '');
+        return;
+      case 'focus-green':
+        el.style.borderColor = '#6bb800';
+        return;
+      case 'blur-default':
+        el.style.borderColor = 'var(--border)';
+        return;
+      case 'hover-green':
+        el.style.borderColor = 'var(--green)';
+        return;
+      case 'hover-default':
+        el.style.borderColor = 'var(--border)';
+        return;
+      case 'count-chars': {
+        var targetId = el.getAttribute('data-counter-target');
+        if (!targetId) return;
+        var tgt = document.getElementById(targetId);
+        if (!tgt) return;
+        var max = el.getAttribute('data-counter-max');
+        var len = String(el.value || '').length;
+        tgt.textContent = max ? (len + '/' + max) : String(len);
+        return;
+      }
+      default: {
+        if (action.indexOf('call:') !== 0) return;
+        var parts = action.split(':');
+        var fnName = parts[1];
+        var arg    = parts[2] || '';
+        var fn = window[fnName];
+        if (typeof fn !== 'function') return;
+        if (arg === 'value')      fn(el.value);
+        else if (arg === 'event') fn(ev);
+        else                      fn();
+      }
+    }
+  }
+  function _dispatch(evt, attr) {
+    var el = evt.target;
+    // Walk up — handlers may sit on container elements (e.g. hover on a div).
+    while (el && el.getAttribute) {
+      var action = el.getAttribute(attr);
+      if (action) { _run(action, el, evt); return; }
+      el = el.parentNode;
+    }
+  }
+  var events = [
+    { name: 'input',     attr: 'data-on-input',     capture: false },
+    { name: 'change',    attr: 'data-on-change',    capture: false },
+    { name: 'focus',     attr: 'data-on-focus',     capture: true  }, // focus doesn't bubble
+    { name: 'blur',      attr: 'data-on-blur',      capture: true  }, // blur doesn't bubble
+    { name: 'mouseover', attr: 'data-on-mouseover', capture: false },
+    { name: 'mouseout',  attr: 'data-on-mouseout',  capture: false },
+  ];
+  for (var i = 0; i < events.length; i++) {
+    (function (e) {
+      document.addEventListener(e.name, function (ev) { _dispatch(ev, e.attr); }, e.capture);
+    })(events[i]);
+  }
+})();

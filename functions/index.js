@@ -260,6 +260,22 @@ exports.syncAdminClaim = onDocumentWritten(
       // Remove the claim entirely when it's false, so the token stays slim.
       if (!desired) delete nextClaims.admin;
       await getAuth().setCustomUserClaims(uid, nextClaims);
+
+      // HIGH-2: on demotion, force-revoke refresh tokens so any cached
+      // ID token (up to 1h old) carrying `admin: true` becomes unusable
+      // immediately. Firestore rules' isAdmin() reads request.auth.token.admin;
+      // without revocation, a demoted admin retains full access for up to
+      // one hour after the ipear_admins/{uid} doc is deleted — i.e. through
+      // most of the incident-response window.
+      if (!desired) {
+        try {
+          await getAuth().revokeRefreshTokens(uid);
+          console.log(`[syncAdminClaim] revoked refresh tokens for uid=${uid}`);
+        } catch (e) {
+          console.error(`[syncAdminClaim] revokeRefreshTokens failed for uid=${uid}:`, e.message);
+        }
+      }
+
       console.log(
         `[syncAdminClaim] ${docExists ? "+admin" : "-admin"} for uid=${uid} (re-login required for token refresh)`
       );

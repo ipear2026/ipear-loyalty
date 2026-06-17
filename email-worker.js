@@ -77,12 +77,42 @@ function isRateLimited(ip) {
 //
 // Returns: { limited: boolean, reason?: 'kv-unavailable' | 'rate-exceeded' }
 // Callers should treat `limited === true` as a hard 503/429.
+// HIGH-4: IPv6 collapse to /64 prefix. The full 128-bit IPv6 address is
+// attacker-controlled across an entire /64 they hold for free — bucketing
+// per full address means 2^64 buckets per origin and zero effective rate
+// limit. /64 is the smallest prefix typically assigned to a single client.
+// Also handles `::` shorthand by expanding to 8 explicit groups first.
+// Non-IPv6 strings (IPv4, "unknown", literal target keys like "t:foo") pass
+// through untouched.
+function normalizeIpForRateLimit(ip) {
+  if (!ip || typeof ip !== 'string') return ip;
+  if (!ip.includes(':')) return ip;             // IPv4 or non-IP key
+  if (ip.startsWith('t:')) return ip;           // compound target key — leave intact
+  try {
+    let s = ip;
+    if (s.includes('::')) {
+      const [left, right] = s.split('::', 2);
+      const leftParts  = left  ? left.split(':')  : [];
+      const rightParts = right ? right.split(':') : [];
+      const missing    = 8 - leftParts.length - rightParts.length;
+      if (missing < 0) return ip;               // malformed — pass through
+      const fill = new Array(missing).fill('0');
+      s = [...leftParts, ...fill, ...rightParts].join(':');
+    }
+    const parts = s.split(':');
+    if (parts.length < 4) return ip;            // malformed — pass through
+    return parts.slice(0, 4).join(':') + '::/64';
+  } catch (_) {
+    return ip;
+  }
+}
+
 async function isRateLimitedKV(env, ip, prefix, maxHits, windowSeconds) {
   if (!env.RATE_LIMIT_KV) {
     console.error('[rate-limit] FAIL-CLOSED: RATE_LIMIT_KV binding missing');
     return { limited: true, reason: 'kv-unavailable' };
   }
-  const key = `rl:${prefix}:${ip}`;
+  const key = `rl:${prefix}:${normalizeIpForRateLimit(ip)}`;
   try {
     const raw = await env.RATE_LIMIT_KV.get(key);
     const now = Date.now();
@@ -112,6 +142,22 @@ async function rateLimitOrBlock(env, ip, prefix, maxHits, windowSeconds, CORS, c
     return resp({ error: 'Service temporarily unavailable' }, 503, CORS);
   }
   return resp({ error: customMsg || 'Too many requests' }, 429, CORS);
+}
+
+// HIGH-4: compound rate limit (IP /64 + per-target). Use on cost-sensitive
+// public endpoints where a single attacker rotating IPv6 across a /64 should
+// not be able to drain a paid resource (SMS, transactional email) against a
+// single victim email/phone.
+//
+// targetKey examples: 'phone:306900000000', 'email:victim@example.com'.
+// The IP and target buckets are checked sequentially against the same window
+// and threshold — if EITHER is over the limit, we 429. Two KV writes per call.
+async function rateLimitCompound(env, ip, targetKey, prefix, maxHits, windowSeconds, CORS, customMsg) {
+  const ipRes = await rateLimitOrBlock(env, ip, prefix, maxHits, windowSeconds, CORS, customMsg);
+  if (ipRes) return ipRes;
+  if (!targetKey) return null;
+  const tgtRes = await rateLimitOrBlock(env, 't:' + targetKey, prefix, maxHits, windowSeconds, CORS, customMsg);
+  return tgtRes;
 }
 
 // ── MEDIUM-5: Capped JSON body reader ──────────────────────────────────
@@ -372,6 +418,12 @@ async function handleSendSmsOtp(request, env, CORS) {
   if (!rawPhone || !/^6\d{9}$/.test(rawPhone))
     return resp({ error: 'Μη έγκυρος αριθμός (π.χ. 6912345678)' }, 400, CORS);
 
+  // ── HIGH-4: per-phone window limit (5 per 15 min) — defeats IPv6 rotation
+  //    targeting a single victim phone. Complements the 60s per-phone cooldown
+  //    (in-memory + KV) below, which throttles burst rate; this throttles
+  //    aggregate volume per phone across a wider window.
+  { const _rl = await rateLimitOrBlock(env, 't:phone:' + rawPhone, 'otp', RATE_LIMIT_MAX_HITS, 900, CORS, 'Πολλές προσπάθειες για αυτό το νούμερο.'); if (_rl) return _rl; }
+
   // ── Per-phone cooldown (1 per 60s, KV-backed) ──
   if (await isOtpRateLimited(rawPhone, env))
     return resp({ error: 'Ήδη εστάλη OTP. Περίμενε 60 δευτερόλεπτα.' }, 429, CORS);
@@ -624,6 +676,14 @@ async function handleSendWelcome(request, env, CORS) {
     const verifyData = await verifyRes.json();
     const u = verifyData?.users?.[0];
     if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
+    // CRITICAL-1: reject unverified-email tokens. The signature being valid is
+    // not enough — Firebase Auth lets anyone register with any email and
+    // emailVerified stays false until the user clicks the verification link.
+    // Without this gate, an attacker can mint the +50 marketing bonus and use
+    // /send-welcome as a phishing reflector against the real owner of the email.
+    if (u.emailVerified !== true) {
+      return resp({ error: 'email-not-verified' }, 403, CORS);
+    }
     verifiedUid   = u.localId;
     verifiedEmail = String(u.email).trim().toLowerCase();
   } catch (e) {
@@ -2163,6 +2223,14 @@ async function handleResetPassword(request, env, CORS) {
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)
     return resp({ error: 'Valid email is required' }, 400, CORS);
 
+  // HIGH-4: per-email window limit (5 per 15 min) — IP-only limit is defeated
+  // by IPv6 /64 rotation, letting an attacker reset-bomb a single victim
+  // mailbox into junk-folder hell. Compound bucket caps aggregate volume per
+  // target inbox regardless of source distribution.
+  // SAME response shape as the IP limit, so we don't leak whether the email
+  // is the limited dimension.
+  { const _rl = await rateLimitOrBlock(env, 't:email:' + email, 'reset', RATE_LIMIT_MAX_HITS, 900, CORS, 'Too many requests. Please try again later.'); if (_rl) return _rl; }
+
   // Limit name length to prevent oversized payloads
   if (body.name !== undefined && body.name !== null &&
       (typeof body.name !== 'string' || body.name.length > 200))
@@ -2283,6 +2351,28 @@ function isCheckRegLimited(ip) {
   return b.hits > CHECK_REG_RATE_MAX;
 }
 
+// MEDIUM-2: /check-registration is intentionally a NON-ORACLE now.
+//
+// Previous behavior returned `{ exists: boolean, blocked: boolean }`, which —
+// even with a randomized timing delay — let an unauthenticated attacker
+// enumerate which emails/phones are registered (3 reqs/IP/15min × IPv6
+// rotation = unbounded harvest of a customer list). The endpoint stays alive
+// because removing it would 404 legacy client builds in the wild and the
+// frontend code branches gracefully on absent `exists`. We:
+//   • Keep input validation (defends against garbage payloads).
+//   • Keep rate limiting (defends against resource amplification).
+//   • Skip every Firestore read (saves cost + closes the oracle).
+//   • Preserve the 200-600 ms response delay so request timing is
+//     indistinguishable from the legacy code path.
+//   • Return a constant `{ ok: true }` regardless of input.
+//
+// Client implication: the signup duplicate-detection UI and the legacy
+// first-login auto-detection both rely on the old `exists` field. Both
+// degrade gracefully (signup falls through to Firebase Auth's
+// "email-already-in-use" error; legacy first-login users must use the
+// forgot-password flow). Plan a follow-up to remove the dead client calls
+// in src/auth.js and replace the legacy-first-login flow with a magic-link
+// or admin-issued claim mechanism.
 async function handleCheckRegistration(request, env, CORS) {
   const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
   pruneRateBuckets();
@@ -2301,70 +2391,11 @@ async function handleCheckRegistration(request, env, CORS) {
   if (phone && !/^6\d{9}$/.test(phone))
     return resp({ error: 'Invalid phone format' }, 400, CORS);
 
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
+  // Constant-time-ish delay so attackers can't distinguish input shapes
+  // (200–600 ms — matches the legacy response distribution).
+  await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
 
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    let emailExists = false, phoneExists = false, blocked = false;
-    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`;
-    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-    const fsSelect = { fields: [{ fieldPath: 'blocked' }] };
-
-    // Check email via Firestore (source of truth — Auth orphans after admin delete are ignored)
-    if (email && !blocked) {
-      const fsRes = await fetch(fsBase, {
-        method: 'POST', headers: fsHeaders,
-        body: JSON.stringify({
-          structuredQuery: {
-            from: [{ collectionId: 'ipear_customers' }],
-            where: { fieldFilter: { field: { fieldPath: 'email' }, op: 'EQUAL', value: { stringValue: email } } },
-            select: fsSelect, limit: 1
-          }
-        })
-      });
-      if (fsRes.ok) {
-        const results = await fsRes.json();
-        if (Array.isArray(results) && results.length > 0 && results[0].document) {
-          emailExists = true;
-          blocked      = results[0].document.fields?.blocked?.booleanValue === true;
-        }
-      }
-    }
-
-    // Check phone via Firestore
-    if (phone && !blocked) {
-      const fsRes = await fetch(fsBase, {
-        method: 'POST', headers: fsHeaders,
-        body: JSON.stringify({
-          structuredQuery: {
-            from: [{ collectionId: 'ipear_customers' }],
-            where: { fieldFilter: { field: { fieldPath: 'phone' }, op: 'EQUAL', value: { stringValue: phone } } },
-            select: fsSelect, limit: 1
-          }
-        })
-      });
-      if (fsRes.ok) {
-        const results = await fsRes.json();
-        if (Array.isArray(results) && results.length > 0 && results[0].document) {
-          phoneExists = true;
-          blocked = results[0].document.fields?.blocked?.booleanValue === true;
-        }
-      }
-    }
-
-    // Anti-enumeration: add random delay (200–600ms) to prevent timing attacks
-    await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
-
-    // SEC-FIX C-2: generic response — never reveal which specific field matched
-    const exists = emailExists || phoneExists;
-    return resp({ exists, blocked: exists ? blocked : false }, 200, CORS);
-
-  } catch(e) {
-    console.error('[check-registration]', e.message);
-    return resp({ error: 'Check failed' }, 503, CORS);
-  }
+  return resp({ ok: true }, 200, CORS);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2404,8 +2435,16 @@ async function handleProcessReferral(request, env, CORS) {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
     );
     const verifyData = await verifyRes.json();
-    const callerUid = verifyData?.users?.[0]?.localId;
+    const u = verifyData?.users?.[0];
+    const callerUid = u?.localId;
     if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
+    // CRITICAL-1: reject unverified-email tokens. Without this gate, an
+    // attacker who registers an Auth account with an unowned email can drain
+    // /process-referral to mint +100 to themselves AND credit a real referrer
+    // by card lookup, repeatedly via IPv6 rotation.
+    if (u.emailVerified !== true) {
+      return resp({ error: 'email-not-verified' }, 403, CORS);
+    }
 
     // 2. Get service account access token for Firestore
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);

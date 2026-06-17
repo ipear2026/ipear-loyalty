@@ -95,7 +95,7 @@
       <div style="display:flex;gap:10px">
         <input type="text" id="rcode-in" maxlength="7" placeholder="000 000" inputmode="numeric"
           style="flex:1;padding:13px 17px;border:2px solid #8ae900;border-radius:11px;font-family:var(--font);font-size:1.4rem;font-weight:800;text-align:center;background:#1a1a1a;color:#8ae900;letter-spacing:6px;outline:none"
-          oninput="this.value=this.value.replace(/[^0-9 ]/g,'')"
+          data-on-input="numeric-sanitize"
           data-key-action="verifyCode">
         <button class="btn btn-green" data-action="verifyCode" style="padding:13px 24px;font-size:1rem">✅ Επαλήθευση</button>
       </div>
@@ -207,7 +207,7 @@
     <div class="card">
       <h2>
         <span class="ico">👥</span> Όλοι οι Πελάτες
-        <input id="cust-search" type="text" placeholder="🔍 Αναζήτηση (όνομα, κάρτα, τηλ)..." oninput="_filterCustTable()" style="margin-left:auto;padding:8px 14px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:.82rem;width:260px;outline:none;transition:border-color .15s" onfocus="this.style.borderColor='#6bb800'" onblur="this.style.borderColor='var(--border)'">
+        <input id="cust-search" type="text" placeholder="🔍 Αναζήτηση (όνομα, κάρτα, τηλ)..." data-on-input="call:_filterCustTable" style="margin-left:auto;padding:8px 14px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:.82rem;width:260px;outline:none;transition:border-color .15s" data-on-focus="focus-green" data-on-blur="blur-default">
         <button class="btn btn-sm btn-primary" style="margin-left:8px" data-action="clearSegmentFilter">🔄 Ανανέωση</button>
       </h2>
       <div id="seg-filter-bar" style="display:none;align-items:center;gap:10px;background:#fff3e0;border:1.5px solid #ff9800;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:.88rem;font-weight:700;color:#e65100">
@@ -346,17 +346,17 @@
       <div id="an-custom-range" style="display:none;align-items:center;gap:6px;flex-wrap:wrap">
         <input type="date" id="an-from"
           style="padding:5px 8px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font);font-size:.82rem"
-          onchange="renderAnalytics()">
+          data-on-change="call:renderAnalytics">
         <span style="font-size:.8rem;color:var(--gray)">→</span>
         <input type="date" id="an-to"
           style="padding:5px 8px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font);font-size:.82rem"
-          onchange="renderAnalytics()">
+          data-on-change="call:renderAnalytics">
       </div>
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
         <span style="font-size:.8rem;color:var(--gray)">Όριο Έκπτωσης:</span>
         <input type="number" id="an-threshold" value="20" min="1" max="100"
           style="width:60px;padding:6px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font);font-size:.9rem;text-align:center"
-          onchange="renderAnalytics()">
+          data-on-change="call:renderAnalytics">
         <span style="font-size:.8rem;color:var(--gray)">%</span>
       </div>
     </div>
@@ -406,7 +406,7 @@
     <div class="card" style="margin-bottom:18px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
         <h2 style="margin:0"><span class="ico">👥</span> Ανάλυση ανά Πελάτη</h2>
-        <select id="an-sort" onchange="renderAnalytics()"
+        <select id="an-sort" data-on-change="call:renderAnalytics"
           style="padding:7px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font);font-size:.82rem">
           <option value="revenue">Τζίρος ↓</option>
           <option value="discount">Εκπτώσεις ↓</option>
@@ -550,7 +550,7 @@
       <div class="form-row">
         <div class="fg">
           <label>Αποστολή σε</label>
-          <select id="email-target" onchange="toggleEmailTargetSearch(this.value)">
+          <select id="email-target" data-on-change="call:toggleEmailTargetSearch:value">
             <option value="all">Όλους (με email)</option>
             <option value="Bronze">Bronze 🥉</option>
             <option value="Silver">Silver 🥈</option>
@@ -564,7 +564,7 @@
         <div class="fg" id="email-one-wrap" style="display:none">
           <label>Αναζήτηση πελάτη <span style="font-weight:400;color:var(--gray);font-size:.75rem">— όνομα, κάρτα ή τηλέφωνο</span></label>
           <input type="text" id="email-one-search" placeholder="π.χ. Νότης ή IP-00001 ή 6912345678"
-            oninput="searchEmailOne(this.value)" autocomplete="off"
+            data-on-input="call:searchEmailOne:value" autocomplete="off"
             style="margin-bottom:6px">
           <div id="email-one-results" style="border:1.5px solid var(--border);border-radius:9px;max-height:180px;overflow-y:auto;display:none;background:#fff"></div>
           <div id="email-one-selected" style="display:none;background:var(--green-pale);border:1.5px solid var(--green);border-radius:9px;padding:10px 14px;font-size:.85rem;margin-top:4px"></div>
@@ -664,7 +664,7 @@
       </div>
       <div class="fg" style="margin-bottom:10px">
         <label>Μήνυμα <span style="color:var(--gray);font-size:.8rem">(max 160 χαρακτήρες — GSM-7 αυτόματη μετατροπή)</span></label>
-        <textarea id="sms-bulk-body" rows="4" maxlength="160" placeholder="π.χ. Ειδική προσφορά μόνο σήμερα στο iPear! Πέρνα να τη δεις! 📱" oninput="document.getElementById('sms-bulk-chars').textContent=this.value.length+'/160'"></textarea>
+        <textarea id="sms-bulk-body" rows="4" maxlength="160" placeholder="π.χ. Ειδική προσφορά μόνο σήμερα στο iPear! Πέρνα να τη δεις! 📱" data-on-input="count-chars" data-counter-target="sms-bulk-chars" data-counter-max="160"></textarea>
         <div id="sms-bulk-chars" style="text-align:right;font-size:.78rem;color:var(--gray)">0/160</div>
       </div>
 
@@ -826,7 +826,7 @@
         <button class="btn btn-primary btn-full" data-click-target="impin" style="margin-bottom:10px">
           📤 Επαναφορά από Backup
         </button>
-        <input type="file" id="impin" accept=".json" style="display:none" onchange="importBk(event)">
+        <input type="file" id="impin" accept=".json" style="display:none" data-on-change="call:importBk:event">
         <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:11px;font-size:0.8rem;color:#856404">
           ⚠️ Αν υπάρχουν ίδιες κάρτες θα παραληφθούν αυτόματα.
         </div>
@@ -858,10 +858,10 @@
     <h3>➕ Προσθήκη Πόντων</h3>
     <p style="margin-bottom:14px;color:var(--gray)">Πελάτης: <strong id="ma-name" style="color:var(--black)"></strong></p>
     <div class="form-row">
-      <div class="fg"><label>Ποσό Αγοράς (€)</label><input type="number" id="ma-amt" min="1" step="1" placeholder="π.χ. 50" oninput="calcPts()"></div>
+      <div class="fg"><label>Ποσό Αγοράς (€)</label><input type="number" id="ma-amt" min="1" step="1" placeholder="π.χ. 50" data-on-input="call:calcPts"></div>
       <div class="fg">
         <label>Κατηγορία</label>
-        <select id="ma-cat" onchange="calcPts()">
+        <select id="ma-cat" data-on-change="call:calcPts">
           <option value="10">📱 Αξεσουάρ (×10)</option>
           <option value="10">🎮 Gadget (×10)</option>
           <option value="15">🎨 Custom Θήκη (×15)</option>
@@ -944,7 +944,7 @@
     <div id="ms-compose" style="display:none">
       <div class="fg">
         <label>Μήνυμα <span style="color:var(--gray);font-size:.8rem">(max 160 χαρακτήρες — GSM-7 αυτόματη μετατροπή)</span></label>
-        <textarea id="ms-body" class="inp" rows="5" maxlength="160" placeholder="Μήνυμα SMS..." oninput="document.getElementById('ms-chars').textContent=this.value.length+'/160'"></textarea>
+        <textarea id="ms-body" class="inp" rows="5" maxlength="160" placeholder="Μήνυμα SMS..." data-on-input="count-chars" data-counter-target="ms-chars" data-counter-max="160"></textarea>
         <div id="ms-chars" style="text-align:right;font-size:.78rem;color:var(--gray)">0/160</div>
       </div>
       <div id="ms-err" style="color:#e53935;font-size:.85rem;margin-top:4px;min-height:18px"></div>
@@ -1000,8 +1000,8 @@
     <div class="fg">
       <label>Φωτογραφία Background <span style="font-weight:400;color:var(--gray)">(προαιρετικό)</span></label>
       <input type="hidden" id="of-image">
-      <input type="file" id="of-image-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="previewOfferImage(event)">
-      <div id="of-img-area" data-click-target="of-image-file" style="border:2px dashed var(--border);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:border-color .2s;position:relative" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='var(--border)'">
+      <input type="file" id="of-image-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" data-on-change="call:previewOfferImage:event">
+      <div id="of-img-area" data-click-target="of-image-file" style="border:2px dashed var(--border);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:border-color .2s;position:relative" data-on-mouseover="hover-green" data-on-mouseout="hover-default">
         <div id="of-img-placeholder" style="color:var(--gray);font-size:.88rem">📷 Κλικ για επιλογή φωτογραφίας</div>
         <div id="of-img-preview" style="display:none">
           <img id="of-img-thumb" style="max-height:130px;max-width:100%;border-radius:9px;object-fit:cover;display:block;margin:0 auto">

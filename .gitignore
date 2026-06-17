@@ -29,6 +29,18 @@ firebase-debug.err
 .DS_Store
 Thumbs.db
 
+# macOS Finder "Duplicate" copies (filename 2.ext, dirname 2/) — never ship.
+# Audit MEDIUM-1 / cleanup: prevents Finder Cmd+D from accidentally committing
+# stale forks of source files (e.g. functions/index 2.js with old logic).
+* 2.js
+* 2.json
+* 2.mjs
+* 2.cjs
+* 2.ts
+* 2.css
+* 2.html
+* 2/
+
 # IDE / Local tooling
 .vscode/
 .idea/
