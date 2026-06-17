@@ -78,6 +78,8 @@ import {
   previewTierDowngrade,
   executeTierDowngrade,
 } from './admin/maintenance.js';
+import { getCachedCustomers, setCachedCustomers } from './admin/snapshot-cache.js';
+import { loadStats, configureStats } from './admin/stats.js';
 
 // Wire push-listener: keep admin-main's _allCustRows cache in sync.
 initPushListener({
@@ -246,6 +248,7 @@ async function _completeAdminAuth(user) {
   document.getElementById('lock-email').value = '';
   document.getElementById('admin-logout-btn').style.display = 'flex';
   configureSystemHealth({ onDataChanged: loadStats });
+  configureStats({ onSnapshot: renderSegments });
   loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startPushListener();
   processReferralQueue(); loadKpiOverview(); startMaintenanceListener(); checkWorkerHealth();
   loadDeletionRequests();
@@ -613,10 +616,11 @@ async function search() {
 
     // 4. FALLBACK: name search — uses cached snapshot if available (< 30s old), else full scan
     if (!found) {
-      const snap = (_lastCustSnap && Date.now() - _lastCustSnapAt < 30000)
-        ? _lastCustSnap
-        : await window._getDocs(window._col(db,'ipear_customers'));
-      if (!_lastCustSnap || Date.now() - _lastCustSnapAt >= 30000) { _lastCustSnap = snap; _lastCustSnapAt = Date.now(); }
+      let snap = getCachedCustomers(30000);
+      if (!snap) {
+        snap = await window._getDocs(window._col(db, 'ipear_customers'));
+        setCachedCustomers(snap);
+      }
       snap.forEach(d=>{
         const data=d.data();
         if ([data.name||'',String(data.phone||''),String(data.card||'')]
@@ -1173,7 +1177,8 @@ async function loadAll() {
   const tb=document.getElementById('ctbody');
   tb.innerHTML='<tr><td colspan="6" class="empty"><span class="e">⏳</span>Φόρτωση...</td></tr>';
   try {
-    const snap = (_lastCustSnap && Date.now() - _lastCustSnapAt < 5000) ? _lastCustSnap : await window._getDocs(window._col(db,'ipear_customers'));
+    let snap = getCachedCustomers(5000);
+    if (!snap) { snap = await window._getDocs(window._col(db, 'ipear_customers')); setCachedCustomers(snap); }
     if (snap.empty) { tb.innerHTML='<tr><td colspan="6" class="empty"><span class="e">📭</span>Κανένας πελάτης ακόμα</td></tr>'; _allCustRows=[]; return; }
     // Determine which IDs to show (null = all)
     const filterIds = (_activeSegment && window._segments?.[_activeSegment]) ? new Set(window._segments[_activeSegment]) : null;
@@ -1334,189 +1339,7 @@ async function processReferralQueue() {
   } catch(_) {}
 }
 
-// ══════════════════════════════════════
-//  STATS
-// ══════════════════════════════════════
-let _tierDonutChart = null;
-let _lastCustSnap = null;
-let _lastCustSnapAt = 0;
-let _loadStatsBusy = false;
-async function loadStats() {
-  if (!authState.authenticated) return;
-  if (!navigator.onLine) return;
-  if (_loadStatsBusy) return;
-  const db=DB(); if(!db) return;
-  _loadStatsBusy = true;
-  try {
-    const [csnap, tsnap] = await Promise.all([
-      window._getDocs(window._col(db,'ipear_customers')),
-      window._getDocs(window._col(db,'ipear_transactions'))
-    ]);
-    _lastCustSnap = csnap; _lastCustSnapAt = Date.now();
-    let given=0, redeemed=0, totalAvailPts=0, pushCount=0, blockedCount=0, suspiciousCount=0;
-    const tc={Bronze:0,Silver:0,Gold:0,Diamond:0,Platinum:0};
-    const txByCustomer={};
-    const now = new Date();
-    const d30ago = new Date(now - 30*86400000);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    let signupsThisMonth = 0;
-    const referrers = [];
-    const redeemCounts = {}; // track reward popularity
-
-    csnap.forEach(d=>{
-      const cd=d.data();
-      const t=tier(cd.totalPoints||cd.points||0);
-      tc[t.name]++;
-      totalAvailPts += cd.points||0;
-      if (cd.fcmToken) pushCount++;
-      if (cd.blocked) blockedCount++;
-      if (cd.suspicious) suspiciousCount++;
-      if (cd.createdAt && new Date(cd.createdAt) >= monthStart) signupsThisMonth++;
-      if ((cd.referralCount||0) > 0) referrers.push({ name: cd.name||'—', card: cd.card||'', count: cd.referralCount });
-    });
-
-    const active30Ids = new Set();
-    tsnap.forEach(d=>{
-      const x=d.data();
-      if(x.type==='add') {
-        given+=x.points||0;
-        if(x.customerId) txByCustomer[x.customerId]=(txByCustomer[x.customerId]||0)+1;
-        if(x.date && new Date(x.date)>=d30ago && x.customerId) active30Ids.add(x.customerId);
-      }
-      if(x.type==='redeem') {
-        redeemed+=Math.abs(x.points||0);
-        const lbl = (x.discount||0)+'€';
-        redeemCounts[lbl] = (redeemCounts[lbl]||0) + 1;
-      }
-    });
-
-    // Computed KPIs
-    const redemptionRate = given>0 ? (redeemed/given*100).toFixed(1)+'%' : '0%';
-    const redemDetail = given>0 ? redeemed.toLocaleString('el-GR')+' / '+given.toLocaleString('el-GR')+' πτ' : '';
-    const liability = (totalAvailPts*0.02).toFixed(0)+'€';
-    const loyalCount = Object.values(txByCustomer).filter(n=>n>=3).length;
-    const loyaltyRate = csnap.size>0 ? (loyalCount/csnap.size*100).toFixed(0)+'%' : '0%';
-    const pushPct = csnap.size>0 ? Math.round(pushCount/csnap.size*100) : 0;
-    const active30 = active30Ids.size;
-    const active30Pct = csnap.size>0 ? Math.round(active30/csnap.size*100) : 0;
-
-    // Top redeemed reward
-    let topReward = '—', topRewardCount = 0;
-    for (const [lbl, cnt] of Object.entries(redeemCounts)) {
-      if (cnt > topRewardCount) { topReward = lbl; topRewardCount = cnt; }
-    }
-
-    // ── Populate Dashboard ──
-    document.getElementById('sc').textContent = csnap.size;
-    document.getElementById('dash-signups').innerHTML = '📈 <span class="dash-trend-up">+'+signupsThisMonth+'</span> αυτό τον μήνα';
-    document.getElementById('sk-redem').textContent = redemptionRate;
-    document.getElementById('dash-redem-detail').textContent = redemDetail;
-    document.getElementById('sk-liab').textContent = liability;
-    document.getElementById('dash-liab-pts').textContent = totalAvailPts.toLocaleString('el-GR')+' πόντοι';
-    document.getElementById('sk-clv').textContent = '—'; // filled by renderAnalytics
-    document.getElementById('dash-loyalty-rate').textContent = 'Loyalty Rate: '+loyaltyRate;
-    document.getElementById('dash-active30').textContent = active30;
-    document.getElementById('dash-active30-pct').textContent = active30Pct+'% της βάσης';
-    document.getElementById('dash-push-count').textContent = pushCount+'/'+csnap.size;
-    document.getElementById('dash-push-bar').style.width = pushPct+'%';
-    document.getElementById('dash-push-pct').textContent = pushPct+'% reachable';
-    document.getElementById('dash-top-reward').textContent = topReward;
-    document.getElementById('dash-top-reward-count').textContent = topRewardCount>0 ? topRewardCount+' εξαργυρώσεις' : 'Καμία ακόμα';
-    document.getElementById('dash-blocked').textContent = blockedCount + (suspiciousCount ? ' / '+suspiciousCount : '');
-    document.getElementById('dash-total-tx').textContent = tsnap.size+' συναλλαγές';
-    document.getElementById('su').textContent = new Date().toLocaleString('el-GR');
-
-    // ── Tier Donut Chart (Chart.js) ──
-    const tierData = [
-      { n:'Platinum', i:'👑', c:'#d4af37', v:tc.Platinum },
-      { n:'Diamond',  i:'💎', c:'#6ba3d6', v:tc.Diamond },
-      { n:'Gold',     i:'🥇', c:'#d4a017', v:tc.Gold },
-      { n:'Silver',   i:'🥈', c:'#a8b2c1', v:tc.Silver },
-      { n:'Bronze',   i:'🥉', c:'#cd7f32', v:tc.Bronze },
-    ];
-    const donutEl = document.getElementById('tier-donut-chart');
-    if (donutEl && typeof Chart !== 'undefined') {
-      if (_tierDonutChart) _tierDonutChart.destroy();
-      _tierDonutChart = new Chart(donutEl, {
-        type: 'doughnut',
-        data: {
-          labels: tierData.map(t => t.i+' '+t.n),
-          datasets: [{ data: tierData.map(t => t.v), backgroundColor: tierData.map(t => t.c), borderWidth: 2, borderColor: '#fff' }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          cutout: '62%',
-          plugins: {
-            legend: { position:'bottom', labels: { padding:14, usePointStyle:true, pointStyleWidth:10, font:{size:11,weight:'600'} } },
-            tooltip: { callbacks: { label: ctx => ' '+ctx.label+': '+ctx.parsed+' ('+Math.round(ctx.parsed/csnap.size*100)+'%)' } }
-          }
-        }
-      });
-    }
-    // Mini tier bars below donut
-    const total = csnap.size || 1;
-    document.getElementById('tier-bd').innerHTML = tierData.map(t => `
-      <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:.78rem">
-        <span style="width:18px;text-align:center">${t.i}</span>
-        <span style="width:55px;font-weight:600">${t.n}</span>
-        <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
-          <div style="height:100%;background:${t.c};border-radius:3px;width:${Math.round(t.v/total*100)}%;transition:width .4s"></div>
-        </div>
-        <span style="font-weight:800;width:24px;text-align:right">${t.v}</span>
-      </div>`).join('');
-
-    // ── Top 10 Referrers ──
-    referrers.sort((a,b) => b.count - a.count);
-    const top10ref = referrers.slice(0,10);
-    const refEl = document.getElementById('kpi-top-referrers');
-    if (!top10ref.length) {
-      refEl.innerHTML = '<li style="color:var(--gray);font-size:.85rem;justify-content:center;padding:14px">Κανένας referrer ακόμα</li>';
-    } else {
-      const medals = ['🥇','🥈','🥉'];
-      refEl.innerHTML = top10ref.map((r,i) => `<li>
-        <div class="ref-rank" style="${i>=3?'background:#555;color:#fff;font-size:.72rem':''}">${medals[i]||'#'+(i+1)}</div>
-        <div style="flex:1;min-width:0">
-          <div style="font-weight:700;font-size:.85rem">${escHtml(r.name)}</div>
-          <div style="font-size:.72rem;color:var(--gray)">${escHtml(r.card)}</div>
-        </div>
-        <div style="font-weight:900;font-size:1rem;color:${r.count>=5?'#d4af37':'var(--green)'}">${r.count}<span style="font-weight:600;font-size:.72rem;color:var(--gray)">/${MAX_REFERRALS_PER_USER}</span></div>
-      </li>`).join('');
-    }
-
-    // ── Push Notifications Table ──
-    const pushCustomers = [];
-    csnap.forEach(d => {
-      const cd = d.data();
-      if (cd.fcmToken) pushCustomers.push({ name: cd.name||'—', card: cd.card||'', phone: cd.phone||'' });
-    });
-    const pushEl = document.getElementById('push-customers-list');
-    if (!pushCustomers.length) {
-      pushEl.innerHTML = '<div style="color:var(--gray);font-size:.85rem;text-align:center;padding:14px">Κανένας πελάτης με ενεργές ειδοποιήσεις</div>';
-    } else {
-      pushEl.innerHTML = `
-        <table style="width:100%;border-collapse:collapse;font-size:.83rem">
-          <thead><tr style="border-bottom:2px solid var(--border)">
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">#</th>
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Πελάτης</th>
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Κάρτα</th>
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Τηλέφωνο</th>
-          </tr></thead>
-          <tbody>${pushCustomers.map((c,i) => `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:8px 10px;color:var(--gray)">${i+1}</td>
-              <td style="padding:8px 10px;font-weight:600">${escHtml(c.name)}</td>
-              <td style="padding:8px 10px;font-size:.8rem;color:var(--gray)">${escHtml(c.card)}</td>
-              <td style="padding:8px 10px;font-size:.8rem">${escHtml(c.phone)}</td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-        <div style="font-size:.75rem;color:var(--gray);margin-top:8px;text-align:right">🔔 ${pushCustomers.length} / ${csnap.size} πελάτες με push ενεργό</div>`;
-    }
-
-    renderSegments(csnap, tsnap);
-    _processBirthdayClaims().catch(e => logger.warn('[birthday-auto]', e.message));
-  } catch(e) { logger.error(e); } finally { _loadStatsBusy = false; }
-}
+// ── Stats — extracted to ./admin/stats.js
 
 // ══════════════════════════════════════
 //  BIRTHDAY CLAIMS AUTO-PROCESSOR  →  moved to ./admin/birthday-claims.js
