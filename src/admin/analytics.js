@@ -9,6 +9,15 @@ import { logger } from '../logger.js';
 
 const DB = () => window._db;
 
+// Lazy Chart.js — loaded only when an analytics chart is actually rendered.
+let _ChartCtor = null;
+async function loadChart() {
+  if (_ChartCtor) return _ChartCtor;
+  const mod = await import('chart.js/auto');
+  _ChartCtor = mod.Chart;
+  return _ChartCtor;
+}
+
 let _anPeriod = 'all';
 let _anData = null;
 let _anChart = null;
@@ -242,13 +251,11 @@ export function renderAnalytics() {
   _renderCategoryHeatmap(filtered);
 }
 
-function _renderAnChart(rows) {
+async function _renderAnChart(rows) {
   const ctx = document.getElementById('an-chart')?.getContext('2d');
   if (!ctx) return;
-  if (typeof Chart === 'undefined') {
-    logger.warn('[_renderAnChart] Chart.js not loaded yet, skipping');
-    return;
-  }
+  let Chart;
+  try { Chart = await loadChart(); } catch (e) { logger.warn('[_renderAnChart] Chart load failed:', e.message); return; }
   if (_anChart) {
     _anChart.destroy();
     _anChart = null;
@@ -357,19 +364,21 @@ export function openDrillDown(customerId) {
     catRevenue[cat] = (catRevenue[cat] || 0) + (tx.amount || 0);
   }
   const catCtx = document.getElementById('drill-chart')?.getContext('2d');
-  if (catCtx && typeof Chart !== 'undefined') {
-    if (_drillChart) {
-      _drillChart.destroy();
-      _drillChart = null;
-    }
-    const cats = Object.keys(catRevenue);
-    const vals = cats.map((c) => catRevenue[c]);
-    const colors = ['#8ae900', '#4fc3f7', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac'];
-    _drillChart = new Chart(catCtx, {
-      type: 'doughnut',
-      data: { labels: cats, datasets: [{ data: vals, backgroundColor: colors.slice(0, cats.length), borderWidth: 0 }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } },
-    });
+  if (catCtx) {
+    loadChart().then(Chart => {
+      if (_drillChart) {
+        _drillChart.destroy();
+        _drillChart = null;
+      }
+      const cats = Object.keys(catRevenue);
+      const vals = cats.map((c) => catRevenue[c]);
+      const colors = ['#8ae900', '#4fc3f7', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac'];
+      _drillChart = new Chart(catCtx, {
+        type: 'doughnut',
+        data: { labels: cats, datasets: [{ data: vals, backgroundColor: colors.slice(0, cats.length), borderWidth: 0 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } },
+      });
+    }).catch(e => logger.warn('[drill-chart] Chart load failed:', e.message));
   }
 
   const allSorted = [...filtered].sort((a, b) => new Date(b.date) - new Date(a.date));

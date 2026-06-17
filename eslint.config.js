@@ -15,7 +15,6 @@ export default [
         confetti: 'readonly',
         grecaptcha: 'readonly',
         QRCode: 'readonly',
-        Chart: 'readonly',
         jsQR: 'readonly',
         switchTab: 'writable',
       },
