@@ -6,4 +6,6 @@
 export const authState = {
   authenticated: false,
   actorUid: null,
+  storeId: null,
+  storeName: '—',
 };

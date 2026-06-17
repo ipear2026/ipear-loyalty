@@ -72,6 +72,12 @@ import {
   runSystemHealthCheck,
   configureSystemHealth,
 } from './admin/system-health.js';
+import {
+  previewExpirePoints,
+  executeExpirePoints,
+  previewTierDowngrade,
+  executeTierDowngrade,
+} from './admin/maintenance.js';
 
 // Wire push-listener: keep admin-main's _allCustRows cache in sync.
 initPushListener({
@@ -209,6 +215,7 @@ async function _completeAdminAuth(user) {
   _adminActorUid = user?.uid || null;
   authState.actorUid = _adminActorUid;
   _storeId = null; _storeName = '—';
+  authState.storeId = null; authState.storeName = '—';
 
   const adminRef  = window._doc(window._db, 'ipear_admins', user.uid);
   const adminSnap = await window._getDoc(adminRef);
@@ -217,12 +224,14 @@ async function _completeAdminAuth(user) {
     throw new Error('not-admin');
   }
   _storeId = adminSnap.data()?.storeid || null;
+  authState.storeId = _storeId;
 
   if (_storeId) {
     try {
       const storeSnap = await window._getDoc(window._doc(window._db, 'ipear_stores', _storeId));
       if (storeSnap.exists()) {
         _storeName = storeSnap.data().name || '—';
+        authState.storeName = _storeName;
         const badge = document.getElementById('store-badge');
         if (badge) { badge.textContent = '🏪 ' + _storeName; badge.style.display = 'inline-block'; }
         const regBadge = document.getElementById('reg-store-badge');
@@ -316,6 +325,7 @@ function adminLogout() {
   _activeSegment = null;
   cid = null; cdata = null; msgCh = '';
   _storeId = null; _storeName = '—';
+  authState.storeId = null; authState.storeName = '—';
   // Clear sessionStorage (worker secret lives only for this tab session)
   _clearWorkerSecret();
   localStorage.removeItem('ipear_worker_url');
@@ -1924,198 +1934,7 @@ async function sendSMSBulk() {
     _sendSMSBulkBusy = false;
   }
 }
-
-// ══════════════════════════════════════════════════════════════════
-//  MAINTENANCE — POINTS EXPIRY & TIER DOWNGRADE
-// ══════════════════════════════════════════════════════════════════
-
-let _expireTargets   = [];
-let _downgradeTargets = [];
-
-async function previewExpirePoints() {
-  const db = DB(); if (!db) return;
-  const btn       = document.getElementById('btn-expire-exec');
-  const previewEl = document.getElementById('expire-preview');
-  btn.style.display = 'none';
-  previewEl.innerHTML = '<div style="text-align:center;padding:16px;color:var(--gray)">⏳ Ανάλυση...</div>';
-
-  try {
-    const [csnap, tsnap] = await Promise.all([
-      window._getDocs(window._col(db,'ipear_customers')),
-      window._getDocs(window._col(db,'ipear_transactions'))
-    ]);
-
-    // Last transaction date per customer
-    const lastTxDate = {};
-    tsnap.forEach(d => {
-      const tx = d.data();
-      if (!tx.customerId || !tx.date) return;
-      const dt = new Date(tx.date);
-      if (!lastTxDate[tx.customerId] || dt > lastTxDate[tx.customerId])
-        lastTxDate[tx.customerId] = dt;
-    });
-
-    const cutoff = new Date();
-    cutoff.setFullYear(cutoff.getFullYear() - 1);
-
-    _expireTargets = [];
-    csnap.forEach(d => {
-      const c = { id: d.id, ...d.data() };
-      if (!c.points || c.points <= 0) return;
-      const last = lastTxDate[c.id] || (c.createdAt ? new Date(c.createdAt) : null);
-      if (!last || last < cutoff) _expireTargets.push({ ...c, lastDate: last });
-    });
-
-    if (!_expireTargets.length) {
-      previewEl.innerHTML = '<div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:14px;font-size:.85rem;text-align:center;color:#3a6e00">✅ Κανένας πελάτης δεν πληροί τα κριτήρια λήξης.</div>';
-      return;
-    }
-
-    const totalPts = _expireTargets.reduce((s,c)=>s+(c.points||0),0);
-    let html = `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:10px 14px;font-size:.82rem;margin-bottom:10px;color:#856404">
-      ⚠️ <strong>${_expireTargets.length}</strong> πελάτες — <strong>${totalPts.toLocaleString('el-GR')}</strong> πόντοι θα μηδενιστούν
-    </div>
-    <div style="overflow-x:auto"><table style="width:100%;font-size:.79rem;border-collapse:collapse">
-      <thead><tr style="background:var(--green-pale);font-weight:700">
-        <th style="padding:6px 8px;text-align:left">Πελάτης</th>
-        <th style="padding:6px 8px;text-align:right">Πόντοι</th>
-        <th style="padding:6px 8px;text-align:right">Τελ. Αγορά</th>
-      </tr></thead><tbody>`;
-    for (const c of _expireTargets.slice(0,25)) {
-      html += `<tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:5px 8px">${escHtml(c.name)} <span style="color:var(--gray);font-size:.75rem">${escHtml(c.card)}</span></td>
-        <td style="padding:5px 8px;text-align:right;color:#dc3545;font-weight:700">${(c.points||0).toLocaleString('el-GR')}</td>
-        <td style="padding:5px 8px;text-align:right;color:var(--gray)">${c.lastDate ? c.lastDate.toLocaleDateString('el-GR') : 'Ποτέ'}</td>
-      </tr>`;
-    }
-    if (_expireTargets.length > 25) html += `<tr><td colspan="3" style="text-align:center;padding:7px;color:var(--gray);font-size:.76rem">...και ${_expireTargets.length-25} ακόμα</td></tr>`;
-    html += '</tbody></table></div>';
-
-    previewEl.innerHTML = html;
-    btn.style.display = '';
-  } catch(e) { previewEl.innerHTML = ''; toast('❌ '+e.message,'error'); }
-}
-
-async function executeExpirePoints() {
-  if (!_expireTargets.length) return;
-  if (!confirm(`Μηδενισμός πόντων για ${_expireTargets.length} πελάτες;\nΑυτή η ενέργεια ΔΕΝ αναιρείται.`)) return;
-  const db = DB(); if (!db) return;
-  const btn = document.getElementById('btn-expire-exec');
-  btn.textContent = '⏳ Εκτέλεση...'; btn.disabled = true;
-
-  let done=0, failed=0;
-  for (const c of _expireTargets) {
-    try {
-      await window._updateDoc(window._doc(db,'ipear_customers',c.id), { points: 0 });
-      await window._addDoc(window._col(db,'ipear_transactions'), {
-        customerId: c.id, customerUid: c.uid||'', customerEmail: c.email||'', customerName: c.name, card: c.card,
-        type: 'expire', points: -(c.points||0), amount: 0,
-        category: '⏳ Εκπνοή Πόντων',
-        note: `Μηδενισμός λόγω αδράνειας 12+ μηνών`,
-        storeId: _storeId||null, storeName: _storeName,
-        date: new Date().toISOString()
-      });
-      done++;
-    } catch(_) { failed++; }
-  }
-  _expireTargets = [];
-  btn.style.display = 'none'; btn.disabled = false; btn.textContent = '🗑️ Εφαρμογή';
-  document.getElementById('expire-preview').innerHTML = '';
-  toast(`✅ Εκπνοή: ${done} πελάτες μηδενίστηκαν${failed ? ' · '+failed+' σφάλματα':''}`,'success');
-}
-
-// ── Tier Downgrade ──────────────────────────────────────────────
-
-async function previewTierDowngrade() {
-  const db = DB(); if (!db) return;
-  const btn       = document.getElementById('btn-downgrade-exec');
-  const previewEl = document.getElementById('downgrade-preview');
-  btn.style.display = 'none';
-  previewEl.innerHTML = '<div style="text-align:center;padding:16px;color:var(--gray)">⏳ Ανάλυση...</div>';
-
-  try {
-    const [csnap, tsnap] = await Promise.all([
-      window._getDocs(window._col(db,'ipear_customers')),
-      window._getDocs(window._col(db,'ipear_transactions'))
-    ]);
-
-    const thisYear = new Date().getFullYear();
-    const activeThisYear = new Set();
-    tsnap.forEach(d => {
-      const tx = d.data();
-      if (tx.customerId && tx.date && new Date(tx.date).getFullYear() === thisYear)
-        activeThisYear.add(tx.customerId);
-    });
-
-    _downgradeTargets = [];
-    csnap.forEach(d => {
-      const c = { id: d.id, ...d.data() };
-      if (activeThisYear.has(c.id)) return;
-      const tot = c.totalPoints || c.points || 0;
-      const t = tier(tot);
-      if (t.name === 'Bronze') return;
-      const newTot = t.name==='Platinum' ? 9999 : t.name==='Diamond' ? 5999 : t.name==='Gold' ? 2999 : 999;
-      _downgradeTargets.push({ ...c, currentTier: t, newTier: tier(newTot), newTot });
-    });
-
-    if (!_downgradeTargets.length) {
-      previewEl.innerHTML = '<div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:14px;font-size:.85rem;text-align:center;color:#3a6e00">✅ Κανένας πελάτης δεν πληροί τα κριτήρια downgrade.</div>';
-      return;
-    }
-
-    let html = `<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:10px 14px;font-size:.82rem;margin-bottom:10px;color:#856404">
-      ⚠️ <strong>${_downgradeTargets.length}</strong> πελάτες χωρίς αγορά το ${thisYear}
-    </div>
-    <div style="overflow-x:auto"><table style="width:100%;font-size:.79rem;border-collapse:collapse">
-      <thead><tr style="background:var(--green-pale);font-weight:700">
-        <th style="padding:6px 8px;text-align:left">Πελάτης</th>
-        <th style="padding:6px 8px;text-align:center">Από</th>
-        <th style="padding:6px 8px;text-align:center">→ Σε</th>
-      </tr></thead><tbody>`;
-    for (const c of _downgradeTargets.slice(0,25)) {
-      html += `<tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:5px 8px">${escHtml(c.name)} <span style="color:var(--gray);font-size:.75rem">${escHtml(c.card)}</span></td>
-        <td style="padding:5px 8px;text-align:center">${c.currentTier.icon} ${escHtml(c.currentTier.name)}</td>
-        <td style="padding:5px 8px;text-align:center;font-weight:700;color:#dc3545">${c.newTier.icon} ${escHtml(c.newTier.name)}</td>
-      </tr>`;
-    }
-    if (_downgradeTargets.length > 25) html += `<tr><td colspan="3" style="text-align:center;padding:7px;color:var(--gray);font-size:.76rem">...και ${_downgradeTargets.length-25} ακόμα</td></tr>`;
-    html += '</tbody></table></div>';
-
-    previewEl.innerHTML = html;
-    btn.style.display = '';
-  } catch(e) { previewEl.innerHTML = ''; toast('❌ '+e.message,'error'); }
-}
-
-async function executeTierDowngrade() {
-  if (!_downgradeTargets.length) return;
-  if (!confirm(`Tier Downgrade για ${_downgradeTargets.length} πελάτες;\nΤα lifetime points τους θα μειωθούν. Αυτή η ενέργεια ΔΕΝ αναιρείται.`)) return;
-  const db = DB(); if (!db) return;
-  const btn = document.getElementById('btn-downgrade-exec');
-  btn.textContent = '⏳ Εκτέλεση...'; btn.disabled = true;
-
-  let done=0, failed=0;
-  for (const c of _downgradeTargets) {
-    try {
-      await window._updateDoc(window._doc(db,'ipear_customers',c.id), { totalPoints: c.newTot });
-      await window._addDoc(window._col(db,'ipear_transactions'), {
-        customerId: c.id, customerUid: c.uid||'', customerEmail: c.email||'', customerName: c.name, card: c.card,
-        type: 'tier_downgrade',
-        points: c.newTot - (c.totalPoints || 0),  // negative: shows actual points reduction in history
-        amount: 0,
-        category: '📉 Tier Downgrade',
-        note: `${c.currentTier.icon} ${c.currentTier.name} → ${c.newTier.icon} ${c.newTier.name} (αδράνεια ${new Date().getFullYear()})`,
-        storeId: _storeId||null, storeName: _storeName,
-        date: new Date().toISOString()
-      });
-      done++;
-    } catch(_) { failed++; }
-  }
-  _downgradeTargets = [];
-  btn.style.display = 'none'; btn.disabled = false; btn.textContent = '📉 Εφαρμογή';
-  document.getElementById('downgrade-preview').innerHTML = '';
-  toast(`✅ Tier Downgrade: ${done} πελάτες ανανεώθηκαν${failed ? ' · '+failed+' σφάλματα':''}`,'success');
-}
+// ── Maintenance (points expiry + tier downgrade) — extracted to ./admin/maintenance.js
 
 // ══════════════════════════════════════
 //  PART 2: GOD-MODE KPI OVERVIEW (Fast aggregation — P-1 fix)
