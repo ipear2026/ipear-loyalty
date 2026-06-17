@@ -1,7 +1,7 @@
 import {
   getDb, collection, doc, query, where, getDocs, deleteDoc,
 } from '../services/firebase.js';
-import { escHtml, escJs } from '../utils.js';
+import { escHtml } from '../utils.js';
 import { toast } from './ui.js';
 
 // Callback invoked when a delete operation alters customer/transaction set.
@@ -63,7 +63,7 @@ export async function scanOrphans() {
           html += '<tr style="border-bottom:1px solid var(--border)">';
           html += '<td style="padding:8px 10px"><strong>' + escHtml(grp.name) + '</strong><div style="font-size:.72rem;color:var(--gray)">ID: ' + escHtml(cid.substring(0, 12)) + '...</div></td>';
           html += '<td style="text-align:right;padding:8px 10px">' + grp.txs.length + '</td>';
-          html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#e53935;color:#fff;font-size:.72rem" onclick="_deleteOrphanTxs(\'' + escJs(cid) + '\')">🗑️ Διαγραφή</button></td>';
+          html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#e53935;color:#fff;font-size:.72rem" data-action="_deleteOrphanTxs" data-arg="' + escHtml(cid) + '">🗑️ Διαγραφή</button></td>';
           html += '</tr>';
         }
         html += '</tbody></table></div>';
@@ -82,7 +82,7 @@ export async function scanOrphans() {
           html += '<td style="padding:8px 10px"><strong>' + escHtml(c.name) + '</strong><div style="font-size:.72rem;color:var(--gray)">' + escHtml(c.phone) + '</div></td>';
           html += '<td style="padding:8px 10px;font-size:.8rem">' + escHtml(c.card) + '</td>';
           html += '<td style="padding:8px 10px;font-size:.8rem;color:var(--gray)">' + created + '</td>';
-          html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#f57c00;color:#fff;font-size:.72rem" onclick="_deleteGhostCustomer(\'' + escJs(c.id) + '\',\'' + escJs(c.name) + '\')">🗑️ Διαγραφή</button></td>';
+          html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#f57c00;color:#fff;font-size:.72rem" data-action="_deleteGhostCustomer" data-arg="' + escHtml(c.id) + '" data-arg2="' + escHtml(c.name) + '">🗑️ Διαγραφή</button></td>';
           html += '</tr>';
         });
         html += '</tbody></table></div>';

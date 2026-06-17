@@ -201,7 +201,7 @@ export async function searchEmailOne(q) {
   resEl.innerHTML = matches
     .map((c) => {
       const hasEmail = c.email && c.email.includes('@');
-      return `<div onclick="selectEmailOne('${escJs(c.id)}')" style="
+      return `<div data-action="selectEmailOne" data-arg="${escJs(c.id)}" style="
       padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);
       display:flex;justify-content:space-between;align-items:center;
       ${!hasEmail ? 'opacity:.5;pointer-events:none;' : ''}

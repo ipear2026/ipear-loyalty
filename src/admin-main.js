@@ -468,7 +468,7 @@ async function loadDeletionRequests() {
           <div style="font-size:.78rem;color:#bbb;margin-top:2px">Αίτημα: ${reqDate}</div>
         </div>
         <button class="btn" style="background:#dc3545;color:#fff;border-color:#dc3545;font-size:.82rem;padding:10px 16px;white-space:nowrap"
-          onclick="gdprDeleteCustomer('${escJs(d.id)}','${escJs(c.name || '')}')">🗑 Διαγραφή</button>
+          data-action="gdprDeleteCustomer" data-arg="${escJs(d.id)}" data-arg2="${escJs(c.name || '')}">🗑 Διαγραφή</button>
       </div>`;
     });
     html += '</div>';
@@ -1222,7 +1222,7 @@ function _renderCustRows(rows) {
         <div style="font-size:.72rem;color:var(--gray)">Σύνολο: ${tot.toLocaleString('el-GR')}</div>
       </td>
       <td><span class="badge ${t.cls}">${t.icon} ${t.name}</span></td>
-      <td><button class="btn btn-green btn-sm" onclick="quickSel('${escJs(id)}')">Επιλογή</button></td>
+      <td><button class="btn btn-green btn-sm" data-action="quickSel" data-arg="${escJs(id)}">Επιλογή</button></td>
     </tr>`;
   });
   tb.innerHTML = r;
@@ -1361,7 +1361,7 @@ async function loadTx() {
   if (_historyBusy) { logger.log('[loadTx] ⏳ already loading, ignoring duplicate call'); return; }
   const db=DB(); if(!db) return;
   const el=document.getElementById('txlist');
-  const refreshBtn = document.querySelector('button[onclick="loadTx()"]');
+  const refreshBtn = document.querySelector('button[data-action="loadTx"]');
   _historyBusy = true;
   if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.dataset._origText = refreshBtn.innerHTML; refreshBtn.innerHTML = '⏳ Φόρτωση...'; }
   el.innerHTML='<div class="empty"><span class="e">⏳</span>Φόρτωση...</div>';
@@ -1545,7 +1545,7 @@ function renderSegments(csnap, tsnap) {
 
   document.getElementById('seg-grid').innerHTML = defs.map(s => `
     <div style="background:${s.bg};border:1.5px solid ${s.color}33;border-radius:13px;padding:14px 12px;cursor:pointer"
-         title="${s.desc}" onclick="filterBySegment('${s.key}')">
+         title="${s.desc}" data-action="filterBySegment" data-arg="${s.key}">
       <div style="font-size:1.5rem;margin-bottom:6px">${s.icon}</div>
       <div style="font-size:1.8rem;font-weight:900;color:${s.color};line-height:1">${segs[s.key].length}</div>
       <div style="font-size:.78rem;font-weight:700;color:#555;margin-top:4px">${s.label}</div>
@@ -1729,3 +1729,136 @@ window._deleteOrphanTxs = deleteOrphanTxs;
 window._runSystemHealthCheck = runSystemHealthCheck;
 window.loadDeletionRequests = loadDeletionRequests;
 window.gdprDeleteCustomer = gdprDeleteCustomer;
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  HIGH-2: Inline-handler delegation
+//
+//  Phase B/3a — installs a single click + keydown listener that dispatches to
+//  the same window.* functions via [data-action] / [data-key-action] attrs.
+//  Coexists with existing onclick="fn()" handlers (no breakage) so we can
+//  retire them incrementally. Once every admin handler is data-action-driven,
+//  Phase B/3b drops `script-src 'unsafe-inline'` from CSP for /admin*.
+//
+//  Conventions:
+//    data-action="fnName"                  → window.fnName()
+//    data-action="fnName" data-arg="x"     → window.fnName('x')
+//    data-action="fnName" data-arg="x" data-arg2="y" data-arg3="z"
+//                                           → window.fnName('x','y','z')
+//    data-key-action="fnName"              → same, fired on Enter / Space
+//
+//  Helper: data-click-target="elementId" simulates a click on another element
+//  (replaces inline onclick="document.getElementById('x').click()").
+// ═══════════════════════════════════════════════════════════════════════════
+// Auto-coerce data-arg strings to native types when they match. The original
+// inline handlers (toggleOffer('id', true)) often passed booleans / numbers,
+// which would otherwise reach the function as the strings "true"/"false"/"42".
+function _coerce(v) {
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (v === 'null') return null;
+  if (v !== '' && /^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+  return v;
+}
+function _resolveArgs(el) {
+  const a = [];
+  if (el.dataset.arg  !== undefined) a.push(_coerce(el.dataset.arg));
+  if (el.dataset.arg2 !== undefined) a.push(_coerce(el.dataset.arg2));
+  if (el.dataset.arg3 !== undefined) a.push(_coerce(el.dataset.arg3));
+  return a;
+}
+
+function _dispatchAction(el, attr, originalEvent) {
+  const name = el.dataset[attr];
+  // data-click-target lever: trigger another element's click (replaces
+  // onclick="document.getElementById('x').click()")
+  if (!name && attr === 'action' && el.dataset.clickTarget) {
+    const tgt = document.getElementById(el.dataset.clickTarget);
+    if (tgt) tgt.click();
+    return true;
+  }
+  if (!name) return false;
+  const fn = window[name];
+  if (typeof fn !== 'function') {
+    logger.warn('[admin-delegate] no handler:', name);
+    return false;
+  }
+  if (originalEvent && typeof originalEvent.preventDefault === 'function') {
+    originalEvent.preventDefault();
+  }
+  try {
+    fn(..._resolveArgs(el));
+  } catch (e) {
+    logger.error('[admin-delegate] handler error:', name, e);
+  }
+  return true;
+}
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action], [data-click-target]');
+  if (!el) return;
+  _dispatchAction(el, 'action', e);
+}, false);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const el = e.target.closest('[data-key-action]');
+  if (!el) return;
+  _dispatchAction(el, 'keyAction', e);
+}, false);
+
+// Helpers for the few callers that used non-mechanical inline expressions.
+function _refreshStats() { loadStats(); loadAnalytics(); }
+function _removeOfferImageEvt(_arg, ev) { removeOfferImage(ev); }
+function _togglePasswordVisibility(btn) {
+  const i = document.getElementById('lock-in');
+  if (!i || !btn) return;
+  const on = i.type === 'password';
+  i.type = on ? 'text' : 'password';
+  const p = btn.querySelector('path');
+  const c = btn.querySelector('circle');
+  if (p && c) {
+    p.setAttribute('d', on
+      ? 'M2 12s4-7 10-7c2 0 4 .6 5.6 1.5M22 12s-4 7-10 7c-2 0-4-.6-5.6-1.5M2 2l20 20'
+      : 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z');
+    c.style.display = on ? 'none' : '';
+  }
+}
+function _focusElement(id) {
+  const el = document.getElementById(id);
+  if (el) el.focus();
+}
+window._refreshStats = _refreshStats;
+window._removeOfferImageEvt = _removeOfferImageEvt;
+window._togglePasswordVisibility = _togglePasswordVisibility;
+window._focusElement = _focusElement;
+
+// The removeOfferImage(event) case needs the click event itself. Patch the
+// delegator so [data-action="_removeOfferImageEvt"] receives the originalEvent.
+// (Generic mechanism so other handlers can opt in via data-pass-event="1".)
+function _dispatchActionWithEvent(el, fn, originalEvent) {
+  const args = _resolveArgs(el);
+  if (el.dataset.passEvent === '1') args.push(originalEvent);
+  try { fn(...args); } catch (e) { logger.error('[admin-delegate] handler error', e); }
+}
+// One more click listener layer — the existing dispatcher above runs first
+// and is sufficient for the 99% case; this only fires when data-pass-event is set.
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-pass-event="1"]');
+  if (!el) return;
+  const fn = window[el.dataset.action];
+  if (typeof fn !== 'function') return;
+  // Prevent double-firing by the upstream dispatcher (which would not pass
+  // the event). We stop propagation here so only this listener runs.
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  _dispatchActionWithEvent(el, fn, e);
+}, true); // capture phase so we run before the basic dispatcher
+
+// _togglePasswordVisibility needs the clicked button. Pattern via data-pass-self.
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action="_togglePasswordVisibility"][data-pass-self="1"]');
+  if (!el) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  _togglePasswordVisibility(el);
+}, true);

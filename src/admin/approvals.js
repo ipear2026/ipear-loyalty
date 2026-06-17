@@ -91,8 +91,8 @@ function renderApprovals(items) {
         <div style="color:#aaa;font-size:.78rem">${bp > 0 ? '+' + bp + ' πόντοι • ' : ''}${r.tabletStoreName ? '📍 ' + escHtml(r.tabletStoreName) + ' • ' : ''}πριν ${agoStr}</div>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0">
-        <button onclick="approveOffer('${escJs(r.id)}')" style="padding:12px 20px;background:#8ae900;color:#0a0a0a;border:none;border-radius:10px;font-weight:800;font-size:.88rem;cursor:pointer;font-family:inherit">✅ Έγκριση</button>
-        <button onclick="rejectOffer('${escJs(r.id)}')" style="padding:12px 16px;background:rgba(255,59,48,.15);color:#ff3b30;border:1px solid #ff3b30;border-radius:10px;font-weight:700;font-size:.88rem;cursor:pointer;font-family:inherit">✕</button>
+        <button data-action="approveOffer" data-arg="${escJs(r.id)}" style="padding:12px 20px;background:#8ae900;color:#0a0a0a;border:none;border-radius:10px;font-weight:800;font-size:.88rem;cursor:pointer;font-family:inherit">✅ Έγκριση</button>
+        <button data-action="rejectOffer" data-arg="${escJs(r.id)}" style="padding:12px 16px;background:rgba(255,59,48,.15);color:#ff3b30;border:1px solid #ff3b30;border-radius:10px;font-weight:700;font-size:.88rem;cursor:pointer;font-family:inherit">✕</button>
       </div>
     </div>`;
     })

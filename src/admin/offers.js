@@ -49,11 +49,11 @@ export async function loadOffers() {
         <div class="offer-actions">
           <div class="offer-toggle">
             <span>${o.active ? 'Ενεργή' : 'Ανενεργή'}</span>
-            <div class="toggle-sw ${o.active ? 'on' : ''}" onclick="toggleOffer('${escJs(d.id)}',${!!o.active})"></div>
+            <div class="toggle-sw ${o.active ? 'on' : ''}" data-action="toggleOffer" data-arg="${escJs(d.id)}" data-arg2="${!!o.active}"></div>
           </div>
           <div style="display:flex;gap:6px">
-            <button class="btn btn-sm btn-outline" onclick="openOfferEdit('${escJs(d.id)}')">✏️</button>
-            <button class="btn btn-sm btn-red" onclick="deleteOffer('${escJs(d.id)}')">🗑</button>
+            <button class="btn btn-sm btn-outline" data-action="openOfferEdit" data-arg="${escJs(d.id)}">✏️</button>
+            <button class="btn btn-sm btn-red" data-action="deleteOffer" data-arg="${escJs(d.id)}">🗑</button>
           </div>
         </div>
       </div>`;

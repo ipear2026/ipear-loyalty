@@ -92,7 +92,7 @@ export async function verifyCode() {
         <div style="color:#8ae900;font-weight:900;font-size:1.1rem;margin-bottom:8px">🎁 Προσφορά — Έγκυρος Κωδικός!</div>
         <div style="color:white;font-size:.92rem;margin-bottom:3px">👤 ${escHtml(found.customerName)} (${escHtml(found.card || '')})</div>
         <div style="color:white;font-size:.92rem;margin-bottom:14px">🎟️ ${escHtml(found.offerTitle)} ${bp > 0 ? '— +' + bp + ' bonus πόντοι' : ''}</div>
-        <button class="btn btn-green btn-full" onclick="confirmOfferVerify('${escJs(foundId)}')" style="font-size:.95rem">
+        <button class="btn btn-green btn-full" data-action="confirmOfferVerify" data-arg="${escJs(foundId)}" style="font-size:.95rem">
           🎁 Έγκριση Προσφοράς
         </button>
       </div>`;
@@ -101,7 +101,7 @@ export async function verifyCode() {
         <div style="color:#8ae900;font-weight:900;font-size:1.1rem;margin-bottom:8px">✅ Έγκυρος Κωδικός!</div>
         <div style="color:white;font-size:.92rem;margin-bottom:3px">👤 ${escHtml(found.customerName)} (${escHtml(found.card)})</div>
         <div style="color:white;font-size:.92rem;margin-bottom:14px">🎟️ ${escHtml(found.label)} — ${found.points} πόντοι</div>
-        <button class="btn btn-green btn-full" onclick="confirmVerify('${escJs(foundId)}','${escJs(raw)}')" style="font-size:.95rem">
+        <button class="btn btn-green btn-full" data-action="confirmVerify" data-arg="${escJs(foundId)}" data-arg2="${escJs(raw)}" style="font-size:.95rem">
           💶 Επιβεβαίωση &amp; Εξαργύρωση
         </button>
       </div>`;

@@ -60,17 +60,17 @@ if ('serviceWorker' in navigator) {
       🧪 <strong>Demo:</strong> admin@ipear.gr / admin1234
     </div>
     <input type="email" id="lock-email" placeholder="Email" autocomplete="email"
-      onkeydown="if(event.key==='Enter')document.getElementById('lock-in').focus()">
+      data-key-action="_focusElement" data-arg="lock-in">
     <div style="position:relative">
       <input type="password" id="lock-in" placeholder="Κωδικός" autocomplete="current-password"
-        style="padding-right:44px;margin-bottom:14px" onkeydown="if(event.key==='Enter')unlock()">
+        style="padding-right:44px;margin-bottom:14px" data-key-action="unlock">
       <button type="button" id="lock-eye" aria-label="Εμφάνιση/Απόκρυψη κωδικού"
-        onclick="var i=document.getElementById('lock-in');var on=i.type==='password';i.type=on?'text':'password';var p=this.querySelector('path');var c=this.querySelector('circle');if(p&&c){p.setAttribute('d',on?'M2 12s4-7 10-7c2 0 4 .6 5.6 1.5M22 12s-4 7-10 7c-2 0-4-.6-5.6-1.5M2 2l20 20':'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z');c.style.display=on?'none':'';}"
+        data-action="_togglePasswordVisibility" data-pass-self="1"
         style="position:absolute;right:14px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:4px;color:#aaa;width:32px;height:32px;display:flex;align-items:center;justify-content:center">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
       </button>
     </div>
-    <button id="lock-btn" onclick="unlock()">Είσοδος →</button>
+    <button id="lock-btn" data-action="unlock">Είσοδος →</button>
     <div class="lock-err" id="lock-err"></div>
   </div>
 </div>
@@ -83,11 +83,11 @@ if ('serviceWorker' in navigator) {
     <span id="store-badge" style="display:none;background:linear-gradient(135deg,var(--green),var(--green-dark));color:#0a0a0a;padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:800;letter-spacing:.5px"></span>
   </div>
   <div class="h-right">
-    <button id="admin-logout-btn" onclick="adminLogout()" title="Αποσύνδεση" style="display:none;align-items:center;gap:6px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:8px;padding:6px 12px;font-family:inherit;font-size:.78rem;font-weight:700;color:#555;cursor:pointer">
+    <button id="admin-logout-btn" data-action="adminLogout" title="Αποσύνδεση" style="display:none;align-items:center;gap:6px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:8px;padding:6px 12px;font-family:inherit;font-size:.78rem;font-weight:700;color:#555;cursor:pointer">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       Αποσύνδεση
     </button>
-    <div id="worker-health" title="Worker Status" style="display:none;align-items:center;gap:5px;cursor:pointer" onclick="checkWorkerHealth()">
+    <div id="worker-health" title="Worker Status" style="display:none;align-items:center;gap:5px;cursor:pointer" data-action="checkWorkerHealth">
       <span style="font-size:.72rem;color:#888;font-weight:600" id="worker-health-txt">Worker</span>
       <div class="health-dot unknown" id="worker-health-dot"></div>
     </div>
@@ -98,16 +98,16 @@ if ('serviceWorker' in navigator) {
 
 <!-- ═══ TABS ═══ -->
 <div class="tabs">
-  <button class="tab active" onclick="showTab('search')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg> Αναζήτηση</button>
-  <button class="tab" onclick="showTab('register')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Εγγραφή</button>
-  <button class="tab" onclick="showTab('customers')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Πελάτες</button>
-  <button class="tab" onclick="showTab('transactions')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg> Συναλλαγές</button>
-  <button class="tab" onclick="showTab('approvals')" id="tab-btn-approvals" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Εγκρίσεις <span id="approvals-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
-  <button class="tab" onclick="showTab('offers')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg> Προσφορές</button>
-  <button class="tab" onclick="showTab('marketing')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg> Μάρκετινγκ</button>
-  <button class="tab" onclick="showTab('stats')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Στατιστικά</button>
-  <button class="tab" onclick="showTab('system')"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Σύστημα</button>
-  <button class="tab" onclick="showTab('gdpr')" id="tab-btn-gdpr" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> GDPR <span id="gdpr-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
+  <button class="tab active" data-action="showTab" data-arg="search"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg> Αναζήτηση</button>
+  <button class="tab" data-action="showTab" data-arg="register"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Εγγραφή</button>
+  <button class="tab" data-action="showTab" data-arg="customers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Πελάτες</button>
+  <button class="tab" data-action="showTab" data-arg="transactions"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg> Συναλλαγές</button>
+  <button class="tab" data-action="showTab" data-arg="approvals" id="tab-btn-approvals" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Εγκρίσεις <span id="approvals-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
+  <button class="tab" data-action="showTab" data-arg="offers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg> Προσφορές</button>
+  <button class="tab" data-action="showTab" data-arg="marketing"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg> Μάρκετινγκ</button>
+  <button class="tab" data-action="showTab" data-arg="stats"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Στατιστικά</button>
+  <button class="tab" data-action="showTab" data-arg="system"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Σύστημα</button>
+  <button class="tab" data-action="showTab" data-arg="gdpr" id="tab-btn-gdpr" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> GDPR <span id="gdpr-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
 </div>
 
 <div class="container">
@@ -126,8 +126,8 @@ if ('serviceWorker' in navigator) {
         <input type="text" id="rcode-in" maxlength="7" placeholder="000 000" inputmode="numeric"
           style="flex:1;padding:13px 17px;border:2px solid #8ae900;border-radius:11px;font-family:var(--font);font-size:1.4rem;font-weight:800;text-align:center;background:#1a1a1a;color:#8ae900;letter-spacing:6px;outline:none"
           oninput="this.value=this.value.replace(/[^0-9 ]/g,'')"
-          onkeydown="if(event.key==='Enter')verifyCode()">
-        <button class="btn btn-green" onclick="verifyCode()" style="padding:13px 24px;font-size:1rem">✅ Επαλήθευση</button>
+          data-key-action="verifyCode">
+        <button class="btn btn-green" data-action="verifyCode" style="padding:13px 24px;font-size:1rem">✅ Επαλήθευση</button>
       </div>
       <div id="rcode-result" style="margin-top:14px;display:none"></div>
     </div>
@@ -135,8 +135,8 @@ if ('serviceWorker' in navigator) {
     <div class="card">
       <h2><span class="ico">🔍</span> Αναζήτηση Πελάτη</h2>
       <div class="search-box">
-        <input type="text" id="sinput" placeholder="Όνομα, τηλέφωνο ή αρ. κάρτας..." onkeydown="if(event.key==='Enter')search()">
-        <button class="btn btn-primary" onclick="search()">Αναζήτηση <div class="spin" id="sspin"></div></button>
+        <input type="text" id="sinput" placeholder="Όνομα, τηλέφωνο ή αρ. κάρτας..." data-key-action="search">
+        <button class="btn btn-primary" data-action="search">Αναζήτηση <div class="spin" id="sspin"></div></button>
       </div>
 
       <div id="cust-result">
@@ -175,24 +175,24 @@ if ('serviceWorker' in navigator) {
         </div>
 
         <div class="act-grid">
-          <button class="btn btn-green btn-full" onclick="openAdd()">➕ ΠΡΟΣΘΗΚΗ ΠΟΝΤΩΝ</button>
-          <button class="btn btn-primary btn-full" onclick="openRedeem()">💶 ΕΞΑΡΓΥΡΩΣΗ</button>
+          <button class="btn btn-green btn-full" data-action="openAdd">➕ ΠΡΟΣΘΗΚΗ ΠΟΝΤΩΝ</button>
+          <button class="btn btn-primary btn-full" data-action="openRedeem">💶 ΕΞΑΡΓΥΡΩΣΗ</button>
         </div>
 
         <div class="comm-sec">
           <h4>📞 Επικοινωνία</h4>
           <div class="comm-grid">
-            <button class="btn btn-outline btn-sm" onclick="openViber()">📱 Viber</button>
-            <button class="btn btn-outline btn-sm" onclick="openSMS()">💬 SMS</button>
-            <button class="btn btn-outline btn-sm" onclick="openEmail()">✉️ Email</button>
+            <button class="btn btn-outline btn-sm" data-action="openViber">📱 Viber</button>
+            <button class="btn btn-outline btn-sm" data-action="openSMS">💬 SMS</button>
+            <button class="btn btn-outline btn-sm" data-action="openEmail">✉️ Email</button>
           </div>
         </div>
 
         <div id="r-blocked-badge" style="display:none;background:#ff3b30;color:#fff;font-weight:900;font-size:.82rem;text-align:center;border-radius:10px;padding:7px 14px;margin-top:10px;letter-spacing:.5px">🚫 ΑΠΟΚΛΕΙΣΜΕΝΟΣ ΛΟΓΑΡΙΑΣΜΟΣ</div>
         <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-outline btn-sm" onclick="openEdit()">✏️ Επεξεργασία</button>
-          <button class="btn btn-sm" id="block-btn" onclick="blockCust()" style="background:#ff9800;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer">🚫 Block</button>
-          <button class="btn btn-red btn-sm" onclick="deleteCust()">🗑 Διαγραφή</button>
+          <button class="btn btn-outline btn-sm" data-action="openEdit">✏️ Επεξεργασία</button>
+          <button class="btn btn-sm" id="block-btn" data-action="blockCust" style="background:#ff9800;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer">🚫 Block</button>
+          <button class="btn btn-red btn-sm" data-action="deleteCust">🗑 Διαγραφή</button>
         </div>
       </div>
 
@@ -226,7 +226,7 @@ if ('serviceWorker' in navigator) {
         <label for="rterms">Ο πελάτης αποδέχεται τους Όρους Χρήσης & Απορρήτου του iPear Loyalty *</label>
       </div>
       <div id="reg-store-badge" style="display:none;background:linear-gradient(135deg,var(--green),var(--green-dark));color:#0a0a0a;padding:8px 14px;border-radius:10px;font-size:.82rem;font-weight:800;margin-bottom:12px;text-align:center"></div>
-      <button class="btn btn-green btn-full" id="reg-btn" onclick="register()" style="font-size:1rem;padding:15px">
+      <button class="btn btn-green btn-full" id="reg-btn" data-action="register" style="font-size:1rem;padding:15px">
         ✅ Εγγραφή Πελάτη <div class="spin" id="rspin"></div>
       </button>
     </div>
@@ -238,11 +238,11 @@ if ('serviceWorker' in navigator) {
       <h2>
         <span class="ico">👥</span> Όλοι οι Πελάτες
         <input id="cust-search" type="text" placeholder="🔍 Αναζήτηση (όνομα, κάρτα, τηλ)..." oninput="_filterCustTable()" style="margin-left:auto;padding:8px 14px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:.82rem;width:260px;outline:none;transition:border-color .15s" onfocus="this.style.borderColor='#6bb800'" onblur="this.style.borderColor='var(--border)'">
-        <button class="btn btn-sm btn-primary" style="margin-left:8px" onclick="clearSegmentFilter()">🔄 Ανανέωση</button>
+        <button class="btn btn-sm btn-primary" style="margin-left:8px" data-action="clearSegmentFilter">🔄 Ανανέωση</button>
       </h2>
       <div id="seg-filter-bar" style="display:none;align-items:center;gap:10px;background:#fff3e0;border:1.5px solid #ff9800;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:.88rem;font-weight:700;color:#e65100">
         <span id="seg-filter-label">🎯 Φίλτρο segment</span>
-        <button onclick="clearSegmentFilter()" style="margin-left:auto;background:none;border:1.5px solid #e65100;border-radius:8px;padding:4px 10px;font-family:inherit;font-size:.78rem;font-weight:700;color:#e65100;cursor:pointer">✕ Καθαρισμός</button>
+        <button data-action="clearSegmentFilter" style="margin-left:auto;background:none;border:1.5px solid #e65100;border-radius:8px;padding:4px 10px;font-family:inherit;font-size:.78rem;font-weight:700;color:#e65100;cursor:pointer">✕ Καθαρισμός</button>
       </div>
       <div class="tbl-wrap">
         <table>
@@ -262,7 +262,7 @@ if ('serviceWorker' in navigator) {
         <span style="background:var(--green);color:var(--black);width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:.95rem">⚡</span>
         Dashboard
       </h2>
-      <button class="btn btn-sm btn-primary" onclick="loadStats();loadAnalytics()">🔄 Ανανέωση</button>
+      <button class="btn btn-sm btn-primary" data-action="_refreshStats">🔄 Ανανέωση</button>
     </div>
 
     <!-- Row 1: Core KPIs (dark cards) -->
@@ -343,7 +343,7 @@ if ('serviceWorker' in navigator) {
     <div class="card" style="margin-bottom:18px;padding:18px">
       <h2 style="font-size:.95rem;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
         <span><span class="ico" style="width:28px;height:28px;font-size:.8rem">🧹</span> Εκκαθάριση Βάσης</span>
-        <button class="btn btn-sm btn-primary" onclick="_scanOrphans()">Σάρωση</button>
+        <button class="btn btn-sm btn-primary" data-action="_scanOrphans">Σάρωση</button>
       </h2>
       <p style="font-size:.8rem;color:var(--gray);margin-bottom:12px">Βρίσκει ορφανές συναλλαγές (χωρίς αντίστοιχο πελάτη) και πελάτες χωρίς καμία συναλλαγή.</p>
       <div id="orphan-results" style="font-size:.85rem;color:var(--gray);text-align:center;padding:10px">Πάτα «Σάρωση» για έλεγχο</div>
@@ -368,10 +368,10 @@ if ('serviceWorker' in navigator) {
 
     <!-- Period filter + threshold -->
     <div style="display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap;align-items:center">
-      <button class="chip active" id="an-chip-all"    onclick="setAnPeriod('all')">📅 Όλα</button>
-      <button class="chip"        id="an-chip-year"   onclick="setAnPeriod('year')">📆 Τρέχον Έτος</button>
-      <button class="chip"        id="an-chip-month"  onclick="setAnPeriod('month')">🗓️ Τρέχον Μήνας</button>
-      <button class="chip"        id="an-chip-custom" onclick="setAnPeriod('custom')">📌 Εύρος</button>
+      <button class="chip active" id="an-chip-all"    data-action="setAnPeriod" data-arg="all">📅 Όλα</button>
+      <button class="chip"        id="an-chip-year"   data-action="setAnPeriod" data-arg="year">📆 Τρέχον Έτος</button>
+      <button class="chip"        id="an-chip-month"  data-action="setAnPeriod" data-arg="month">🗓️ Τρέχον Μήνας</button>
+      <button class="chip"        id="an-chip-custom" data-action="setAnPeriod" data-arg="custom">📌 Εύρος</button>
       <!-- Custom date range inputs (hidden until 'custom' selected) -->
       <div id="an-custom-range" style="display:none;align-items:center;gap:6px;flex-wrap:wrap">
         <input type="date" id="an-from"
@@ -492,7 +492,7 @@ if ('serviceWorker' in navigator) {
     <div class="card">
       <h2>
         <span class="ico">📜</span> Πρόσφατες Συναλλαγές
-        <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="loadTx()">🔄 Ανανέωση</button>
+        <button class="btn btn-sm btn-primary" style="margin-left:auto" data-action="loadTx">🔄 Ανανέωση</button>
       </h2>
       <div class="tx-list" id="txlist"><div class="empty"><span class="e">⏳</span>Φόρτωση...</div></div>
     </div>
@@ -551,7 +551,7 @@ if ('serviceWorker' in navigator) {
       <!-- Worker config -->
       <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:10px;padding:13px 16px;margin-bottom:16px;font-size:.82rem;color:#333;line-height:1.7;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
         <span>⚙️ <strong>Cloudflare Worker</strong> — αποθηκεύεται μόνο σε αυτή τη συσκευή</span>
-        <button onclick="toggleWorkerConfig()" id="worker-cfg-toggle"
+        <button data-action="toggleWorkerConfig" id="worker-cfg-toggle"
                 style="background:none;border:1px solid var(--green);border-radius:7px;color:var(--green-dark);font-family:var(--font);font-size:.78rem;font-weight:700;cursor:pointer;padding:4px 10px">
           ▼ Ρυθμίσεις
         </button>
@@ -568,8 +568,8 @@ if ('serviceWorker' in navigator) {
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <button class="btn btn-sm btn-primary" onclick="saveWorkerConfig()">💾 Αποθήκευση</button>
-          <button class="btn btn-sm btn-outline" onclick="testWorkerConnection()">🔌 Έλεγχος</button>
+          <button class="btn btn-sm btn-primary" data-action="saveWorkerConfig">💾 Αποθήκευση</button>
+          <button class="btn btn-sm btn-outline" data-action="testWorkerConnection">🔌 Έλεγχος</button>
           <span id="worker-cfg-status" style="font-size:.8rem"></span>
         </div>
       </div>
@@ -611,20 +611,20 @@ if ('serviceWorker' in navigator) {
 
       <!-- Quick email templates -->
       <div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:16px">
-        <button class="chip" onclick="fillEmailTpl('promo')">🎁 Προσφορά</button>
-        <button class="chip" onclick="fillEmailTpl('points')">📊 Πόντοι</button>
-        <button class="chip" onclick="fillEmailTpl('birthday')">🎂 Γενέθλια</button>
-        <button class="chip" onclick="fillEmailTpl('inactive')">😴 Αδρανείς</button>
-        <button class="chip" onclick="fillEmailTpl('newtier')">🏆 Νέο Tier</button>
-        <button class="chip" onclick="fillEmailTpl('holiday')">🎄 Εορτές</button>
+        <button class="chip" data-action="fillEmailTpl" data-arg="promo">🎁 Προσφορά</button>
+        <button class="chip" data-action="fillEmailTpl" data-arg="points">📊 Πόντοι</button>
+        <button class="chip" data-action="fillEmailTpl" data-arg="birthday">🎂 Γενέθλια</button>
+        <button class="chip" data-action="fillEmailTpl" data-arg="inactive">😴 Αδρανείς</button>
+        <button class="chip" data-action="fillEmailTpl" data-arg="newtier">🏆 Νέο Tier</button>
+        <button class="chip" data-action="fillEmailTpl" data-arg="holiday">🎄 Εορτές</button>
       </div>
 
       <!-- Live cost estimate -->
       <div id="email-bulk-estimate" style="display:none;background:#f0f4ff;border:1px solid #a0b4ff;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:.84rem;color:#3a50b0;line-height:1.6"></div>
-      <button class="btn btn-outline btn-full" onclick="previewEmailBulk()" style="margin-bottom:8px;font-size:.9rem;padding:12px">
+      <button class="btn btn-outline btn-full" data-action="previewEmailBulk" style="margin-bottom:8px;font-size:.9rem;padding:12px">
         🔍 Προεπισκόπηση Παραληπτών & Κόστος
       </button>
-      <button class="btn btn-green btn-full" id="send-email-btn" onclick="sendEmailBulk()" style="font-size:1rem;padding:14px">
+      <button class="btn btn-green btn-full" id="send-email-btn" data-action="sendEmailBulk" style="font-size:1rem;padding:14px">
         📧 Αποστολή Email <div class="spin" id="email-spin"></div>
       </button>
       <div id="email-progress" style="margin-top:10px;font-size:.84rem;color:var(--gray);display:none">⏳ Φόρτωση...</div>
@@ -656,13 +656,13 @@ if ('serviceWorker' in navigator) {
 
       <!-- Quick templates -->
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
-        <button class="chip" onclick="fillPushTpl('promo')">🎁 Προσφορά</button>
-        <button class="chip" onclick="fillPushTpl('points')">📊 Πόντοι</button>
-        <button class="chip" onclick="fillPushTpl('bday')">🎂 Γενέθλια</button>
-        <button class="chip" onclick="fillPushTpl('new')">✨ Νέο Προϊόν</button>
+        <button class="chip" data-action="fillPushTpl" data-arg="promo">🎁 Προσφορά</button>
+        <button class="chip" data-action="fillPushTpl" data-arg="points">📊 Πόντοι</button>
+        <button class="chip" data-action="fillPushTpl" data-arg="bday">🎂 Γενέθλια</button>
+        <button class="chip" data-action="fillPushTpl" data-arg="new">✨ Νέο Προϊόν</button>
       </div>
 
-      <button class="btn btn-green btn-full" id="send-push-btn" onclick="sendPushNotification()" style="font-size:1rem;padding:14px">
+      <button class="btn btn-green btn-full" id="send-push-btn" data-action="sendPushNotification" style="font-size:1rem;padding:14px">
         🔔 Αποστολή Push Notification
       </button>
       <div id="push-result" style="margin-top:12px"></div>
@@ -700,18 +700,18 @@ if ('serviceWorker' in navigator) {
 
       <!-- Quick templates -->
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
-        <button class="chip" onclick="fillSmsBulkTpl('promo')">🎁 Προσφορά</button>
-        <button class="chip" onclick="fillSmsBulkTpl('points')">📊 Πόντοι</button>
-        <button class="chip" onclick="fillSmsBulkTpl('arrival')">📱 Νέα Άφιξη</button>
-        <button class="chip" onclick="fillSmsBulkTpl('repair')">🔧 Επισκευές</button>
+        <button class="chip" data-action="fillSmsBulkTpl" data-arg="promo">🎁 Προσφορά</button>
+        <button class="chip" data-action="fillSmsBulkTpl" data-arg="points">📊 Πόντοι</button>
+        <button class="chip" data-action="fillSmsBulkTpl" data-arg="arrival">📱 Νέα Άφιξη</button>
+        <button class="chip" data-action="fillSmsBulkTpl" data-arg="repair">🔧 Επισκευές</button>
       </div>
 
       <!-- Live cost estimate -->
       <div id="sms-bulk-estimate" style="display:none;background:#fff8e1;border:1px solid #ffd54f;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:.84rem;color:#856404;line-height:1.6"></div>
-      <button class="btn btn-outline btn-full" onclick="previewSmsBulk()" style="margin-bottom:8px;font-size:.9rem;padding:12px">
+      <button class="btn btn-outline btn-full" data-action="previewSmsBulk" style="margin-bottom:8px;font-size:.9rem;padding:12px">
         🔍 Προεπισκόπηση Παραληπτών & Κόστος
       </button>
-      <button class="btn btn-green btn-full" id="send-sms-bulk-btn" onclick="sendSMSBulk()" style="font-size:1rem;padding:14px">
+      <button class="btn btn-green btn-full" id="send-sms-bulk-btn" data-action="sendSMSBulk" style="font-size:1rem;padding:14px">
         📱 Αποστολή Μαζικού SMS
       </button>
       <div id="sms-bulk-progress" style="margin-top:10px;font-size:.84rem;color:var(--gray);display:none"></div>
@@ -740,16 +740,16 @@ if ('serviceWorker' in navigator) {
           <label>Μήνυμα</label>
           <textarea id="nmsg" rows="4" placeholder="Γράψε το μήνυμά σου..."></textarea>
         </div>
-        <button class="btn btn-green btn-full" onclick="prepBulk()">📋 Προετοιμασία Λίστας</button>
+        <button class="btn btn-green btn-full" data-action="prepBulk">📋 Προετοιμασία Λίστας</button>
         <div id="bulk-list" style="margin-top:14px;max-height:300px;overflow-y:auto"></div>
       </div>
       <div class="card">
         <h2><span class="ico">📋</span> Πρότυπα Viber</h2>
-        <div class="msg-tpl" onclick="fillTpl('promo')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('promo')"><strong>🎁 Ειδική Προσφορά</strong><span>Προσφορά ή νέο προϊόν</span></div>
-        <div class="msg-tpl" onclick="fillTpl('points')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('points')"><strong>📊 Ενημέρωση Πόντων</strong><span>Γενικό μήνυμα για πόντους</span></div>
-        <div class="msg-tpl" onclick="fillTpl('holiday')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('holiday')"><strong>🎄 Ευχές Εορτών</strong><span>Χριστουγεννιάτικες ευχές</span></div>
-        <div class="msg-tpl" onclick="fillTpl('arrival')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('arrival')"><strong>📱 Νέα Άφιξη</strong><span>Νέα προϊόντα στο κατάστημα</span></div>
-        <div class="msg-tpl" onclick="fillTpl('repair')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')fillTpl('repair')"><strong>🔧 Επισκευές</strong><span>Υπενθύμιση για επισκευή</span></div>
+        <div class="msg-tpl" data-action="fillTpl" data-arg="promo" role="button" tabindex="0" data-key-action="fillTpl" data-arg="promo"><strong>🎁 Ειδική Προσφορά</strong><span>Προσφορά ή νέο προϊόν</span></div>
+        <div class="msg-tpl" data-action="fillTpl" data-arg="points" role="button" tabindex="0" data-key-action="fillTpl" data-arg="points"><strong>📊 Ενημέρωση Πόντων</strong><span>Γενικό μήνυμα για πόντους</span></div>
+        <div class="msg-tpl" data-action="fillTpl" data-arg="holiday" role="button" tabindex="0" data-key-action="fillTpl" data-arg="holiday"><strong>🎄 Ευχές Εορτών</strong><span>Χριστουγεννιάτικες ευχές</span></div>
+        <div class="msg-tpl" data-action="fillTpl" data-arg="arrival" role="button" tabindex="0" data-key-action="fillTpl" data-arg="arrival"><strong>📱 Νέα Άφιξη</strong><span>Νέα προϊόντα στο κατάστημα</span></div>
+        <div class="msg-tpl" data-action="fillTpl" data-arg="repair" role="button" tabindex="0" data-key-action="fillTpl" data-arg="repair"><strong>🔧 Επισκευές</strong><span>Υπενθύμιση για επισκευή</span></div>
       </div>
     </div>
 
@@ -760,7 +760,7 @@ if ('serviceWorker' in navigator) {
     <div class="card">
       <h2>
         <span class="ico">🎁</span> Προσφορές
-        <button class="btn btn-green btn-sm" style="margin-left:auto" onclick="openOfferModal()">➕ Νέα Προσφορά</button>
+        <button class="btn btn-green btn-sm" style="margin-left:auto" data-action="openOfferModal">➕ Νέα Προσφορά</button>
       </h2>
       <p style="color:var(--gray);font-size:0.84rem;margin-bottom:16px;line-height:1.5">Οι ενεργές προσφορές εμφανίζονται αυτόματα στο customer app ως banner και στο tab "Προσφορές".</p>
       <div id="offers-list"><div class="empty"><span class="e">⏳</span>Φόρτωση...</div></div>
@@ -776,7 +776,7 @@ if ('serviceWorker' in navigator) {
         <h3>Λειτουργία Συντήρησης (Kill Switch)</h3>
         <p id="ks-status-text">Απενεργοποιημένο — οι εξαργυρώσεις λειτουργούν κανονικά</p>
       </div>
-      <div class="toggle-sw" id="ks-toggle" onclick="toggleKillSwitch()" style="width:52px;height:28px;flex-shrink:0">
+      <div class="toggle-sw" id="ks-toggle" data-action="toggleKillSwitch" style="width:52px;height:28px;flex-shrink:0">
         
       </div>
     </div>
@@ -791,8 +791,8 @@ if ('serviceWorker' in navigator) {
           <strong>12 μήνες</strong>. Καταγράφεται συναλλαγή τύπου «Εκπνοή» για κάθε πελάτη.
         </p>
         <div style="display:flex;gap:8px;margin-bottom:14px">
-          <button class="btn btn-outline" style="flex:1" onclick="previewExpirePoints()">🔍 Προεπισκόπηση</button>
-          <button class="btn" id="btn-expire-exec" onclick="executeExpirePoints()"
+          <button class="btn btn-outline" style="flex:1" data-action="previewExpirePoints">🔍 Προεπισκόπηση</button>
+          <button class="btn" id="btn-expire-exec" data-action="executeExpirePoints"
             style="flex:1;display:none;background:#dc3545;color:#fff;border-color:#dc3545">🗑️ Εφαρμογή</button>
         </div>
         <div id="expire-preview"></div>
@@ -806,8 +806,8 @@ if ('serviceWorker' in navigator) {
           <strong>τρέχον ημερολογιακό έτος</strong>. Τα lifetime points μειώνονται στο max του κατώτερου tier.
         </p>
         <div style="display:flex;gap:8px;margin-bottom:14px">
-          <button class="btn btn-outline" style="flex:1" onclick="previewTierDowngrade()">🔍 Προεπισκόπηση</button>
-          <button class="btn" id="btn-downgrade-exec" onclick="executeTierDowngrade()"
+          <button class="btn btn-outline" style="flex:1" data-action="previewTierDowngrade">🔍 Προεπισκόπηση</button>
+          <button class="btn" id="btn-downgrade-exec" data-action="executeTierDowngrade"
             style="flex:1;display:none;background:#dc3545;color:#fff;border-color:#dc3545">📉 Εφαρμογή</button>
         </div>
         <div id="downgrade-preview"></div>
@@ -820,7 +820,7 @@ if ('serviceWorker' in navigator) {
     <div class="card" style="margin-bottom:18px">
       <h2 style="display:flex;align-items:center;justify-content:space-between">
         <span><span class="ico">🔧</span> System Health Check</span>
-        <button class="btn btn-sm btn-primary" onclick="_runSystemHealthCheck()">▶️ Εκτέλεση</button>
+        <button class="btn btn-sm btn-primary" data-action="_runSystemHealthCheck">▶️ Εκτέλεση</button>
       </h2>
       <p style="color:var(--gray);font-size:.84rem;line-height:1.6;margin-bottom:14px">
         Ολοκληρωμένος έλεγχος βάσης δεδομένων, Worker, Service Workers, και ακεραιότητας συστήματος.
@@ -840,10 +840,10 @@ if ('serviceWorker' in navigator) {
       <div class="card">
         <h2><span class="ico">💾</span> Εξαγωγή Backup</h2>
         <p style="color:var(--gray);font-size:0.88rem;line-height:1.6;margin-bottom:18px">Εξαγωγή όλων των δεδομένων σε αρχείο JSON. Συνίσταται τουλάχιστον εβδομαδιαία.</p>
-        <button class="btn btn-green btn-full" onclick="exportBk()" style="margin-bottom:10px">
+        <button class="btn btn-green btn-full" data-action="exportBk" style="margin-bottom:10px">
           📥 Εξαγωγή Backup (JSON) <div class="spin" id="exspin"></div>
         </button>
-        <button class="btn btn-outline btn-full" onclick="exportCSV()" style="margin-bottom:10px">
+        <button class="btn btn-outline btn-full" data-action="exportCSV" style="margin-bottom:10px">
           📊 Εξαγωγή Πελατών (CSV/Excel)
         </button>
         <div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:11px;font-size:0.8rem;color:#3a6e00">
@@ -853,7 +853,7 @@ if ('serviceWorker' in navigator) {
       <div class="card">
         <h2><span class="ico">📤</span> Επαναφορά Backup</h2>
         <p style="color:var(--gray);font-size:0.88rem;line-height:1.6;margin-bottom:18px">Επαναφορά από αρχείο JSON. Δεν διαγράφονται υπάρχοντα δεδομένα — προσθέτονται μόνο νέα.</p>
-        <button class="btn btn-primary btn-full" onclick="document.getElementById('impin').click()" style="margin-bottom:10px">
+        <button class="btn btn-primary btn-full" data-click-target="impin" style="margin-bottom:10px">
           📤 Επαναφορά από Backup
         </button>
         <input type="file" id="impin" accept=".json" style="display:none" onchange="importBk(event)">
@@ -873,7 +873,7 @@ if ('serviceWorker' in navigator) {
         Πελάτες που ζήτησαν οριστική διαγραφή λογαριασμού από την εφαρμογή.
         Η διαγραφή είναι <strong>μη αναστρέψιμη</strong> — ελέγξτε πριν εκτελέσετε.
       </p>
-      <button class="btn btn-outline" onclick="loadDeletionRequests()" style="margin-bottom:16px">🔄 Ανανέωση</button>
+      <button class="btn btn-outline" data-action="loadDeletionRequests" style="margin-bottom:16px">🔄 Ανανέωση</button>
       <div id="gdpr-list" style="font-size:.88rem;color:var(--gray)">Πάτα «Ανανέωση» για φόρτωση.</div>
     </div>
   </div>
@@ -905,8 +905,8 @@ if ('serviceWorker' in navigator) {
     </div>
     <div class="fg"><label>Σχόλιο / Αρ. Απόδειξης (προαιρετικό)</label><input type="text" id="ma-note" placeholder="π.χ. Απόδειξη #1234"></div>
     <div class="modal-act">
-      <button class="btn btn-green" onclick="confirmAdd()">✅ Καταχώρηση</button>
-      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+      <button class="btn btn-green" data-action="confirmAdd">✅ Καταχώρηση</button>
+      <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
     </div>
   </div>
 </div>
@@ -926,8 +926,8 @@ if ('serviceWorker' in navigator) {
       </select>
     </div>
     <div class="modal-act">
-      <button class="btn btn-green" onclick="confirmRedeem()">💶 Εξαργύρωση</button>
-      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+      <button class="btn btn-green" data-action="confirmRedeem">💶 Εξαργύρωση</button>
+      <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
     </div>
   </div>
 </div>
@@ -938,10 +938,10 @@ if ('serviceWorker' in navigator) {
     <h3>📱 Viber</h3>
     <p style="color:var(--gray);font-size:0.88rem;margin-bottom:14px"><strong id="mv-name"></strong> — <span id="mv-phone"></span></p>
     <div id="mv-tpl">
-      <div class="msg-tpl" onclick="sViber('pts')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')sViber('pts')"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
-      <div class="msg-tpl" onclick="sViber('wel')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')sViber('wel')"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
-      <div class="msg-tpl" onclick="sViber('pro')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')sViber('pro')"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
-      <div class="msg-tpl" onclick="sViber('cust')"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
+      <div class="msg-tpl" data-action="sViber" data-arg="pts" role="button" tabindex="0" data-key-action="sViber" data-arg="pts"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
+      <div class="msg-tpl" data-action="sViber" data-arg="wel" role="button" tabindex="0" data-key-action="sViber" data-arg="wel"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
+      <div class="msg-tpl" data-action="sViber" data-arg="pro" role="button" tabindex="0" data-key-action="sViber" data-arg="pro"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
+      <div class="msg-tpl" data-action="sViber" data-arg="cust"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
     </div>
     <div id="mv-compose" style="display:none">
       <div class="fg">
@@ -952,11 +952,11 @@ if ('serviceWorker' in navigator) {
         💡 Θα ανοίξει το Viber με τον αριθμό <strong id="mv-phone2"></strong>. Το μήνυμα αντιγράφεται αυτόματα στο clipboard.
       </div>
       <div class="modal-act" style="margin-top:12px">
-        <button class="btn btn-green" onclick="sendViberDeepLink()">📱 Ανοίξε Viber</button>
-        <button class="btn btn-outline" onclick="mvBack()">← Πίσω</button>
+        <button class="btn btn-green" data-action="sendViberDeepLink">📱 Ανοίξε Viber</button>
+        <button class="btn btn-outline" data-action="mvBack">← Πίσω</button>
       </div>
     </div>
-    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:10px" id="mv-cancel">Ακύρωση</button>
+    <button class="btn btn-outline btn-full" data-action="closeM" style="margin-top:10px" id="mv-cancel">Ακύρωση</button>
   </div>
 </div>
 
@@ -966,10 +966,10 @@ if ('serviceWorker' in navigator) {
     <h3>💬 SMS</h3>
     <p style="color:var(--gray);font-size:0.88rem;margin-bottom:14px"><strong id="ms-name"></strong> — <span id="ms-phone"></span></p>
     <div id="ms-tpl">
-      <div class="msg-tpl" onclick="sSMS('pts')"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
-      <div class="msg-tpl" onclick="sSMS('wel')"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
-      <div class="msg-tpl" onclick="sSMS('pro')"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
-      <div class="msg-tpl" onclick="sSMS('cust')"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
+      <div class="msg-tpl" data-action="sSMS" data-arg="pts"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
+      <div class="msg-tpl" data-action="sSMS" data-arg="wel"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
+      <div class="msg-tpl" data-action="sSMS" data-arg="pro"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
+      <div class="msg-tpl" data-action="sSMS" data-arg="cust"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
     </div>
     <div id="ms-compose" style="display:none">
       <div class="fg">
@@ -979,11 +979,11 @@ if ('serviceWorker' in navigator) {
       </div>
       <div id="ms-err" style="color:#e53935;font-size:.85rem;margin-top:4px;min-height:18px"></div>
       <div class="modal-act" style="margin-top:8px">
-        <button class="btn btn-green" id="ms-send-btn" onclick="sendSMSIndividual()">📤 Αποστολή SMS</button>
-        <button class="btn btn-outline" onclick="msBack()">← Πίσω</button>
+        <button class="btn btn-green" id="ms-send-btn" data-action="sendSMSIndividual">📤 Αποστολή SMS</button>
+        <button class="btn btn-outline" data-action="msBack">← Πίσω</button>
       </div>
     </div>
-    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:10px" id="ms-cancel">Ακύρωση</button>
+    <button class="btn btn-outline btn-full" data-action="closeM" style="margin-top:10px" id="ms-cancel">Ακύρωση</button>
   </div>
 </div>
 
@@ -993,10 +993,10 @@ if ('serviceWorker' in navigator) {
     <h3>✉️ Email</h3>
     <p style="color:var(--gray);font-size:0.88rem;margin-bottom:14px"><strong id="me-name"></strong> — <span id="me-addr"></span></p>
     <div id="me-tpl">
-      <div class="msg-tpl" onclick="sEmail('pts')"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
-      <div class="msg-tpl" onclick="sEmail('wel')"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
-      <div class="msg-tpl" onclick="sEmail('pro')"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
-      <div class="msg-tpl" onclick="sEmail('cust')"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
+      <div class="msg-tpl" data-action="sEmail" data-arg="pts"><strong>📊 Ενημέρωση Πόντων</strong><span>Στείλε τρέχοντες πόντους</span></div>
+      <div class="msg-tpl" data-action="sEmail" data-arg="wel"><strong>🎉 Καλωσόρισμα</strong><span>Μήνυμα νέου μέλους</span></div>
+      <div class="msg-tpl" data-action="sEmail" data-arg="pro"><strong>🎁 Προσφορά</strong><span>Ειδική ενημέρωση</span></div>
+      <div class="msg-tpl" data-action="sEmail" data-arg="cust"><strong>✍️ Προσωπικό</strong><span>Γράψε δικό σου κείμενο</span></div>
     </div>
     <div id="me-compose" style="display:none">
       <div class="fg" style="margin-bottom:8px">
@@ -1009,11 +1009,11 @@ if ('serviceWorker' in navigator) {
       </div>
       <div id="me-err" style="color:#e53935;font-size:.85rem;margin-top:4px;min-height:18px"></div>
       <div class="modal-act" style="margin-top:8px">
-        <button class="btn btn-green" id="me-send-btn" onclick="sendEmailIndividual()">📤 Αποστολή</button>
-        <button class="btn btn-outline" onclick="meBack()">← Πίσω</button>
+        <button class="btn btn-green" id="me-send-btn" data-action="sendEmailIndividual">📤 Αποστολή</button>
+        <button class="btn btn-outline" data-action="meBack">← Πίσω</button>
       </div>
     </div>
-    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:10px" id="me-cancel">Ακύρωση</button>
+    <button class="btn btn-outline btn-full" data-action="closeM" style="margin-top:10px" id="me-cancel">Ακύρωση</button>
   </div>
 </div>
 
@@ -1031,11 +1031,11 @@ if ('serviceWorker' in navigator) {
       <label>Φωτογραφία Background <span style="font-weight:400;color:var(--gray)">(προαιρετικό)</span></label>
       <input type="hidden" id="of-image">
       <input type="file" id="of-image-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="previewOfferImage(event)">
-      <div id="of-img-area" onclick="document.getElementById('of-image-file').click()" style="border:2px dashed var(--border);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:border-color .2s;position:relative" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='var(--border)'">
+      <div id="of-img-area" data-click-target="of-image-file" style="border:2px dashed var(--border);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:border-color .2s;position:relative" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='var(--border)'">
         <div id="of-img-placeholder" style="color:var(--gray);font-size:.88rem">📷 Κλικ για επιλογή φωτογραφίας</div>
         <div id="of-img-preview" style="display:none">
           <img id="of-img-thumb" style="max-height:130px;max-width:100%;border-radius:9px;object-fit:cover;display:block;margin:0 auto">
-          <button onclick="removeOfferImage(event)" style="margin-top:8px;background:#fee2e2;color:#dc2626;border:none;border-radius:7px;padding:4px 12px;font-size:.78rem;font-weight:700;cursor:pointer;font-family:inherit">✕ Αφαίρεση</button>
+          <button data-action="_removeOfferImageEvt" data-pass-event="1" style="margin-top:8px;background:#fee2e2;color:#dc2626;border:none;border-radius:7px;padding:4px 12px;font-size:.78rem;font-weight:700;cursor:pointer;font-family:inherit">✕ Αφαίρεση</button>
         </div>
       </div>
       <div style="font-size:.72rem;color:var(--gray);margin-top:5px">JPG / PNG / WebP · μέγιστο 10MB · αποθηκεύεται αυτόματα (συμπιεσμένο) στη βάση σου</div>
@@ -1067,8 +1067,8 @@ if ('serviceWorker' in navigator) {
       <label for="of-active">Ενεργή — εμφανίζεται στο customer app</label>
     </div>
     <div class="modal-act">
-      <button class="btn btn-green" onclick="saveOffer()">✅ Αποθήκευση</button>
-      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+      <button class="btn btn-green" data-action="saveOffer">✅ Αποθήκευση</button>
+      <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
     </div>
   </div>
 </div>
@@ -1087,8 +1087,8 @@ if ('serviceWorker' in navigator) {
     </div>
     <div id="offer-push-result" style="margin-bottom:12px"></div>
     <div class="modal-act" style="justify-content:center;gap:10px">
-      <button class="btn btn-outline" onclick="closeM()">Όχι, ευχαριστώ</button>
-      <button class="btn btn-green" id="offer-push-send-btn" onclick="sendOfferPush()">🔔 Αποστολή</button>
+      <button class="btn btn-outline" data-action="closeM">Όχι, ευχαριστώ</button>
+      <button class="btn btn-green" id="offer-push-send-btn" data-action="sendOfferPush">🔔 Αποστολή</button>
     </div>
   </div>
 </div>
@@ -1114,7 +1114,7 @@ if ('serviceWorker' in navigator) {
     <div style="position:relative;height:200px;margin-bottom:16px"><canvas id="drill-chart"></canvas></div>
     <h4 style="margin-bottom:10px;font-size:.88rem;color:var(--gray);font-weight:600">Ιστορικό Συναλλαγών</h4>
     <div id="drill-tx" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:10px"></div>
-    <button class="btn btn-outline btn-full" onclick="closeM()" style="margin-top:14px">Κλείσιμο</button>
+    <button class="btn btn-outline btn-full" data-action="closeM" style="margin-top:14px">Κλείσιμο</button>
   </div>
 </div>
 
@@ -1130,8 +1130,8 @@ if ('serviceWorker' in navigator) {
     <div class="fg"><label>Email</label><input type="email" id="ed-email" placeholder="π.χ. nikos@email.com"></div>
     <div class="fg"><label>🎂 Ημερομηνία Γέννησης</label><input type="date" id="ed-bday"></div>
     <div class="modal-act">
-      <button class="btn btn-green" onclick="saveEdit()">✅ Αποθήκευση</button>
-      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+      <button class="btn btn-green" data-action="saveEdit">✅ Αποθήκευση</button>
+      <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
     </div>
   </div>
 </div>
@@ -1142,8 +1142,8 @@ if ('serviceWorker' in navigator) {
     <h3>✍️ Προσωπικό Μήνυμα</h3>
     <div class="fg"><label>Κείμενο</label><textarea id="cm-txt" rows="5" placeholder="Γράψε το μήνυμά σου..."></textarea></div>
     <div class="modal-act">
-      <button class="btn btn-green" onclick="sendCustom()">📤 Αποστολή</button>
-      <button class="btn btn-outline" onclick="closeM()">Ακύρωση</button>
+      <button class="btn btn-green" data-action="sendCustom">📤 Αποστολή</button>
+      <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
     </div>
   </div>
 </div>

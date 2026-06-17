@@ -197,7 +197,7 @@ export function renderAnalytics() {
           .map(
             (r) => `
           <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 11px;background:white;border-radius:8px;margin-bottom:6px;cursor:pointer"
-               onclick="openDrillDown('${escJs(r.id)}')">
+               data-action="openDrillDown" data-arg="${escJs(r.id)}">
             <div>
               <strong style="color:var(--black)">${escHtml(r.name)}</strong>
               <span style="color:var(--gray);font-size:.78rem;margin-left:8px">${escHtml(r.card)}</span>
@@ -226,7 +226,7 @@ export function renderAnalytics() {
         const alert = r.pct > threshold && r.revenue > 0;
         const pctColor = alert ? '#e53935' : r.pct > 10 ? '#f57c00' : '#4caf50';
         return `<tr style="border-bottom:1px solid var(--border);cursor:pointer"
-                  onclick="openDrillDown('${escJs(r.id)}')"
+                  data-action="openDrillDown" data-arg="${escJs(r.id)}"
                   onmouseover="this.style.background='var(--light)'"
                   onmouseout="this.style.background=''">
         <td style="padding:10px 10px">
