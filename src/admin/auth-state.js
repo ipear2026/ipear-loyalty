@@ -5,4 +5,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
 export const authState = {
   authenticated: false,
+  actorUid: null,
 };
