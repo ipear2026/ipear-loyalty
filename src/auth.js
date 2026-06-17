@@ -319,16 +319,18 @@ export function openRegister() {
 
 async function _finishRegistration(authUser, { name, phone, email, card, birthday, refCode, marketingOptIn }) {
   const firebaseUID = authUser?.uid || null;
-  const mktBonus = marketingOptIn ? 50 : 0;
-  const refBonus = refCode ? 100 : 0;
-  const initPoints = mktBonus + refBonus;
+  // CRITICAL-2: customer CANNOT self-credit any signup bonus. The Firestore
+  // rule enforces points==0 && totalPoints==0 on Path A creates. Server-side
+  // workers award the bonuses after verification:
+  //   - /send-welcome credits +50 marketing bonus (idToken-authenticated)
+  //   - /process-referral credits +100 referral bonus (to both parties)
   const customerDocId = firebaseUID;
   const _now = new Date().toISOString();
   try {
     await window._setDoc(window._doc(window._db,'ipear_customers', customerDocId), {
       name, phone, email, card,
       uid: firebaseUID || '',
-      points: initPoints, totalPoints: initPoints,
+      points: 0, totalPoints: 0,
       birthday: birthday || '',
       referredBy: refCode || '',
       blocked: false,
@@ -382,16 +384,29 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
     })();
   }
 
-  state.foundCustomer = { id: customerDocId, name, phone, email, card, uid: firebaseUID, points: initPoints, totalPoints: initPoints, birthday, fcmToken: '', referralCount: 0 };
+  // Local mirror starts at 0; the worker will increment via Firestore and the
+  // app's snapshot listener picks up the new balance for the UI.
+  state.foundCustomer = { id: customerDocId, name, phone, email, card, uid: firebaseUID, points: 0, totalPoints: 0, birthday, fcmToken: '', referralCount: 0 };
   localStorage.setItem(_REM_KEY, JSON.stringify({ email, name }));
   ['reg-name','reg-phone','reg-email','reg-pass1','reg-pass2','reg-bday-d','reg-bday-m','reg-bday-y','reg-ref'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
 
-  fetch(_WORKER_URL + '/send-welcome', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, name, points: initPoints, marketingOptIn: !!marketingOptIn, customerId: customerDocId }),
-  }).then(r => { if (!r.ok) logger.warn('[welcome] failed:', r.status); })
-    .catch(e => logger.warn('[welcome] error:', e.message));
+  // HIGH-4: /send-welcome now requires a verified Firebase idToken. The worker
+  // derives email + UID from the token; mismatched body fields are rejected.
+  // We still send the name (no token claim for it) and the marketing flag
+  // (consent). The +50 marketing bonus is credited atomically by the worker.
+  (async () => {
+    try {
+      const idToken = await authUser.getIdToken(true);
+      const res = await fetch(_WORKER_URL + '/send-welcome', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken, name, marketingOptIn: !!marketingOptIn }),
+      });
+      if (!res.ok) logger.warn('[welcome] failed:', res.status);
+    } catch (e) {
+      logger.warn('[welcome] error:', e.message);
+    }
+  })();
 
   _transitionToApp();
   showToast('✅ Καλωσήρθες στο iPear Loyalty! 🍐', 'green');

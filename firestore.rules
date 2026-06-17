@@ -28,6 +28,15 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // HIGH-1: Verified auth = signed in AND email_verified flag set on the token.
+    // Used by every customer-self ownership path so an attacker cannot register
+    // a Firebase Auth account with someone else's email (unverified) and then
+    // claim that victim's legacy customer doc.
+    function isVerifiedAuth() {
+      return isAuth() &&
+        request.auth.token.email_verified == true;
+    }
+
     // Admin = UID present in the `ipear_admins/{uid}` whitelist doc.
     // (Custom-claim path can be re-introduced once a Cloud Function sets the
     // `admin` claim — for now the whitelist is the single source of truth.)
@@ -37,11 +46,12 @@ service cloud.firestore {
     }
 
     // Self-ownership of a customer doc (uid field OR matching email).
+    // HIGH-1: email path now requires a verified email on the auth token.
+    // uid path is safe without the check (uid binding requires verification
+    // via isUidBindOnly below, so any doc with uid==auth.uid is already gated).
     function ownsCustomer(data) {
-      return isAuth() && (
-        data.uid == request.auth.uid ||
-        data.email == request.auth.token.email
-      );
+      return (isAuth() && data.uid == request.auth.uid) ||
+             (isVerifiedAuth() && data.email == request.auth.token.email);
     }
 
     function isPositiveInt(v) {
@@ -67,8 +77,12 @@ service cloud.firestore {
     }
 
     // One-time UID binding (legacy doc → uid path migration helper).
+    // HIGH-1: requires a verified email — without this, an attacker could
+    // register an unverified Firebase Auth account with a victim's email and
+    // bind their own UID onto the victim's legacy customer doc.
     function isUidBindOnly() {
-      return request.resource.data.diff(resource.data)
+      return isVerifiedAuth() &&
+             request.resource.data.diff(resource.data)
                .affectedKeys().hasOnly(['uid']) &&
              (resource.data.uid == null || resource.data.uid == '') &&
              request.resource.data.uid == request.auth.uid;
@@ -101,7 +115,18 @@ service cloud.firestore {
         request.resource.data.name.size() > 0 &&
         request.resource.data.name.size() <= 100 &&
         (
-          // Path A: fresh registration — points must match a known welcome bucket
+          // Path A: fresh registration — CRITICAL-2 hardening.
+          //
+          //   • points and totalPoints MUST be 0. The client no longer self-credits
+          //     marketing or referral bonuses. Server-side workers/functions award
+          //     them after verification:
+          //       - /send-welcome credits +50 marketing bonus (requires verified
+          //         idToken matching the customer doc).
+          //       - /process-referral credits +100 to new customer AND +100 to
+          //         referrer ONLY if the referrer card exists and is under cap.
+          //   • referredBy is still recorded so the worker has the code to validate.
+          //   • marketingOptIn is still recorded so the worker knows whether to
+          //     award +50 and what consent timestamp to use.
           (
             request.resource.data.keys().hasOnly([
               'uid','email','name','phone','card','points','totalPoints',
@@ -109,17 +134,10 @@ service cloud.firestore {
               'referralCount','fcmToken','marketingOptIn','marketingOptInAt',
               'termsAcceptedAt','createdAt'
             ]) &&
-            request.resource.data.points == request.resource.data.totalPoints &&
-            (
-              (request.resource.data.points ==   0 && request.resource.data.marketingOptIn == false &&
-               !request.resource.data.referredBy.matches('IP-[A-Z0-9]{6}')) ||
-              (request.resource.data.points ==  50 && request.resource.data.marketingOptIn == true  &&
-               !request.resource.data.referredBy.matches('IP-[A-Z0-9]{6}')) ||
-              (request.resource.data.points == 100 && request.resource.data.marketingOptIn == false &&
-               request.resource.data.referredBy.matches('IP-[A-Z0-9]{6}')) ||
-              (request.resource.data.points == 150 && request.resource.data.marketingOptIn == true  &&
-               request.resource.data.referredBy.matches('IP-[A-Z0-9]{6}'))
-            )
+            request.resource.data.points == 0 &&
+            request.resource.data.totalPoints == 0 &&
+            (request.resource.data.referredBy == '' ||
+             request.resource.data.referredBy.matches('IP-[A-Z0-9]{6}'))
           )
           ||
           // Path B: migration of legacy doc into uid-keyed doc.

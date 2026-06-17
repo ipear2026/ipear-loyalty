@@ -3,6 +3,45 @@ import { state } from './state.js';
 import { esc, showToast, _trackEvent, _trapFocus, _releaseFocus, _fireConfetti, tier, _WORKER_URL } from './utils.js';
 import { _t } from './i18n.js';
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  HIGH-3: Safe <img> factory.
+//
+//  Building the <img> via DOM API (createElement + property assignment) means
+//  the browser handles every attribute escape — no string interpolation, no
+//  hand-rolled `onerror=` template, no chance of attribute breakout from
+//  admin-supplied `emoji` or `imageUrl`. Returns a real Element; callers can
+//  either appendChild it or read `.outerHTML` (which is also safe because the
+//  serializer escapes attributes when stringifying).
+//
+//  Used by both the offer list renderer and the offer bottom sheet.
+// ═══════════════════════════════════════════════════════════════════════════
+function _safeImgEl(cls, src, emoji) {
+  const safeSrc = typeof src === 'string' ? src : '';
+  const isData = safeSrc.startsWith('data:');
+  const img = document.createElement('img');
+  img.className = cls + (isData ? ' loaded' : '');
+  img.src = safeSrc;
+  img.alt = '';
+  if (!isData) img.loading = 'lazy';
+  img.decoding = 'async';
+  const ph = cls + '-placeholder';
+  const em = String(emoji || '🎁');
+  img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
+  img.addEventListener('error', () => {
+    const d = document.createElement('div');
+    d.className = ph;
+    d.textContent = em;
+    img.replaceWith(d);
+  }, { once: true });
+  return img;
+}
+
+// Module-scope helper for string-fragment callers.
+// Safe because _safeImgEl never uses innerHTML or hand-rolled attribute injection.
+function _safeImgTag(cls, src, emoji) {
+  return _safeImgEl(cls, src, emoji).outerHTML;
+}
+
 // ════════════════════════════════════════
 //  HOME — REWARD SCROLL CARDS
 // ════════════════════════════════════════
@@ -148,13 +187,8 @@ function _renderOffersSnap(snap) {
 
   _activeOffers = active;
 
-  function _imgTag(cls, src, emoji) {
-    if (typeof src !== 'string') src = '';
-    const isData = src.startsWith('data:');
-    const ph = cls + '-placeholder';
-    const em = (emoji || '🎁').replace(/'/g, '&#39;');
-    return `<img class="${cls}${isData?' loaded':''}" src="${src.replace(/"/g,'&quot;')}" alt=""${isData?'':' loading="lazy"'} decoding="async" onload="this.classList.add('loaded')" onerror="this.onerror=null;var d=document.createElement('div');d.className='${ph}';d.textContent='${em}';this.replaceWith(d)">`;
-  }
+  // HIGH-3: delegates to the module-scoped safe factories (top of file).
+  const _imgTag = _safeImgTag;
 
   const preview = active.slice(0,2).map((o, idx) => {
     const _iu = typeof o.imageUrl === 'string' ? o.imageUrl : '';
@@ -228,14 +262,21 @@ export function openOfferSheet(idx) {
   if (!offers[idx]) return;
   _selectedOffer = offers[idx];
   const o = _selectedOffer;
+  // HIGH-3: same XSS sink as the offer-list renderer — build the <img> via
+  // _safeImgEl() instead of an HTML template, then swap it in via replaceChildren.
   const _oiu = typeof o.imageUrl === 'string' ? o.imageUrl : '';
   const safeImg = (_oiu && (_oiu.startsWith('https://') || _oiu.startsWith('data:image/'))) ? _oiu : '';
   const imgWrap = document.getElementById('os-img-wrap');
-  const _isData = safeImg.startsWith('data:');
-  const _oem = (esc(o.emoji) || '🎁').replace(/'/g, '&#39;');
-  imgWrap.innerHTML = safeImg
-    ? `<img class="os-img${_isData?' loaded':''}" src="${safeImg.replace(/"/g,'&quot;')}" alt="" decoding="async" onload="this.classList.add('loaded')" onerror="this.onerror=null;var d=document.createElement('div');d.className='os-img-placeholder';d.textContent='${_oem}';this.replaceWith(d)">`
-    : `<div class="os-img-placeholder">${esc(o.emoji)||'🎁'}</div>`;
+  if (imgWrap) {
+    if (safeImg) {
+      imgWrap.replaceChildren(_safeImgEl('os-img', safeImg, o.emoji));
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'os-img-placeholder';
+      ph.textContent = String(o.emoji || '🎁');
+      imgWrap.replaceChildren(ph);
+    }
+  }
   document.getElementById('os-title').textContent = o.title || '';
   document.getElementById('os-desc').textContent = o.description || '';
 

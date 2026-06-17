@@ -69,20 +69,77 @@ function isRateLimited(ip) {
   return false;
 }
 
-// KV-backed rate limiter — survives cold starts (used for critical public endpoints)
+// ── MEDIUM-6: Fail-CLOSED KV rate limiter ───────────────────────────────
+// KV-backed rate limiter — survives cold starts. If KV is unreachable we
+// FAIL CLOSED (treat the request as rate-limited) instead of falling back to
+// the leaky per-isolate in-memory map. KV outages are rare; silently degrading
+// to a near-no-op limiter under attack is worse than a brief 503.
+//
+// Returns: { limited: boolean, reason?: 'kv-unavailable' | 'rate-exceeded' }
+// Callers should treat `limited === true` as a hard 503/429.
 async function isRateLimitedKV(env, ip, prefix, maxHits, windowSeconds) {
-  if (!env.RATE_LIMIT_KV) return isRateLimited(ip);
-  const key = `rl:${prefix}:${ip}`;
-  const raw = await env.RATE_LIMIT_KV.get(key);
-  const now = Date.now();
-  let bucket = raw ? JSON.parse(raw) : null;
-  if (!bucket || now - bucket.s > windowSeconds * 1000) {
-    bucket = { s: now, h: 1 };
-  } else {
-    bucket.h++;
+  if (!env.RATE_LIMIT_KV) {
+    console.error('[rate-limit] FAIL-CLOSED: RATE_LIMIT_KV binding missing');
+    return { limited: true, reason: 'kv-unavailable' };
   }
-  await env.RATE_LIMIT_KV.put(key, JSON.stringify(bucket), { expirationTtl: windowSeconds });
-  return bucket.h > maxHits;
+  const key = `rl:${prefix}:${ip}`;
+  try {
+    const raw = await env.RATE_LIMIT_KV.get(key);
+    const now = Date.now();
+    let bucket = raw ? JSON.parse(raw) : null;
+    if (!bucket || now - bucket.s > windowSeconds * 1000) {
+      bucket = { s: now, h: 1 };
+    } else {
+      bucket.h++;
+    }
+    await env.RATE_LIMIT_KV.put(key, JSON.stringify(bucket), { expirationTtl: windowSeconds });
+    return { limited: bucket.h > maxHits, reason: bucket.h > maxHits ? 'rate-exceeded' : undefined };
+  } catch (e) {
+    console.error('[rate-limit] FAIL-CLOSED: KV error:', e.message);
+    return { limited: true, reason: 'kv-unavailable' };
+  }
+}
+
+// Rate-limit-or-block helper. Returns a 503 Response if KV is unavailable
+// (fail-closed), a 429 Response if the IP is rate-limited, or null if the
+// call may proceed. Caller pattern:
+//   const _rl = await rateLimitOrBlock(env, ip, 'otp', 5, 900, CORS);
+//   if (_rl) return _rl;
+async function rateLimitOrBlock(env, ip, prefix, maxHits, windowSeconds, CORS, customMsg) {
+  const r = await isRateLimitedKV(env, ip, prefix, maxHits, windowSeconds);
+  if (!r.limited) return null;
+  if (r.reason === 'kv-unavailable') {
+    return resp({ error: 'Service temporarily unavailable' }, 503, CORS);
+  }
+  return resp({ error: customMsg || 'Too many requests' }, 429, CORS);
+}
+
+// ── MEDIUM-5: Capped JSON body reader ──────────────────────────────────
+// All unauthenticated public endpoints MUST use this instead of request.json().
+// Cloudflare's 100 MB default is far too generous for our APIs.
+//
+// Throws an Error with .status (413 for too-large, 400 for malformed JSON)
+// that callers translate into a JSON error response.
+async function readJsonCapped(request, maxBytes = 16 * 1024) {
+  const cl = parseInt(request.headers.get('content-length') || '0', 10);
+  if (Number.isFinite(cl) && cl > maxBytes) {
+    const e = new Error('payload too large');
+    e.status = 413;
+    throw e;
+  }
+  const text = await request.text();
+  if (text.length > maxBytes) {
+    const e = new Error('payload too large');
+    e.status = 413;
+    throw e;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    const e = new Error('Invalid JSON');
+    e.status = 400;
+    throw e;
+  }
 }
 
 function makeRedeemRateKey(source, actorUid, sessionId, ip) {
@@ -294,11 +351,11 @@ async function handleSendSmsOtp(request, env, CORS) {
   // ── IP rate limit (KV-backed — survives cold starts) ──
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   pruneRateBuckets();
-  if (await isRateLimitedKV(env, ip, 'otp', RATE_LIMIT_MAX_HITS, 900)) return resp({ error: 'Πολλές προσπάθειες. Δοκίμασε σε λίγα λεπτά.' }, 429, CORS);
+  { const _rl = await rateLimitOrBlock(env, ip, 'otp', RATE_LIMIT_MAX_HITS, 900, CORS, 'Πολλές προσπάθειες. Δοκίμασε σε λίγα λεπτά.'); if (_rl) return _rl; }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const rawPhone = String(body.phone || '').replace(/[\s\-\(\)]/g, '');
   if (!rawPhone || !/^6\d{9}$/.test(rawPhone))
@@ -358,11 +415,11 @@ async function handleVerifySmsOtp(request, env, CORS) {
   if (!env.RATE_LIMIT_KV) return resp({ error: 'OTP storage not configured' }, 503, CORS);
 
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  if (await isRateLimitedKV(env, ip, 'otp-verify', RATE_LIMIT_MAX_HITS, 900)) return resp({ error: 'Πολλές προσπάθειες. Δοκίμασε σε λίγα λεπτά.' }, 429, CORS);
+  { const _rl = await rateLimitOrBlock(env, ip, 'otp-verify', RATE_LIMIT_MAX_HITS, 900, CORS, 'Πολλές προσπάθειες. Δοκίμασε σε λίγα λεπτά.'); if (_rl) return _rl; }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const rawPhone = String(body.phone || '').replace(/[\s\-\(\)]/g, '');
   const userCode = String(body.code || '').trim();
@@ -512,29 +569,76 @@ function normalizeGreekSMS(text) {
 //  POST /send-welcome  { email, name, points }
 //  Public endpoint, rate-limited per IP.
 // ══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+//  HIGH-4: /send-welcome — authenticated, server-derived identity.
+//
+//  Previously: caller supplied {email, name, customerId, marketingOptIn} with
+//  no auth check. An attacker could (a) send iPear-branded welcome emails to
+//  any inbox (phishing pretext) and (b) write a +50 "Marketing Bonus"
+//  transaction attributed to ANY customerId.
+//
+//  Now: caller MUST supply a fresh Firebase idToken. We verify it server-side
+//  and TRUST ONLY the verified email + UID. The body's email/customerId must
+//  match the token-derived values exactly (defence-in-depth — prevents the
+//  client from accidentally passing the wrong UID).
+//
+//  Also adds the marketing-bonus +50 to the customer's authoritative points
+//  balance (atomic Firestore transaction) — not just a ledger row — so the
+//  app shows the correct total immediately. Idempotent: if the customer
+//  already has `marketingWelcomeProcessed: true`, the credit is skipped.
+// ══════════════════════════════════════════════════════════════════════════
 async function handleSendWelcome(request, env, CORS) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  if (await isRateLimitedKV(env, ip, 'welcome', RATE_LIMIT_MAX_HITS, 900)) return resp({ error: 'Too many requests' }, 429, CORS);
+  { const _rl = await rateLimitOrBlock(env, ip, 'welcome', RATE_LIMIT_MAX_HITS, 900, CORS); if (_rl) return _rl; }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 4 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
-  const email = (body.email || '').trim().toLowerCase();
-  const name  = (body.name  || '').trim().slice(0, 100);
-  const points = Number(body.points) || 0;
-  const marketingOptIn = !!body.marketingOptIn;
-  const customerId = (body.customerId || '').trim();
+  // 1. Require + verify Firebase ID token (HIGH-4)
+  const idToken = (body.idToken || '').trim();
+  if (!idToken) return resp({ error: 'idToken required' }, 401, CORS);
 
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return resp({ error: 'Valid email required' }, 400, CORS);
-  if (!name) return resp({ error: 'name required' }, 400, CORS);
-
+  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
+    return resp({ error: 'Server not configured' }, 503, CORS);
   if (!env.BREVO_API_KEY)
     return resp({ error: 'Email not configured' }, 503, CORS);
 
+  let verifiedEmail, verifiedUid;
+  try {
+    const verifyRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
+    );
+    const verifyData = await verifyRes.json();
+    const u = verifyData?.users?.[0];
+    if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
+    verifiedUid   = u.localId;
+    verifiedEmail = String(u.email).trim().toLowerCase();
+  } catch (e) {
+    console.error('[send-welcome] token verify failed:', e.message);
+    return resp({ error: 'Token verification failed' }, 401, CORS);
+  }
+
+  // 2. Body fields — trust only NAME from the body (no token claim for it).
+  //    email/customerId, if provided, MUST match server-verified values.
+  const name = String(body.name || '').trim().slice(0, 100);
+  if (!name) return resp({ error: 'name required' }, 400, CORS);
+
+  if (body.email && String(body.email).trim().toLowerCase() !== verifiedEmail) {
+    return resp({ error: 'email mismatch' }, 403, CORS);
+  }
+  if (body.customerId && String(body.customerId).trim() !== verifiedUid) {
+    return resp({ error: 'customerId mismatch' }, 403, CORS);
+  }
+  const marketingOptIn = !!body.marketingOptIn;
+
+  // 3. Send the welcome email (to verified address only).
+  //    The points display is illustrative; the authoritative balance lives
+  //    in Firestore and is awarded below.
   const appUrl = (env.APP_URL || 'https://loyalty.ipear.gr') + '/customer.html';
-  const htmlContent = buildWelcomeEmail(name, points, appUrl);
+  const displayPoints = marketingOptIn ? 50 : 0;
+  const htmlContent = buildWelcomeEmail(name, displayPoints, appUrl);
 
   try {
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -549,7 +653,7 @@ async function handleSendWelcome(request, env, CORS) {
           name:  env.SENDER_NAME  || 'iPear Loyalty',
           email: (env.SENDER_EMAIL || '').trim(),
         },
-        to: [{ email, name }],
+        to: [{ email: verifiedEmail, name }],
         subject: '🍐 Καλώς ήρθες στο iPear Loyalty!',
         htmlContent,
       }),
@@ -560,38 +664,88 @@ async function handleSendWelcome(request, env, CORS) {
       console.error('[send-welcome] Brevo error:', res.status, err?.message || '');
       return resp({ error: 'Failed to send welcome email' }, 502, CORS);
     }
-    console.log('[send-welcome] ✅ sent to', email);
+    console.log('[send-welcome] ✅ sent to', verifiedEmail);
 
-    // Create marketing bonus transaction record (visible in customer app + admin)
-    if (marketingOptIn && customerId && env.FCM_CLIENT_EMAIL && env.FCM_PRIVATE_KEY && env.FCM_PROJECT_ID) {
+    // 4. CRITICAL-2 pair: server-side awards the +50 marketing bonus.
+    //    The Firestore rule now forces points=0 at signup, so this is the
+    //    only place the bonus can land. Atomic + idempotent.
+    let bonusAwarded = false;
+    if (marketingOptIn) {
       try {
         const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-        const projectId = env.FCM_PROJECT_ID;
-        const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-        const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-        const txRes = await fetch(`${fsBase}/ipear_transactions`, {
-          method: 'POST', headers: fsHeaders,
-          body: JSON.stringify({ fields: {
-            customerId:    { stringValue: customerId },
-            customerEmail: { stringValue: email },
-            customerName:  { stringValue: name },
-            card:          { stringValue: '' },
-            type:          { stringValue: 'add' },
-            points:        { integerValue: 50 },
-            amount:        { doubleValue: 0 },
-            category:      { stringValue: '🎁 Marketing Bonus' },
-            note:          { stringValue: 'Εγγραφή με αποδοχή marketing επικοινωνίας (+50 πόντοι)' },
-            date:          { stringValue: new Date().toISOString() }
-          }})
+        const projectId  = env.FCM_PROJECT_ID;
+        const fsBase     = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+        const fsHeaders  = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+        const custPath   = `${fsBase}/ipear_customers/${verifiedUid}`;
+
+        // Begin Firestore transaction (atomic R-M-W on the customer doc)
+        const beginRes = await fetch(`${fsBase}:beginTransaction`, {
+          method: 'POST', headers: fsHeaders, body: JSON.stringify({})
         });
-        if (!txRes.ok) console.error('[send-welcome] marketing TX failed:', txRes.status, await txRes.text());
-        else console.log('[send-welcome] ✅ marketing bonus TX created for', customerId);
-      } catch(txErr) {
-        console.error('[send-welcome] marketing TX error:', txErr.message);
+        if (!beginRes.ok) throw new Error('beginTransaction failed: ' + beginRes.status);
+        const { transaction } = await beginRes.json();
+
+        const readRes = await fetch(`${custPath}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
+        if (!readRes.ok) throw new Error('transactional read failed: ' + readRes.status);
+        const custDoc = await readRes.json();
+        const fields  = custDoc.fields || {};
+
+        // Idempotency guard — never credit twice
+        if (fields.marketingWelcomeProcessed?.booleanValue === true) {
+          console.log('[send-welcome] marketing bonus already processed for', verifiedUid);
+        } else {
+          const curPts = Number(fields.points?.integerValue || 0);
+          const curTot = Number(fields.totalPoints?.integerValue || 0);
+          const newFields = {
+            ...custDoc.fields,
+            points:                    { integerValue: curPts + 50 },
+            totalPoints:               { integerValue: curTot + 50 },
+            marketingWelcomeProcessed: { booleanValue: true },
+            marketingWelcomeAt:        { stringValue: new Date().toISOString() },
+          };
+
+          const commitRes = await fetch(`${fsBase}:commit`, {
+            method: 'POST', headers: fsHeaders,
+            body: JSON.stringify({
+              transaction,
+              writes: [{
+                update: { name: custDoc.name, fields: newFields },
+                updateMask: { fieldPaths: ['points', 'totalPoints', 'marketingWelcomeProcessed', 'marketingWelcomeAt'] }
+              }]
+            })
+          });
+          if (!commitRes.ok) throw new Error('commit failed: ' + commitRes.status);
+
+          // Ledger row (non-blocking — a failure here doesn't roll back the credit)
+          const card = fields.card?.stringValue || '';
+          const txRes = await fetch(`${fsBase}/ipear_transactions`, {
+            method: 'POST', headers: fsHeaders,
+            body: JSON.stringify({ fields: {
+              customerId:    { stringValue: verifiedUid },
+              customerUid:   { stringValue: verifiedUid },
+              customerEmail: { stringValue: verifiedEmail },
+              customerName:  { stringValue: name },
+              card:          { stringValue: card },
+              type:          { stringValue: 'add' },
+              points:        { integerValue: 50 },
+              amount:        { doubleValue: 0 },
+              category:      { stringValue: '🎁 Marketing Bonus' },
+              note:          { stringValue: 'Εγγραφή με αποδοχή marketing επικοινωνίας (+50 πόντοι)' },
+              date:          { stringValue: new Date().toISOString() }
+            }})
+          });
+          if (!txRes.ok) console.error('[send-welcome] marketing TX log failed:', txRes.status);
+          else console.log('[send-welcome] ✅ marketing +50 credited to', verifiedUid);
+          bonusAwarded = true;
+        }
+      } catch (txErr) {
+        console.error('[send-welcome] marketing credit error:', txErr.message);
+        // Don't fail the response — the welcome email already went out and the
+        // idempotency guard above lets the client retry safely.
       }
     }
 
-    return resp({ ok: true }, 200, CORS);
+    return resp({ ok: true, bonusAwarded }, 200, CORS);
   } catch(e) {
     console.error('[send-welcome]', e.message);
     return resp({ error: 'Internal error' }, 500, CORS);
@@ -738,8 +892,8 @@ function buildWelcomeEmail(name, points, appUrl) {
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooGetUser(request, env, CORS) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const email = (body.email || '').trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
@@ -795,8 +949,8 @@ async function handleWooGetUser(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooAddPoints(request, env, CORS, ctx) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const email = (body.email || '').trim().toLowerCase();
   const orderTotal = parseFloat(body.orderTotal);
@@ -940,8 +1094,8 @@ async function handleWooAddPoints(request, env, CORS, ctx) {
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooRefundPoints(request, env, CORS) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const email = (body.email || '').trim().toLowerCase();
   const orderTotal = parseFloat(body.orderTotal);
@@ -1077,8 +1231,8 @@ async function handleWooRefundPoints(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooCreateCoupon(request, env, CORS) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const idToken = (body.idToken || '').trim();
   if (!idToken) return resp({ error: 'idToken required' }, 400, CORS);
@@ -1095,8 +1249,7 @@ async function handleWooCreateCoupon(request, env, CORS) {
 
   // SEC-FIX: rate limit coupon creation per IP
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  if (await isRateLimitedKV(env, ip, 'woo-coupon', 3, 3600))
-    return resp({ error: 'Too many coupon requests. Try again later.' }, 429, CORS);
+  { const _rl = await rateLimitOrBlock(env, ip, 'woo-coupon', 3, 3600, CORS, 'Too many coupon requests. Try again later.'); if (_rl) return _rl; }
 
   if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
@@ -1208,12 +1361,11 @@ async function handleWooCreateCoupon(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooSyncTier(request, env, CORS) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  if (await isRateLimitedKV(env, ip, 'woo-sync', RATE_LIMIT_MAX_HITS, 900))
-    return resp({ error: 'Too many requests' }, 429, CORS);
+  { const _rl = await rateLimitOrBlock(env, ip, 'woo-sync', RATE_LIMIT_MAX_HITS, 900, CORS); if (_rl) return _rl; }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const idToken = (body.idToken || '').trim();
   if (!idToken) return resp({ error: 'idToken required' }, 400, CORS);
@@ -1306,8 +1458,8 @@ async function handleRedeemAttempt(request, env, CORS) {
   }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON body' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const action = String(body.action || '').trim(); // check | fail | success
   if (!['check', 'fail', 'success'].includes(action)) {
@@ -1365,8 +1517,8 @@ async function handleRedeemAttempt(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 async function handleDeleteAuthUser(request, env, CORS) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON body' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   let uid   = (body.uid   || '').trim();
   const email = (body.email || '').trim().toLowerCase();
@@ -1433,8 +1585,8 @@ async function handleDeleteAuthUser(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 async function handleCreateAdminUser(request, env, CORS) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const email    = (body.email    || '').trim().toLowerCase();
   const password = body.password  || '';
@@ -1521,8 +1673,8 @@ async function handleCreateAdminUser(request, env, CORS) {
 
 async function handleSMS(request, env, CORS) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON body' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const { phone, message } = body;
   if (!phone?.trim())   return resp({ error: 'phone is required' }, 400, CORS);
@@ -1567,9 +1719,10 @@ const MAX_BULK_SMS = 5000;
 const DAILY_SMS_CAP = 10000;
 
 async function handleBulkSMS(request, env, CORS) {
+  // Admin-gated; 5000 recipients × ~20 bytes ≈ 100 KB worst-case payload.
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON body' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 512 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const { recipients, message } = body;
 
@@ -1641,8 +1794,8 @@ async function handleBulkSMS(request, env, CORS) {
 
 async function handleEmail(request, env, CORS) {
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON body' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const { recipients, subject, message } = body;
 
@@ -1712,9 +1865,10 @@ async function handleEmail(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 
 async function handlePush(request, env, CORS) {
+  // Admin-gated; 5000 tokens × ~200 bytes ≈ 1 MB worst-case payload.
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON body' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 2 * 1024 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const { tokens, title, message } = body;
 
@@ -1762,7 +1916,7 @@ async function handlePushDebug(request, env, CORS) {
     return resp({ error: 'FCM not configured' }, 503, CORS);
 
   let _debugBody;
-  try { _debugBody = await request.json(); } catch { _debugBody = {}; }
+  try { _debugBody = await readJsonCapped(request, 8 * 1024); } catch { _debugBody = {}; }
 
   try {
     // Use getAuthAccessToken (has Firestore scope) not getFCMAccessToken (FCM only)
@@ -1988,13 +2142,11 @@ async function handleResetPassword(request, env, CORS) {
   // H-4: Rate limit by IP — 5 requests per 15 min window (KV-backed)
   const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'unknown';
   pruneRateBuckets();
-  if (await isRateLimitedKV(env, clientIP, 'reset', RATE_LIMIT_MAX_HITS, 900)) {
-    return resp({ error: 'Too many requests. Please try again later.' }, 429, CORS);
-  }
+  { const _rl = await rateLimitOrBlock(env, clientIP, 'reset', RATE_LIMIT_MAX_HITS, 900, CORS, 'Too many requests. Please try again later.'); if (_rl) return _rl; }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON body' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const email = (body.email || '').trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)
@@ -2123,13 +2275,11 @@ function isCheckRegLimited(ip) {
 async function handleCheckRegistration(request, env, CORS) {
   const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
   pruneRateBuckets();
-  if (await isRateLimitedKV(env, clientIP, 'checkreg', CHECK_REG_RATE_MAX, 900)) {
-    return resp({ error: 'Too many requests' }, 429, CORS);
-  }
+  { const _rl = await rateLimitOrBlock(env, clientIP, 'checkreg', CHECK_REG_RATE_MAX, 900, CORS); if (_rl) return _rl; }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const email = (body.email || '').trim().toLowerCase();
   const phone = (body.phone || '').replace(/[\s\-\(\)]/g, '');
@@ -2218,14 +2368,17 @@ const MAX_REFERRALS_PER_USER = 5;
 async function handleProcessReferral(request, env, CORS) {
   const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
   pruneRateBuckets();
-  if (await isRateLimitedKV(env, clientIP, 'referral', REFERRAL_RATE_MAX, 900)) {
-    sendSecurityAlert(env, `Referral abuse blocked — IP: ${clientIP}, endpoint: /process-referral`).catch(() => {});
-    return resp({ error: 'Too many requests' }, 429, CORS);
+  {
+    const _rl = await rateLimitOrBlock(env, clientIP, 'referral', REFERRAL_RATE_MAX, 900, CORS);
+    if (_rl) {
+      sendSecurityAlert(env, `Referral abuse blocked — IP: ${clientIP}, endpoint: /process-referral`).catch(() => {});
+      return _rl;
+    }
   }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const idToken = (body.idToken || '').trim();
   if (!idToken) return resp({ error: 'idToken required' }, 400, CORS);
@@ -2286,46 +2439,101 @@ async function handleProcessReferral(request, env, CORS) {
     const refResults = await refQueryRes.json();
     const refDoc = Array.isArray(refResults) && refResults[0]?.document;
 
-    if (refDoc) {
-      const refDocPath = refDoc.name; // full path
-      const rf = {};
-      for (const [k, v] of Object.entries(refDoc.fields || {})) {
-        rf[k] = v.stringValue ?? (v.integerValue !== undefined ? Number(v.integerValue) : undefined) ?? v.booleanValue ?? v.doubleValue ?? '';
-      }
-      const refCount = Number(rf.referralCount) || 0;
+    // Helpers used by every termination branch below.
+    const newCustomerId = q.newCustomerId || callerUid;
+    const ncDocPath = `${fsBase}/ipear_customers/${newCustomerId}`;
 
-      if (refCount >= MAX_REFERRALS_PER_USER) {
-        // Referrer hit the cap — revert new customer's 100 pts
-        const ncPts = Number(nc.points) || 0;
-        const ncTot = Number(nc.totalPoints) || 0;
-        if (ncPts >= 100 && ncTot >= 100) {
-          await fetch(`${fsBase}/ipear_customers/${q.newCustomerId || callerUid}?updateMask.fieldPaths=points&updateMask.fieldPaths=totalPoints&updateMask.fieldPaths=referralProcessed`, {
-            method: 'PATCH', headers: fsHeaders,
-            body: JSON.stringify({ fields: {
-              points: { integerValue: ncPts - 100 },
-              totalPoints: { integerValue: ncTot - 100 },
-              referralProcessed: { booleanValue: true }
-            }})
-          });
-        }
-        // Mark queue as done
-        await fetch(`${fsBase}/ipear_referral_queue/${callerUid}?updateMask.fieldPaths=processed&updateMask.fieldPaths=processedAt&updateMask.fieldPaths=skipped`, {
-          method: 'PATCH', headers: fsHeaders,
-          body: JSON.stringify({ fields: {
-            processed: { booleanValue: true },
-            processedAt: { stringValue: new Date().toISOString() },
-            skipped: { stringValue: 'referral-limit-reached' }
-          }})
+    async function revertNewCustomerPoints(reason) {
+      // CRITICAL-2: hard-revert any points the client may have self-credited
+      // before the rules update. With the new rule, customer signups must
+      // start at points=0 — so this is a safety belt for legacy paths and any
+      // future regressions. Atomic R-M-W ensures we never go negative.
+      try {
+        const beginRes = await fetch(`${fsBase}:beginTransaction`, {
+          method: 'POST', headers: fsHeaders, body: JSON.stringify({})
         });
-        return resp({ ok: true, reason: 'referral-limit-reached' }, 200, CORS);
-      }
+        if (!beginRes.ok) throw new Error('beginTransaction failed: ' + beginRes.status);
+        const { transaction } = await beginRes.json();
 
-      // 6. Award referrer +100 pts atomically (SEC-FIX H-1: use transaction to prevent race condition)
+        const readRes = await fetch(`${ncDocPath}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
+        if (!readRes.ok) throw new Error('transactional read failed: ' + readRes.status);
+        const ncDoc = await readRes.json();
+        const f = ncDoc.fields || {};
+        const curPts = Number(f.points?.integerValue || 0);
+        const curTot = Number(f.totalPoints?.integerValue || 0);
+        const newPts = Math.max(0, curPts - 100);
+        const newTot = Math.max(0, curTot - 100);
+
+        await fetch(`${fsBase}:commit`, {
+          method: 'POST', headers: fsHeaders,
+          body: JSON.stringify({
+            transaction,
+            writes: [{
+              update: {
+                name: ncDoc.name,
+                fields: {
+                  ...ncDoc.fields,
+                  points:            { integerValue: newPts },
+                  totalPoints:       { integerValue: newTot },
+                  referralProcessed: { booleanValue: true },
+                }
+              },
+              updateMask: { fieldPaths: ['points', 'totalPoints', 'referralProcessed'] }
+            }]
+          })
+        });
+        console.log(`[process-referral] hard-revert (${reason}) for ${newCustomerId}: ${curPts}→${newPts}`);
+      } catch (e) {
+        console.error('[process-referral] revert error (' + reason + '):', e.message);
+      }
+    }
+
+    async function markQueueProcessed(reason) {
+      await fetch(`${fsBase}/ipear_referral_queue/${callerUid}?updateMask.fieldPaths=processed&updateMask.fieldPaths=processedAt&updateMask.fieldPaths=skipped`, {
+        method: 'PATCH', headers: fsHeaders,
+        body: JSON.stringify({ fields: {
+          processed:   { booleanValue: true },
+          processedAt: { stringValue: new Date().toISOString() },
+          skipped:     { stringValue: reason }
+        }})
+      });
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // CRITICAL-2: invalid referrer → hard-revert + mark queue + exit early.
+    // The previous code skipped the entire `if (refDoc)` block and then ran
+    // step-8 unconditionally, leaving the new customer with the +100 self-
+    // credit they never legitimately earned.
+    // ════════════════════════════════════════════════════════════════════
+    if (!refDoc) {
+      await revertNewCustomerPoints('invalid-referrer');
+      await markQueueProcessed('invalid-referrer');
+      return resp({ ok: true, reason: 'invalid-referrer' }, 200, CORS);
+    }
+
+    const refDocPath = refDoc.name; // full path
+    const rf = {};
+    for (const [k, v] of Object.entries(refDoc.fields || {})) {
+      rf[k] = v.stringValue ?? (v.integerValue !== undefined ? Number(v.integerValue) : undefined) ?? v.booleanValue ?? v.doubleValue ?? '';
+    }
+    const refCount = Number(rf.referralCount) || 0;
+
+    if (refCount >= MAX_REFERRALS_PER_USER) {
+      // Referrer hit the cap — revert new customer's 100 pts (if any) + mark queue.
+      await revertNewCustomerPoints('referral-limit-reached');
+      await markQueueProcessed('referral-limit-reached');
+      return resp({ ok: true, reason: 'referral-limit-reached' }, 200, CORS);
+    }
+
+    // 6. Award REFERRER +100 pts atomically
+    //    (SEC-FIX H-1: transaction prevents race condition on concurrent referrals)
+    let referrerAwarded = false;
+    {
       const txBeginRes = await fetch(`${fsBase}:beginTransaction`, {
         method: 'POST', headers: fsHeaders, body: JSON.stringify({})
       });
       if (!txBeginRes.ok) {
-        console.error('[process-referral] beginTransaction failed:', txBeginRes.status);
+        console.error('[process-referral] referrer beginTransaction failed:', txBeginRes.status);
       } else {
         const { transaction: refTx } = await txBeginRes.json();
         const refReadUrl = `https://firestore.googleapis.com/v1/${refDocPath}?transaction=${encodeURIComponent(refTx)}`;
@@ -2349,71 +2557,118 @@ async function handleProcessReferral(request, env, CORS) {
               }]
             })
           });
-          if (!commitRes.ok) {
+          if (commitRes.ok) {
+            referrerAwarded = true;
+          } else {
             console.error('[process-referral] referrer commit failed:', commitRes.status, await commitRes.text());
           }
         } else {
-          console.error('[process-referral] tx read failed:', txRefReadRes.status);
+          console.error('[process-referral] referrer tx read failed:', txRefReadRes.status);
         }
       }
+    }
 
-      // 7. Create transaction for REFERRER
+    // 7. Award NEW CUSTOMER +100 pts atomically.
+    //    CRITICAL-2: customer can no longer self-credit at signup, so this
+    //    server-side credit is the only path. Idempotent via referralProcessed.
+    let newCustomerAwarded = false;
+    {
+      const txBeginRes = await fetch(`${fsBase}:beginTransaction`, {
+        method: 'POST', headers: fsHeaders, body: JSON.stringify({})
+      });
+      if (!txBeginRes.ok) {
+        console.error('[process-referral] new-customer beginTransaction failed:', txBeginRes.status);
+      } else {
+        const { transaction: ncTx } = await txBeginRes.json();
+        const ncReadRes = await fetch(`${ncDocPath}?transaction=${encodeURIComponent(ncTx)}`, { headers: fsHeaders });
+        if (ncReadRes.ok) {
+          const ncDoc = await ncReadRes.json();
+          const ncFields = ncDoc.fields || {};
+          if (ncFields.referralProcessed?.booleanValue === true) {
+            console.log('[process-referral] new customer already processed, skipping credit');
+          } else {
+            const ncPts = Number(ncFields.points?.integerValue || 0) + 100;
+            const ncTot = Number(ncFields.totalPoints?.integerValue || 0) + 100;
+            const ncCommitRes = await fetch(`${fsBase}:commit`, {
+              method: 'POST', headers: fsHeaders,
+              body: JSON.stringify({
+                transaction: ncTx,
+                writes: [{
+                  update: {
+                    name: ncDoc.name,
+                    fields: {
+                      ...ncDoc.fields,
+                      points:            { integerValue: ncPts },
+                      totalPoints:       { integerValue: ncTot },
+                      referralProcessed: { booleanValue: true },
+                    }
+                  },
+                  updateMask: { fieldPaths: ['points', 'totalPoints', 'referralProcessed'] }
+                }]
+              })
+            });
+            if (ncCommitRes.ok) {
+              newCustomerAwarded = true;
+            } else {
+              console.error('[process-referral] new-customer commit failed:', ncCommitRes.status, await ncCommitRes.text());
+            }
+          }
+        } else {
+          console.error('[process-referral] new-customer tx read failed:', ncReadRes.status);
+        }
+      }
+    }
+
+    // 8. Ledger rows (non-blocking — balance is already updated above)
+    if (referrerAwarded) {
       const refTxRes = await fetch(`${fsBase}/ipear_transactions`, {
         method: 'POST', headers: fsHeaders,
         body: JSON.stringify({ fields: {
-          customerId: { stringValue: refDocPath.split('/').pop() },
-          customerUid: { stringValue: rf.uid || '' },
+          customerId:    { stringValue: refDocPath.split('/').pop() },
+          customerUid:   { stringValue: rf.uid || '' },
           customerEmail: { stringValue: rf.email || '' },
-          customerName: { stringValue: rf.name || '' },
-          card: { stringValue: rf.card || referrerCard },
-          type: { stringValue: 'add' },
-          points: { integerValue: 100 },
-          amount: { integerValue: 0 },
-          category: { stringValue: '🎁 Referral Bonus' },
-          note: { stringValue: `Παραπομπή: ${q.newCustomerCard || ''} (${refCount+1}/${MAX_REFERRALS_PER_USER})` },
-          date: { stringValue: new Date().toISOString() }
+          customerName:  { stringValue: rf.name || '' },
+          card:          { stringValue: rf.card || referrerCard },
+          type:          { stringValue: 'add' },
+          points:        { integerValue: 100 },
+          amount:        { integerValue: 0 },
+          category:      { stringValue: '🎁 Referral Bonus' },
+          note:          { stringValue: `Παραπομπή: ${q.newCustomerCard || ''} (${refCount+1}/${MAX_REFERRALS_PER_USER})` },
+          date:          { stringValue: new Date().toISOString() }
         }})
       });
-      if (!refTxRes.ok) {
-        console.error('[process-referral] referrer TX failed:', refTxRes.status, await refTxRes.text());
-      }
+      if (!refTxRes.ok) console.error('[process-referral] referrer TX log failed:', refTxRes.status);
+    }
+    if (newCustomerAwarded) {
+      const ncTxRes = await fetch(`${fsBase}/ipear_transactions`, {
+        method: 'POST', headers: fsHeaders,
+        body: JSON.stringify({ fields: {
+          customerId:    { stringValue: newCustomerId },
+          customerUid:   { stringValue: q.newCustomerUid || callerUid },
+          customerEmail: { stringValue: q.newCustomerEmail || '' },
+          customerName:  { stringValue: q.newCustomerName || '' },
+          card:          { stringValue: q.newCustomerCard || '' },
+          type:          { stringValue: 'add' },
+          points:        { integerValue: 100 },
+          amount:        { integerValue: 0 },
+          category:      { stringValue: '🎁 Referral Bonus' },
+          note:          { stringValue: 'Bonus εγγραφής με referral' },
+          date:          { stringValue: new Date().toISOString() }
+        }})
+      });
+      if (!ncTxRes.ok) console.error('[process-referral] new-customer TX log failed:', ncTxRes.status);
     }
 
-    // 8. Create transaction for NEW CUSTOMER
-    const ncTxRes = await fetch(`${fsBase}/ipear_transactions`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({ fields: {
-        customerId: { stringValue: q.newCustomerId || callerUid },
-        customerUid: { stringValue: q.newCustomerUid || callerUid },
-        customerEmail: { stringValue: q.newCustomerEmail || '' },
-        customerName: { stringValue: q.newCustomerName || '' },
-        card: { stringValue: q.newCustomerCard || '' },
-        type: { stringValue: 'add' },
-        points: { integerValue: 100 },
-        amount: { integerValue: 0 },
-        category: { stringValue: '🎁 Referral Bonus' },
-        note: { stringValue: 'Bonus εγγραφής με referral' },
-        date: { stringValue: new Date().toISOString() }
-      }})
-    });
-    if (!ncTxRes.ok) {
-      console.error('[process-referral] new customer TX failed:', ncTxRes.status, await ncTxRes.text());
-    }
-
-    // 9. Mark new customer as processed + mark queue done
-    await fetch(`${fsBase}/ipear_customers/${q.newCustomerId || callerUid}?updateMask.fieldPaths=referralProcessed`, {
-      method: 'PATCH', headers: fsHeaders,
-      body: JSON.stringify({ fields: { referralProcessed: { booleanValue: true } } })
-    });
+    // 9. Mark queue done
     await fetch(`${fsBase}/ipear_referral_queue/${callerUid}?updateMask.fieldPaths=processed&updateMask.fieldPaths=processedAt`, {
       method: 'PATCH', headers: fsHeaders,
       body: JSON.stringify({ fields: {
-        processed: { booleanValue: true },
+        processed:   { booleanValue: true },
         processedAt: { stringValue: new Date().toISOString() }
       }})
     });
 
-    return resp({ ok: true, referrerAwarded: !!refDoc }, 200, CORS);
+    return resp({ ok: true, referrerAwarded, newCustomerAwarded }, 200, CORS);
 
   } catch(e) {
     console.error('[process-referral]', e.message, e.stack);
@@ -2568,12 +2823,20 @@ function buildPasswordResetEmail(name, resetLink) {
 async function handleClientError(request, env, CORS) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   // Light rate limit: 3 reports per IP per 15 min window
-  if (await isRateLimitedKV(env, ip, 'cerr', 3, 900)) {
-    return resp({ ok: true, note: 'rate-limited' }, 200, CORS);   // 200 so client doesn't retry
+  {
+    // /client-error is fire-and-forget telemetry — return 200 silently on
+    // rate-limit so the client doesn't retry, but still return 503 if KV
+    // is down (the client logger should back off).
+    const _r = await isRateLimitedKV(env, ip, 'cerr', 3, 900);
+    if (_r.limited && _r.reason === 'kv-unavailable') {
+      return resp({ error: 'Service temporarily unavailable' }, 503, CORS);
+    }
+    if (_r.limited) return resp({ ok: true, note: 'rate-limited' }, 200, CORS);
   }
 
   let body;
-  try { body = await request.json(); } catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const entry = {
     type:    String(body.type || 'unknown').slice(0, 30),
@@ -2890,14 +3153,19 @@ const ALLOWED_EVENTS = [
 
 async function handleLogEvent(request, env, CORS) {
   const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
-  pruneRateBuckets();
-  if (isRateLimited(clientIP)) {
-    return resp({ ok: true }, 200, CORS); // silent drop — don't reveal rate limit to analytics
+  // MEDIUM-6: KV-backed fail-closed limiter (replaces leaky per-isolate Map).
+  // /log-event is high-volume analytics, so cap at 30 events per IP per 15 min.
+  {
+    const _r = await isRateLimitedKV(env, clientIP, 'logevent', 30, 900);
+    if (_r.limited && _r.reason === 'kv-unavailable') {
+      return resp({ error: 'Service temporarily unavailable' }, 503, CORS);
+    }
+    if (_r.limited) return resp({ ok: true }, 200, CORS); // silent drop on rate-exceed
   }
 
   let body;
-  try { body = await request.json(); }
-  catch { return resp({ error: 'Invalid JSON' }, 400, CORS); }
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const event = String(body.event || '').trim().toLowerCase();
   if (!event || !ALLOWED_EVENTS.includes(event)) {
