@@ -1,6 +1,8 @@
 const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
+const { getAuth } = require("firebase-admin/auth");
 
 initializeApp();
 const db = getFirestore();
@@ -219,3 +221,105 @@ exports.autoPublishLeaderboard = onDocumentWritten(
     }
   }
 );
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MEDIUM-3: syncAdminClaim — mirror ipear_admins/{uid} → Auth custom claim.
+//
+//  Previously isAdmin() in firestore.rules did `exists(ipear_admins/<uid>)`
+//  on every admin write — one billed Firestore read per rule evaluation.
+//  Worst case: an admin batch update of 5000 customers = 5000 extra reads
+//  just for auth, on top of the real writes.
+//
+//  Now: this trigger fires on every create/delete in ipear_admins/{uid} and
+//  sets/unsets the `admin: true` custom claim on the Firebase Auth user.
+//  isAdmin() can then read request.auth.token.admin == true (free — already
+//  inside the verified ID token).
+//
+//  The admin must log out and back in (or wait for token refresh, max 1 h)
+//  before the new claim takes effect — use backfillAdminClaims (below)
+//  to backfill existing admins, then ask them to re-login once.
+// ══════════════════════════════════════════════════════════════════════════
+exports.syncAdminClaim = onDocumentWritten(
+  "ipear_admins/{uid}",
+  async (event) => {
+    const uid = event.params.uid;
+    const docExists = !!event.data?.after?.data();
+    try {
+      const user = await getAuth().getUser(uid).catch(() => null);
+      if (!user) {
+        console.warn(`[syncAdminClaim] no Auth user for uid=${uid} — skipping`);
+        return;
+      }
+      const currentClaims = user.customClaims || {};
+      const desired = docExists ? true : false;
+      if (currentClaims.admin === desired) {
+        // No-op — claim already in sync (e.g., the doc was just touched)
+        return;
+      }
+      const nextClaims = { ...currentClaims, admin: desired };
+      // Remove the claim entirely when it's false, so the token stays slim.
+      if (!desired) delete nextClaims.admin;
+      await getAuth().setCustomUserClaims(uid, nextClaims);
+      console.log(
+        `[syncAdminClaim] ${docExists ? "+admin" : "-admin"} for uid=${uid} (re-login required for token refresh)`
+      );
+    } catch (e) {
+      console.error("[syncAdminClaim] error for uid=", uid, e.message);
+    }
+  }
+);
+
+// Callable function: one-shot backfill of admin claims for everyone already
+// in ipear_admins. Run once after deploying syncAdminClaim. Restricted to
+// existing admins (so a non-admin can't call it).
+//
+//   Usage from an admin's browser:
+//     const fn = httpsCallable(functions, 'backfillAdminClaims');
+//     await fn();
+//
+// Returns: { updated, alreadySet, skipped, total }
+exports.backfillAdminClaims = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Must be signed in.");
+  }
+  // Only an existing admin (either by claim OR by doc) can run the backfill.
+  const callerUid = request.auth.uid;
+  const callerIsAdminByClaim = request.auth.token.admin === true;
+  let callerIsAdminByDoc = false;
+  if (!callerIsAdminByClaim) {
+    const callerDoc = await db.collection("ipear_admins").doc(callerUid).get();
+    callerIsAdminByDoc = callerDoc.exists;
+  }
+  if (!callerIsAdminByClaim && !callerIsAdminByDoc) {
+    throw new HttpsError("permission-denied", "Admin only.");
+  }
+
+  const snap = await db.collection("ipear_admins").get();
+  let updated = 0,
+    alreadySet = 0,
+    skipped = 0;
+  for (const d of snap.docs) {
+    const uid = d.id;
+    try {
+      const user = await getAuth().getUser(uid).catch(() => null);
+      if (!user) {
+        skipped++;
+        continue;
+      }
+      const claims = user.customClaims || {};
+      if (claims.admin === true) {
+        alreadySet++;
+        continue;
+      }
+      await getAuth().setCustomUserClaims(uid, { ...claims, admin: true });
+      updated++;
+    } catch (e) {
+      console.error("[backfillAdminClaims] error for uid=", uid, e.message);
+      skipped++;
+    }
+  }
+  console.log(
+    `[backfillAdminClaims] total=${snap.size} updated=${updated} alreadySet=${alreadySet} skipped=${skipped}`
+  );
+  return { total: snap.size, updated, alreadySet, skipped };
+});

@@ -37,12 +37,21 @@ service cloud.firestore {
         request.auth.token.email_verified == true;
     }
 
-    // Admin = UID present in the `ipear_admins/{uid}` whitelist doc.
-    // (Custom-claim path can be re-introduced once a Cloud Function sets the
-    // `admin` claim — for now the whitelist is the single source of truth.)
+    // Admin = `admin: true` custom claim on the ID token (fast — no Firestore
+    // read) OR, transitionally, UID present in the `ipear_admins/{uid}`
+    // whitelist doc.
+    //
+    // MEDIUM-3: the claim is the primary path now. functions/index.js's
+    // syncAdminClaim trigger mirrors ipear_admins/{uid} create/delete into
+    // the claim, and backfillAdminClaims (callable) seeds existing admins.
+    // Until every admin has re-logged-in to pick up the new claim, the
+    // exists() fallback keeps the existing flow working. The fallback is
+    // safe to delete after the migration window (all admins re-authed).
     function isAdmin() {
-      return isAuth() &&
-        exists(/databases/$(database)/documents/ipear_admins/$(request.auth.uid));
+      return isAuth() && (
+        request.auth.token.admin == true ||
+        exists(/databases/$(database)/documents/ipear_admins/$(request.auth.uid))
+      );
     }
 
     // Self-ownership of a customer doc (uid field OR matching email).
