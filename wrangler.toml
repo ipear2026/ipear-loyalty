@@ -18,6 +18,18 @@ ALLOWED_ORIGINS  = "https://loyalty.ipear.gr,https://ipear-loyalty.pages.dev"
 binding = "RATE_LIMIT_KV"
 id = "9b7bfd14b586445db94e932a75635f85"
 
+# ── MEDIUM-1: R2 bucket for /admin/export-backup ───────────────────────────
+# To activate:
+#   1. Cloudflare dashboard → R2 → Create bucket: "ipear-backups"
+#   2. Uncomment the block below
+#   3. wrangler deploy
+#   4. Optional: R2 → Object Lifecycle → delete after 30 days
+# Until activated, POST /admin/export-backup returns 503 with a setup hint
+# (we explicitly refuse to fall back to the legacy PII-over-CORS path).
+# [[r2_buckets]]
+# binding     = "BACKUP_R2"
+# bucket_name = "ipear-backups"
+
 # ── Enable production logging (real-time tail + dashboard) ───────────────────
 [observability]
 enabled = true

@@ -277,6 +277,17 @@ export default {
         { ...CORS, 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Cache-Control': 'no-store' });
     }
 
+    // ── MEDIUM-1: GET /admin/export-download — HMAC-signed R2 streaming ──
+    //  Routed BEFORE the POST-only gate; the signature in the URL IS the
+    //  credential (no ADMIN_SECRET in the link), so the admin can paste the
+    //  link into a browser tab and the file downloads via standard GET.
+    if (request.method === 'GET' && path === '/admin/export-download') {
+      return handleExportDownload(request, env, {
+        ...CORS,
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      });
+    }
+
     if (request.method !== 'POST') return resp({ error: 'Method not allowed' }, 405, CORS);
 
     // Public endpoints (no ADMIN_SECRET needed, rate-limited)
@@ -3056,23 +3067,64 @@ async function _rebuildLeaderboard(fsBase, fsHeaders) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  POST /admin/export-backup — Cross-Cloud Backup Strategy
+//  MEDIUM-1: /admin/export-backup — R2-backed, HMAC-signed download URL.
 //
-//  Read-only snapshot of critical customer data (UID, Card, Points).
-//  Returns compact JSON for offline/cross-cloud disaster recovery.
-//  Requires ADMIN_SECRET (routed after auth gate).
+//  Previous behaviour: streamed the full customer PII dump (up to 50 000 rows)
+//  through the response body under CORS. A stolen ADMIN_SECRET = instant
+//  full-DB exfiltration over a single HTTPS request.
 //
-//  ── R2 Integration Note ──────────────────────────────────────────────
-//  To stream daily backups to Cloudflare R2 (S3-compatible):
-//  1. Bind an R2 bucket in wrangler.toml:  [[r2_buckets]] binding = "BACKUP_R2" bucket_name = "ipear-backups"
-//  2. After building the JSON payload below, add:
-//       await env.BACKUP_R2.put(`backup-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(payload));
-//  3. Add a CRON trigger (e.g. "0 3 * * *") in scheduled() to call this handler daily.
-//  4. R2 offers 30-day retention policies for automatic cleanup.
+//  New behaviour:
+//    POST /admin/export-backup     (ADMIN_SECRET-gated)
+//        → uploads compact JSON to R2 under a random key
+//        → returns { downloadUrl, expiresAt, totalCustomers, key }
+//        → writes an audit_logs row with the calling IP + key
+//
+//    GET  /admin/export-download   (HMAC-signed URL, no secret in URL)
+//        → key+exp+sig query params; HMAC verified timing-safely
+//        → streams the R2 object body; 410 once expired
+//
+//  Reqs: env.BACKUP_R2 (R2 binding), env.ADMIN_SECRET (HMAC key).
+//  Setup (one-time, Cloudflare dashboard):
+//    1. R2 → Create bucket "ipear-backups"
+//    2. wrangler.toml: add the [[r2_buckets]] block (already templated)
+//    3. wrangler secret put ADMIN_SECRET (already set)
+//    4. Optional retention rule on R2: delete after 30 days
 // ══════════════════════════════════════════════════════════════════════════
+
+// HMAC-SHA-256 signing of "key:expEpochMs" using ADMIN_SECRET.
+// Returns lowercase hex. Use timingSafeHexEqual() to verify.
+async function _hmacHex(secret, message) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false, ['sign']
+  );
+  const buf = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return Array.from(new Uint8Array(buf))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Timing-safe equality on equal-length hex strings.
+function _timingSafeHexEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 async function handleExportBackup(request, env, CORS) {
   if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
+  if (!env.BACKUP_R2) {
+    return resp({
+      error: 'BACKUP_R2 binding missing. Configure an R2 bucket in wrangler.toml ' +
+             '([[r2_buckets]] binding="BACKUP_R2" bucket_name="ipear-backups").'
+    }, 503, CORS);
+  }
+  if (!env.ADMIN_SECRET) {
+    return resp({ error: 'ADMIN_SECRET not configured (required for signed-URL HMAC).' }, 503, CORS);
+  }
 
   try {
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
@@ -3128,19 +3180,109 @@ async function handleExportBackup(request, env, CORS) {
       customers,
     };
 
-    // ── R2 auto-upload (if bucket is bound) ──
-    // Uncomment when R2 bucket "BACKUP_R2" is configured in wrangler.toml:
-    // if (env.BACKUP_R2) {
-    //   const key = `backup-${new Date().toISOString().slice(0,10)}.json`;
-    //   await env.BACKUP_R2.put(key, JSON.stringify(payload));
-    //   console.log(`[backup] written to R2: ${key}`);
-    // }
+    // ── Upload to R2 with random key (PII never leaves R2 over CORS) ──
+    const ts = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+    const rndBytes = new Uint8Array(8);
+    crypto.getRandomValues(rndBytes);
+    const rnd = Array.from(rndBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    const key = `backup-${ts}-${rnd}.json`;
+    const body = JSON.stringify(payload);
 
-    return resp(payload, 200, CORS);
+    await env.BACKUP_R2.put(key, body, {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        exportedAt: payload.exportedAt,
+        totalCustomers: String(payload.totalCustomers),
+      },
+    });
+
+    // ── Sign URL valid for 10 minutes ──
+    const EXPIRY_MS = 10 * 60 * 1000;
+    const expiresAtMs = Date.now() + EXPIRY_MS;
+    const sig = await _hmacHex(env.ADMIN_SECRET, `${key}:${expiresAtMs}`);
+    const downloadUrl = `${new URL(request.url).origin}/admin/export-download` +
+      `?key=${encodeURIComponent(key)}&exp=${expiresAtMs}&sig=${sig}`;
+
+    // ── Best-effort audit log row (rules: audit_logs admin-only create) ──
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    fetch(`${fsBase}/audit_logs`, {
+      method: 'POST', headers: fsHeaders,
+      body: JSON.stringify({ fields: {
+        action:         { stringValue: 'export-backup' },
+        actor:          { stringValue: 'admin-secret' },
+        ip:             { stringValue: ip },
+        r2Key:          { stringValue: key },
+        totalCustomers: { integerValue: payload.totalCustomers },
+        bytesUploaded:  { integerValue: body.length },
+        expiresAt:      { stringValue: new Date(expiresAtMs).toISOString() },
+        createdAt:      { stringValue: new Date().toISOString() }
+      }})
+    }).catch(e => console.warn('[export-backup] audit log failed:', e.message));
+
+    console.log(`[export-backup] r2-uploaded ${key} (${body.length} bytes, ${customers.length} customers)`);
+    return resp({
+      ok: true,
+      downloadUrl,
+      key,
+      totalCustomers: payload.totalCustomers,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    }, 200, CORS);
   } catch (e) {
     console.error('[export-backup]', e.message, e.stack);
     return resp({ error: 'Internal error' }, 500, CORS);
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  GET /admin/export-download?key=...&exp=...&sig=...
+//  HMAC-gated R2 streaming. No ADMIN_SECRET in URL — the signature IS auth.
+//  Routed in the PUBLIC section because the signature is the only credential.
+// ══════════════════════════════════════════════════════════════════════════
+async function handleExportDownload(request, env, CORS) {
+  if (!env.BACKUP_R2 || !env.ADMIN_SECRET) {
+    return resp({ error: 'Service not configured' }, 503, CORS);
+  }
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  // Per-IP rate limit defends against signature-guessing attempts.
+  { const _rl = await rateLimitOrBlock(env, ip, 'export-dl', 30, 900, CORS); if (_rl) return _rl; }
+
+  const url = new URL(request.url);
+  const key = url.searchParams.get('key') || '';
+  const exp = url.searchParams.get('exp') || '';
+  const sig = (url.searchParams.get('sig') || '').toLowerCase();
+
+  // Whitelist: key must look like one of our generated names.
+  if (!/^backup-\d{14}-[0-9a-f]{16}\.json$/.test(key)) {
+    return resp({ error: 'Invalid key' }, 400, CORS);
+  }
+  const expMs = Number(exp);
+  if (!Number.isFinite(expMs) || expMs <= 0) {
+    return resp({ error: 'Invalid expiry' }, 400, CORS);
+  }
+  if (!/^[0-9a-f]{64}$/.test(sig)) {
+    return resp({ error: 'Invalid signature' }, 400, CORS);
+  }
+  if (Date.now() > expMs) {
+    return resp({ error: 'Signed URL expired' }, 410, CORS);
+  }
+  const expected = await _hmacHex(env.ADMIN_SECRET, `${key}:${expMs}`);
+  if (!_timingSafeHexEqual(sig, expected)) {
+    return resp({ error: 'Signature mismatch' }, 403, CORS);
+  }
+
+  // Stream the object back to the caller. The browser handles the download.
+  const obj = await env.BACKUP_R2.get(key);
+  if (!obj) return resp({ error: 'Not found' }, 404, CORS);
+
+  return new Response(obj.body, {
+    status: 200,
+    headers: {
+      ...CORS,
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="${key}"`,
+      'Cache-Control': 'private, no-store',
+    },
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════
