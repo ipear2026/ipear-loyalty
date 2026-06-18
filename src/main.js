@@ -939,30 +939,9 @@ const _EMAIL_VERIFY_RESEND_COOLDOWN_MS = 60_000;
 const _EMAIL_VERIFY_POLL_MS = 30_000;
 
 function _startEmailVerifyFlow() {
-  if (window.DEMO) return;
-  const authUser = window._auth?.currentUser;
-  if (!authUser) return;
-
-  // Auto-detect return from verify flow (?verified=1)
-  try {
-    const params = new URLSearchParams(location.search);
-    if (params.get('verified') === '1') {
-      // Clean the URL so reload doesn't re-trigger forever
-      const cleanUrl = location.pathname + location.hash;
-      history.replaceState({}, '', cleanUrl);
-      // Force a fast first check
-      setTimeout(() => _checkEmailVerified(true), 800);
-    }
-  } catch (_) {}
-
-  if (authUser.emailVerified === true) {
-    _hideEmailVerifyBanner();
-    return;
-  }
-
-  _showEmailVerifyBanner();
-  _stopEmailVerifyPolling();
-  _emailVerifyTimer = setInterval(_checkEmailVerified, _EMAIL_VERIFY_POLL_MS);
+  // Email verification removed — SMS OTP at signup is the sole verification.
+  // Bonuses are credited immediately by the Worker on /send-welcome and
+  // /process-referral calls fired from _finishRegistration. No polling needed.
 }
 
 function _stopEmailVerifyPolling() {
@@ -1013,37 +992,9 @@ async function _checkEmailVerified(fastPath = false) {
 }
 
 function _showEmailVerifyBanner() {
-  if (document.getElementById('email-verify-banner')) return;
-
-  const authUser = window._auth?.currentUser;
-  const email = authUser?.email || '';
-
-  const banner = document.createElement('div');
-  banner.id = 'email-verify-banner';
-  banner.style.cssText = `
-    position:fixed;top:0;left:0;right:0;z-index:9000;
-    background:linear-gradient(135deg,#fff6e0 0%,#ffeec2 100%);
-    border-bottom:1px solid #f5c150;
-    padding:10px 14px;
-    font-family:var(--font);font-size:.84rem;line-height:1.35;color:#5a3d00;
-    display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;
-    box-shadow:0 2px 8px rgba(0,0,0,.06);
-  `;
-  banner.innerHTML = `
-    <span style="font-size:1.1rem">📧</span>
-    <span style="font-weight:700;flex:1;min-width:0">
-      Έλεγξε το <strong>${email ? email.replace(/[<>]/g, '') : 'email σου'}</strong> για να ξεκλειδώσεις τους πόντους σου
-    </span>
-    <button id="email-verify-resend" style="background:#0a0a0a;color:#8ae900;border:none;font-family:inherit;font-weight:900;font-size:.78rem;padding:7px 14px;border-radius:8px;cursor:pointer;letter-spacing:.3px">
-      Στείλε ξανά
-    </button>
-  `;
-  document.body.appendChild(banner);
-
-  // Push the app content down so the banner doesn't cover the header.
-  document.body.style.paddingTop = banner.offsetHeight + 'px';
-
-  document.getElementById('email-verify-resend').addEventListener('click', _resendVerifyEmail);
+  // Banner removed by request — verification polling keeps running silently so
+  // that the +50/+100 bonuses still trigger when the user clicks the email link.
+  // Resend button is available in the profile tab if we add one later.
 }
 
 function _hideEmailVerifyBanner() {

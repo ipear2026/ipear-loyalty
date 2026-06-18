@@ -191,11 +191,32 @@ export async function autoLogin(email) {
   _loginShown = true;
   document.getElementById('loading').style.display = 'none';
   try {
-    const snap = await window._getDocs(
-      window._query(window._col(window._db,'ipear_customers'), window._where('email','==',email))
-    );
-    if (snap.empty) { logger.log('%c[AUTO-LOGIN] ❌ Firestore snap EMPTY', 'color:#ff0000;font-weight:bold;font-size:14px'); localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); showScreen('s-phone'); _initCheckboxStyle(); return; }
-    snap.forEach(d => { state.foundCustomer = {id:d.id,...d.data()}; });
+    // HIGH-1 compatibility: email-match read path now requires email_verified.
+    // Prefer uid-keyed doc lookup so unverified-but-signed-in users (e.g. fresh
+    // signups before clicking the email link) can still auto-login.
+    const authUid0 = window._auth?.currentUser?.uid || null;
+    state.foundCustomer = null;
+    if (authUid0) {
+      try {
+        const docSnap = await window._getDoc(window._doc(window._db,'ipear_customers', authUid0));
+        if (docSnap.exists()) state.foundCustomer = { id: docSnap.id, ...docSnap.data() };
+      } catch(_) {}
+      if (!state.foundCustomer) {
+        try {
+          const uidSnap = await window._getDocs(
+            window._query(window._col(window._db,'ipear_customers'), window._where('uid','==',authUid0))
+          );
+          uidSnap.forEach(d => { if (!state.foundCustomer) state.foundCustomer = {id:d.id,...d.data()}; });
+        } catch(_) {}
+      }
+    }
+    if (!state.foundCustomer) {
+      const snap = await window._getDocs(
+        window._query(window._col(window._db,'ipear_customers'), window._where('email','==',email))
+      );
+      if (snap.empty) { logger.log('%c[AUTO-LOGIN] ❌ Firestore snap EMPTY', 'color:#ff0000;font-weight:bold;font-size:14px'); localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); showScreen('s-phone'); _initCheckboxStyle(); return; }
+      snap.forEach(d => { state.foundCustomer = {id:d.id,...d.data()}; });
+    }
     if (state.foundCustomer.blocked) {
       logger.log('%c[AUTO-LOGIN] ❌ Customer BLOCKED', 'color:#ff0000;font-weight:bold;font-size:14px');
       localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); state.foundCustomer = null;
@@ -390,15 +411,10 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
   localStorage.setItem(_REM_KEY, JSON.stringify({ email, name }));
   ['reg-name','reg-phone','reg-email','reg-pass1','reg-pass2','reg-bday-d','reg-bday-m','reg-bday-y','reg-ref'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
 
-  // HIGH-4: /send-welcome now requires a verified Firebase idToken. The worker
-  // derives email + UID from the token; mismatched body fields are rejected.
-  // We still send the name (no token claim for it) and the marketing flag
-  // (consent). The +50 marketing bonus is credited atomically by the worker.
-  //
-  // NOTE: at this point the brand-new account has emailVerified=false, so this
-  // call will return 403 (email-not-verified). That's fine — the bonus is
-  // re-triggered later when the customer clicks the verification link and
-  // the app's polling detects emailVerified flipping to true.
+  // /send-welcome — idToken-authenticated. Worker derives email + UID from
+  // the token (mismatched body fields rejected) and atomically credits the
+  // +50 marketing bonus if marketingOptIn is true. Idempotent via the
+  // marketingWelcomeProcessed flag on the customer doc.
   (async () => {
     try {
       const idToken = await authUser.getIdToken(true);
@@ -413,33 +429,10 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
     }
   })();
 
-  // Dual-verification: alongside the SMS OTP the user just completed, send a
-  // branded verification email so the customer can unlock the +50/+100
-  // bonuses (server-side CRIT-1 fix gates both /send-welcome and
-  // /process-referral on emailVerified). The Worker reads the customer doc
-  // and queue server-side and tailors the email copy — no bonus copy if no
-  // bonus is pending. Fire-and-forget — the persistent app banner will
-  // surface failures to the user via the Resend button.
-  (async () => {
-    try {
-      const idToken = await authUser.getIdToken(true);
-      const res = await fetch(_WORKER_URL + '/send-verification-link', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      });
-      if (!res.ok) logger.warn('[verify-link] failed:', res.status);
-    } catch (e) {
-      logger.warn('[verify-link] error:', e.message);
-    }
-  })();
-
   _transitionToApp();
   showToast('✅ Καλωσήρθες στο iPear Loyalty! 🍐', 'green');
-  // The +50/+100 toasts are gated on email verification — show them only
-  // after the user verifies their email (handled by the polling in main.js).
-  // Display a guidance toast pointing the user to their inbox.
-  setTimeout(() => showToast('📧 Έλεγξε το email σου για να ξεκλειδώσεις τους πόντους σου', 'green'), 1500);
+  if (marketingOptIn) setTimeout(() => showToast('🎁 Marketing bonus: +50 πόντοι! 🎉', 'green'), 1200);
+  if (refCode) setTimeout(() => showToast('🎁 Referral bonus: +100 πόντοι για εσένα! 🎉', 'green'), marketingOptIn ? 3000 : 1800);
 
   if ('Notification' in window && Notification.permission === 'default') {
     setTimeout(_showPushOnboarding, 3500);
@@ -806,11 +799,35 @@ export async function submitPhone() {
     const authResult = await window._signIn(window._auth, email, pass);
     const firebaseUID = authResult?.user?.uid || authResult?.uid || null;
 
-    const snap = await window._getDocs(
-      window._query(window._col(window._db,'ipear_customers'), window._where('email','==',email))
-    );
-    if (snap.empty) { err.textContent = '❌ Δεν βρέθηκε loyalty λογαριασμός για αυτό το email.'; btn.disabled=false; btn.innerHTML='Είσοδος →'; return; }
-    snap.forEach(d => { state.foundCustomer = {id:d.id,...d.data()}; });
+    // HIGH-1 compatibility: the read rule's email-match branch now requires
+    // isVerifiedAuth(), so we cannot query by email for an unverified user.
+    // Try uid-keyed doc first (passes the uid path of ownsCustomer without
+    // requiring email_verified). Fall back to uid-field query, then to the
+    // email query only for already-verified legacy users.
+    state.foundCustomer = null;
+    if (firebaseUID) {
+      try {
+        const docSnap = await window._getDoc(window._doc(window._db,'ipear_customers', firebaseUID));
+        if (docSnap.exists()) state.foundCustomer = { id: docSnap.id, ...docSnap.data() };
+      } catch(_) {}
+      if (!state.foundCustomer) {
+        try {
+          const uidSnap = await window._getDocs(
+            window._query(window._col(window._db,'ipear_customers'), window._where('uid','==',firebaseUID))
+          );
+          uidSnap.forEach(d => { if (!state.foundCustomer) state.foundCustomer = {id:d.id,...d.data()}; });
+        } catch(_) {}
+      }
+    }
+    if (!state.foundCustomer) {
+      try {
+        const snap = await window._getDocs(
+          window._query(window._col(window._db,'ipear_customers'), window._where('email','==',email))
+        );
+        snap.forEach(d => { if (!state.foundCustomer) state.foundCustomer = {id:d.id,...d.data()}; });
+      } catch(_) {}
+    }
+    if (!state.foundCustomer) { err.textContent = '❌ Δεν βρέθηκε loyalty λογαριασμός για αυτό το email.'; btn.disabled=false; btn.innerHTML='Είσοδος →'; return; }
 
     if (state.foundCustomer.blocked) {
       await window._signOut(window._auth).catch(()=>{});

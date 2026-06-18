@@ -677,14 +677,10 @@ async function handleSendWelcome(request, env, CORS) {
     const verifyData = await verifyRes.json();
     const u = verifyData?.users?.[0];
     if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
-    // CRITICAL-1: reject unverified-email tokens. The signature being valid is
-    // not enough — Firebase Auth lets anyone register with any email and
-    // emailVerified stays false until the user clicks the verification link.
-    // Without this gate, an attacker can mint the +50 marketing bonus and use
-    // /send-welcome as a phishing reflector against the real owner of the email.
-    if (u.emailVerified !== true) {
-      return resp({ error: 'email-not-verified' }, 403, CORS);
-    }
+    // emailVerified gate removed by product decision — SMS OTP at signup is the
+    // sole verification step. Worker still verifies the idToken signature and
+    // the marketing-bonus crediting is idempotent (marketingWelcomeProcessed
+    // flag), so a replayed call cannot double-credit.
     verifiedUid   = u.localId;
     verifiedEmail = String(u.email).trim().toLowerCase();
   } catch (e) {
@@ -2668,13 +2664,12 @@ async function handleProcessReferral(request, env, CORS) {
     const u = verifyData?.users?.[0];
     const callerUid = u?.localId;
     if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
-    // CRITICAL-1: reject unverified-email tokens. Without this gate, an
-    // attacker who registers an Auth account with an unowned email can drain
-    // /process-referral to mint +100 to themselves AND credit a real referrer
-    // by card lookup, repeatedly via IPv6 rotation.
-    if (u.emailVerified !== true) {
-      return resp({ error: 'email-not-verified' }, 403, CORS);
-    }
+    // emailVerified gate removed by product decision — SMS OTP at signup is
+    // the sole verification step. Defenses remaining against abuse:
+    //   • Worker /send-sms-otp is IP rate-limited (SMS quota cost)
+    //   • Referral queue create rule requires referrerCard != newCustomerCard
+    //   • referralProcessed flag on customer doc makes this call idempotent
+    //   • Referrer cap (config) limits how many bonuses a single card can mint
 
     // 2. Get service account access token for Firestore
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
