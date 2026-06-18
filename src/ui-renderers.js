@@ -514,7 +514,8 @@ export async function offerGenerateQR() {
   }
 
   if (authUid && state.foundCustomer.id !== authUid) {
-    try { await _migrateCustomerToUid(state.foundCustomer.id, authUid); } catch(_) {}
+    try { await _migrateCustomerToUid(state.foundCustomer.id, authUid); }
+    catch (e) { logger.warn('[migrate-uid] failed:', e?.code || e?.message || e); }
   }
 
   const bp = _offerBonus(o);

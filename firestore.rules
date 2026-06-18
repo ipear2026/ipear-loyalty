@@ -28,13 +28,28 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // HIGH-1: Verified auth = signed in AND email_verified flag set on the token.
-    // Used by every customer-self ownership path so an attacker cannot register
-    // a Firebase Auth account with someone else's email (unverified) and then
-    // claim that victim's legacy customer doc.
+    // HIGH-1: Verified auth = signed in AND identity confirmed via one of
+    // two channels:
+    //
+    //   • email_verified == true                                  (legacy
+    //     dual-verification flow)
+    //   • current session was opened via Phone Auth (sign_in_provider=='phone')
+    //                                                              (SMS-only
+    //     flow, fresh signup)
+    //   • the user record has a phone identity linked (firebase.identities.phone)
+    //                                                              (SMS-only
+    //     flow, returning user signing in via email/password — phone was
+    //     verified at registration and stays linked on the record forever)
+    //
+    // Each branch certifies that the caller really controls one of the
+    // identifiers Firebase Auth associates with this UID, blocking the
+    // email-spoof attack the original CRIT-1 fix defended against.
     function isVerifiedAuth() {
-      return isAuth() &&
-        request.auth.token.email_verified == true;
+      return isAuth() && (
+        request.auth.token.email_verified == true ||
+        request.auth.token.firebase.sign_in_provider == 'phone' ||
+        ('phone' in request.auth.token.firebase.identities)
+      );
     }
 
     // Admin = `admin: true` custom claim on the ID token (fast — no Firestore

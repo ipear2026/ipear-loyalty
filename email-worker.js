@@ -621,10 +621,17 @@ async function handleSendWelcome(request, env, CORS) {
     const verifyData = await verifyRes.json();
     const u = verifyData?.users?.[0];
     if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
-    // emailVerified gate removed by product decision — SMS OTP at signup is the
-    // sole verification step. Worker still verifies the idToken signature and
-    // the marketing-bonus crediting is idempotent (marketingWelcomeProcessed
-    // flag), so a replayed call cannot double-credit.
+    // Phone-verification gate (replaces the deprecated emailVerified gate).
+    // SMS OTP at signup is the sole identity check, so we require the user
+    // record to have a verified phoneNumber. Firebase only populates this
+    // field after a successful Phone Auth flow — an attacker who signs up
+    // via signUp REST (email+password, no SMS) has no phoneNumber and is
+    // rejected here, closing the bonus-mint + phishing-reflector path the
+    // original CRIT-1 fix defended against.
+    const hasPhone = typeof u.phoneNumber === 'string' && u.phoneNumber.length > 0;
+    if (!hasPhone) {
+      return resp({ error: 'phone-not-verified' }, 403, CORS);
+    }
     verifiedUid   = u.localId;
     verifiedEmail = String(u.email).trim().toLowerCase();
   } catch (e) {
@@ -2608,12 +2615,16 @@ async function handleProcessReferral(request, env, CORS) {
     const u = verifyData?.users?.[0];
     const callerUid = u?.localId;
     if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
-    // emailVerified gate removed by product decision — SMS OTP at signup is
-    // the sole verification step. Defenses remaining against abuse:
-    //   • Worker /send-sms-otp is IP rate-limited (SMS quota cost)
-    //   • Referral queue create rule requires referrerCard != newCustomerCard
-    //   • referralProcessed flag on customer doc makes this call idempotent
-    //   • Referrer cap (config) limits how many bonuses a single card can mint
+    // Phone-verification gate (replaces the deprecated emailVerified gate).
+    // Rejects tokens whose Auth record never completed Phone Auth — i.e.
+    // direct-REST email+password signups that bypass the SMS OTP step the
+    // SPA enforces. Combined with the per-uid referralProcessed flag and
+    // the existing IPv6 /64 rate limit, this closes the fake-account
+    // referral-mint path.
+    const hasPhone = typeof u?.phoneNumber === 'string' && u.phoneNumber.length > 0;
+    if (!hasPhone) {
+      return resp({ error: 'phone-not-verified' }, 403, CORS);
+    }
 
     // 2. Get service account access token for Firestore
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);

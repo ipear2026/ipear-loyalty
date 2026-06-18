@@ -10,6 +10,7 @@ import {
   startApp, _migrateCustomerToUid, _refreshPointsUI,
 } from './main.js';
 import { loadHistory } from './ui-renderers.js';
+import { findCustomerByAuth } from './services/firebase.js';
 
 // ════════════════════════════════════════
 //  AUTH STATE
@@ -195,31 +196,26 @@ export async function autoLogin(email) {
   _loginShown = true;
   document.getElementById('loading').style.display = 'none';
   try {
-    // HIGH-1 compatibility: email-match read path now requires email_verified.
-    // Prefer uid-keyed doc lookup so unverified-but-signed-in users (e.g. fresh
-    // signups before clicking the email link) can still auto-login.
+    // HIGH-1 compatibility: lookup ladder is in services/firebase.js so the
+    // same logic is reused by submitPhone, and so individual read failures
+    // are logged instead of swallowed silently.
     const authUid0 = window._auth?.currentUser?.uid || null;
-    state.foundCustomer = null;
-    if (authUid0) {
-      try {
-        const docSnap = await window._getDoc(window._doc(window._db,'ipear_customers', authUid0));
-        if (docSnap.exists()) state.foundCustomer = { id: docSnap.id, ...docSnap.data() };
-      } catch(_) {}
-      if (!state.foundCustomer) {
-        try {
-          const uidSnap = await window._getDocs(
-            window._query(window._col(window._db,'ipear_customers'), window._where('uid','==',authUid0))
-          );
-          uidSnap.forEach(d => { if (!state.foundCustomer) state.foundCustomer = {id:d.id,...d.data()}; });
-        } catch(_) {}
-      }
-    }
+    const lookup = await findCustomerByAuth(authUid0, email, { logger });
+    state.foundCustomer = lookup.customer;
     if (!state.foundCustomer) {
-      const snap = await window._getDocs(
-        window._query(window._col(window._db,'ipear_customers'), window._where('email','==',email))
-      );
-      if (snap.empty) { logger.log('%c[AUTO-LOGIN] ❌ Firestore snap EMPTY', 'color:#ff0000;font-weight:bold;font-size:14px'); localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); showScreen('s-phone'); _initCheckboxStyle(); return; }
-      snap.forEach(d => { state.foundCustomer = {id:d.id,...d.data()}; });
+      if (lookup.error) {
+        // Reads failed — App Check token expiry, offline, Firestore unreachable.
+        // Surface the connectivity issue and try the cached customer (handled
+        // by the outer catch fallback); do NOT wipe the remember-me cache on a
+        // transient failure.
+        logger.log('%c[AUTO-LOGIN] ⚠️ lookup error:', 'color:#ff6600;font-weight:bold;font-size:14px', lookup.error);
+        const cached = _getCachedCustomer(email);
+        if (cached) { state.foundCustomer = cached; _transitionToApp(); return; }
+        showToast('⚠️ Σφάλμα σύνδεσης. Δοκίμασε ξανά σε λίγο.', 'red');
+        showScreen('s-phone'); _initCheckboxStyle(); return;
+      }
+      logger.log('%c[AUTO-LOGIN] ❌ Firestore snap EMPTY', 'color:#ff0000;font-weight:bold;font-size:14px');
+      localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); showScreen('s-phone'); _initCheckboxStyle(); return;
     }
     if (state.foundCustomer.blocked) {
       logger.log('%c[AUTO-LOGIN] ❌ Customer BLOCKED', 'color:#ff0000;font-weight:bold;font-size:14px');
@@ -229,7 +225,8 @@ export async function autoLogin(email) {
     localStorage.setItem(_CACHE_KEY, JSON.stringify(state.foundCustomer));
     const authUid = window._auth?.currentUser?.uid;
     if (authUid && state.foundCustomer.id !== authUid) {
-      try { await _migrateCustomerToUid(state.foundCustomer.id, authUid); } catch(_) {}
+      try { await _migrateCustomerToUid(state.foundCustomer.id, authUid); }
+      catch (e) { logger.warn('[migrate-uid] failed:', e?.code || e?.message || e); }
     }
     logger.log('%c[AUTO-LOGIN] ✅ Firestore OK → _transitionToApp()', 'color:#00cc00;font-weight:bold;font-size:16px');
     _transitionToApp();
@@ -802,35 +799,15 @@ export async function submitPhone() {
     const authResult = await window._signIn(window._auth, email, pass);
     const firebaseUID = authResult?.user?.uid || authResult?.uid || null;
 
-    // HIGH-1 compatibility: the read rule's email-match branch now requires
-    // isVerifiedAuth(), so we cannot query by email for an unverified user.
-    // Try uid-keyed doc first (passes the uid path of ownsCustomer without
-    // requiring email_verified). Fall back to uid-field query, then to the
-    // email query only for already-verified legacy users.
-    state.foundCustomer = null;
-    if (firebaseUID) {
-      try {
-        const docSnap = await window._getDoc(window._doc(window._db,'ipear_customers', firebaseUID));
-        if (docSnap.exists()) state.foundCustomer = { id: docSnap.id, ...docSnap.data() };
-      } catch(_) {}
-      if (!state.foundCustomer) {
-        try {
-          const uidSnap = await window._getDocs(
-            window._query(window._col(window._db,'ipear_customers'), window._where('uid','==',firebaseUID))
-          );
-          uidSnap.forEach(d => { if (!state.foundCustomer) state.foundCustomer = {id:d.id,...d.data()}; });
-        } catch(_) {}
-      }
-    }
+    // HIGH-1 compatibility: shared lookup ladder in services/firebase.js.
+    const lookup = await findCustomerByAuth(firebaseUID, email, { logger });
+    state.foundCustomer = lookup.customer;
     if (!state.foundCustomer) {
-      try {
-        const snap = await window._getDocs(
-          window._query(window._col(window._db,'ipear_customers'), window._where('email','==',email))
-        );
-        snap.forEach(d => { if (!state.foundCustomer) state.foundCustomer = {id:d.id,...d.data()}; });
-      } catch(_) {}
+      err.textContent = lookup.error
+        ? '⚠️ Σφάλμα σύνδεσης ή App Check. Έλεγξε το δίκτυό σου και δοκίμασε ξανά.'
+        : '❌ Δεν βρέθηκε loyalty λογαριασμός για αυτό το email.';
+      btn.disabled = false; btn.innerHTML = 'Είσοδος →'; return;
     }
-    if (!state.foundCustomer) { err.textContent = '❌ Δεν βρέθηκε loyalty λογαριασμός για αυτό το email.'; btn.disabled=false; btn.innerHTML='Είσοδος →'; return; }
 
     if (state.foundCustomer.blocked) {
       await window._signOut(window._auth).catch(()=>{});
@@ -840,7 +817,8 @@ export async function submitPhone() {
     }
 
     if (firebaseUID && state.foundCustomer.id !== firebaseUID) {
-      try { await _migrateCustomerToUid(state.foundCustomer.id, firebaseUID); } catch(_) {}
+      try { await _migrateCustomerToUid(state.foundCustomer.id, firebaseUID); }
+      catch (e) { logger.warn('[migrate-uid] failed:', e?.code || e?.message || e); }
     } else if (firebaseUID && state.foundCustomer.uid !== firebaseUID) {
       try {
         await window._updateDoc(window._doc(window._db,'ipear_customers',state.foundCustomer.id), {uid: firebaseUID});
@@ -919,7 +897,8 @@ export async function submitCreatePass() {
     const authResult = await window._createUser(window._auth, email, p1);
     const firebaseUID = authResult?.user?.uid || authResult?.uid || null;
     if (firebaseUID && state.foundCustomer?.id && state.foundCustomer.id !== firebaseUID) {
-      try { await _migrateCustomerToUid(state.foundCustomer.id, firebaseUID); } catch(_) {}
+      try { await _migrateCustomerToUid(state.foundCustomer.id, firebaseUID); }
+      catch (e) { logger.warn('[migrate-uid] failed:', e?.code || e?.message || e); }
     } else if (firebaseUID && state.foundCustomer?.id) {
       try {
         await window._updateDoc(window._doc(window._db,'ipear_customers',state.foundCustomer.id), {uid: firebaseUID});

@@ -230,7 +230,7 @@ if (IS_DEMO) {
   window._enablePush = async () => {
     if (_pushBusy) return;
     if (!_messaging) return showToast('❌ Messaging μη διαθέσιμο','red');
-    if (VAPID_KEY === 'YOUR_FCM_VAPID_KEY') return showToast('⚠️ VAPID key δεν έχει οριστεί','red');
+    if (!VAPID_KEY || VAPID_KEY === 'YOUR_FCM_VAPID_KEY') return showToast('⚠️ VAPID key δεν έχει οριστεί','red');
 
     _pushBusy = true;
     const { _setPushUI, _PUSH_TIMEOUT_MS } = await import('./push-notifications.js');

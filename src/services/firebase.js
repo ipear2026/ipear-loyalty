@@ -88,3 +88,56 @@ export function deleteAuthUser(user) {
 export function setPersistenceMode(mode) {
   return window._setPersistenceMode(mode);
 }
+
+// ── Customer lookup ladder (HIGH-1 / SMS-only compatible) ───────────
+//
+// Resolution order:
+//   1. doc(ipear_customers/{uid})                  — new uid-keyed docs
+//   2. query where uid == authUid                  — uid-field-only migrated
+//   3. query where email == email                  — legacy email-keyed
+//
+// Returns `{ customer, error }`:
+//   • customer  — the customer doc if any branch hit, else null
+//   • error     — the LAST transient failure observed, or null if every
+//                 attempted read succeeded (including "succeeded but empty").
+//
+// Callers use the error/null distinction to show "σύνδεση απέτυχε" instead
+// of a misleading "δεν βρέθηκε λογαριασμός" when App Check / network /
+// Firestore is unreachable.
+export async function findCustomerByAuth(authUid, email, { logger } = {}) {
+  const _log = logger || { warn: () => {} };
+  let found = null;
+  let lastError = null;
+
+  function noteError(label, e) {
+    lastError = { label, code: e?.code || null, message: e?.message || String(e) };
+    _log.warn(`[findCustomerByAuth] ${label} failed:`, lastError.code || lastError.message);
+  }
+
+  if (authUid) {
+    try {
+      const docSnap = await window._getDoc(window._doc(window._db, 'ipear_customers', authUid));
+      if (docSnap.exists()) found = { id: docSnap.id, ...docSnap.data() };
+    } catch (e) { noteError('uid-doc', e); }
+
+    if (!found) {
+      try {
+        const uidSnap = await window._getDocs(
+          window._query(window._col(window._db, 'ipear_customers'), window._where('uid', '==', authUid))
+        );
+        uidSnap.forEach(d => { if (!found) found = { id: d.id, ...d.data() }; });
+      } catch (e) { noteError('uid-field', e); }
+    }
+  }
+
+  if (!found && email) {
+    try {
+      const snap = await window._getDocs(
+        window._query(window._col(window._db, 'ipear_customers'), window._where('email', '==', email))
+      );
+      snap.forEach(d => { if (!found) found = { id: d.id, ...d.data() }; });
+    } catch (e) { noteError('email', e); }
+  }
+
+  return { customer: found, error: found ? null : lastError };
+}
