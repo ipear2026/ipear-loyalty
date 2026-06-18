@@ -341,6 +341,7 @@ export default {
     if (path === '/check-registration') return handleCheckRegistration(request, env, CORS);
     if (path === '/process-referral') return handleProcessReferral(request, env, CORS);
     if (path === '/send-welcome') return handleSendWelcome(request, env, CORS);
+    if (path === '/send-verification-link') return handleSendVerificationLink(request, env, CORS);
     if (path === '/send-sms-otp') return handleSendSmsOtp(request, env, CORS);
     if (path === '/verify-sms-otp') return handleVerifySmsOtp(request, env, CORS);
     if (path === '/woo-sync-tier')   return handleWooSyncTier(request, env, CORS);
@@ -821,6 +822,227 @@ async function handleSendWelcome(request, env, CORS) {
     console.error('[send-welcome]', e.message);
     return resp({ error: 'Internal error' }, 500, CORS);
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  POST /send-verification-link  { idToken }
+//
+//  Public endpoint. Caller is anyone with a fresh Firebase ID token for the
+//  account they JUST registered. We do NOT require emailVerified — that's
+//  the whole point: the user is about to verify.
+//
+//  Sends a branded verification email via Brevo. Content is conditional:
+//   • If customer doc has marketingOptIn===true AND !marketingWelcomeProcessed
+//     → show "+50 πόντοι καλωσορίσματος"
+//   • If ipear_referral_queue/{uid} exists with processed!==true
+//     → show "+100 πόντοι παραπομπής"
+//   • If neither → plain "verify your email" copy (no bonus copy at all)
+//
+//  Rate limits:
+//   • Per-IP   : RATE_LIMIT_MAX_HITS / 15 min  (anti-bomb from one host)
+//   • Per-email: RATE_LIMIT_MAX_HITS / 15 min  (anti-bomb of a single inbox)
+//  Returns 200 ok:true alreadyVerified:true if user is already verified
+//  (so the client can hide the banner).
+// ══════════════════════════════════════════════════════════════════════════
+async function handleSendVerificationLink(request, env, CORS) {
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  { const _rl = await rateLimitOrBlock(env, ip, 'verify-link', RATE_LIMIT_MAX_HITS, 900, CORS); if (_rl) return _rl; }
+
+  let body;
+  try { body = await readJsonCapped(request, 4 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+
+  const idToken = (body.idToken || '').trim();
+  if (!idToken) return resp({ error: 'idToken required' }, 401, CORS);
+
+  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
+    return resp({ error: 'Server not configured' }, 503, CORS);
+  if (!env.BREVO_API_KEY)
+    return resp({ error: 'Email not configured' }, 503, CORS);
+
+  // 1. Verify the token. Note: we do NOT require emailVerified — this is the
+  //    only Worker endpoint that an unverified user must be able to call.
+  let verifiedEmail, verifiedUid, displayName = '';
+  try {
+    const verifyRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
+    );
+    const verifyData = await verifyRes.json();
+    const u = verifyData?.users?.[0];
+    if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
+    if (u.emailVerified === true) return resp({ ok: true, alreadyVerified: true }, 200, CORS);
+    verifiedUid   = u.localId;
+    verifiedEmail = String(u.email).trim().toLowerCase();
+    displayName   = String(u.displayName || '').trim();
+  } catch (e) {
+    console.error('[send-verification-link] token verify failed:', e.message);
+    return resp({ error: 'Token verification failed' }, 401, CORS);
+  }
+
+  // 2. Per-email rate limit — protects a single inbox from being bombed via
+  //    IPv6 rotation. Compounds with the per-IP limit above.
+  { const _rl = await rateLimitOrBlock(env, 't:email:' + verifiedEmail, 'verify-link', RATE_LIMIT_MAX_HITS, 900, CORS, 'Πολλές αιτήσεις. Περίμενε λίγο.'); if (_rl) return _rl; }
+
+  // 3. Read customer doc + referral queue to decide what bonuses to show.
+  //    Failures here only affect copy — they do NOT block sending.
+  let hasMarketingBonus = false;
+  let hasReferralBonus  = false;
+  try {
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId   = env.FCM_PROJECT_ID;
+    const fsBase      = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+    const fsHeaders   = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+
+    // Customer doc → marketing eligibility
+    const custRes = await fetch(`${fsBase}/ipear_customers/${verifiedUid}`, { headers: fsHeaders });
+    if (custRes.ok) {
+      const custDoc = await custRes.json();
+      const f = custDoc.fields || {};
+      const marketingOptIn      = f.marketingOptIn?.booleanValue === true;
+      const marketingProcessed  = f.marketingWelcomeProcessed?.booleanValue === true;
+      hasMarketingBonus = marketingOptIn && !marketingProcessed;
+      if (!displayName) displayName = String(f.name?.stringValue || '').trim();
+    }
+
+    // Referral queue doc → referral eligibility
+    const queueRes = await fetch(`${fsBase}/ipear_referral_queue/${verifiedUid}`, { headers: fsHeaders });
+    if (queueRes.ok) {
+      const qDoc = await queueRes.json();
+      const f = qDoc.fields || {};
+      const processed = f.processed?.booleanValue === true;
+      hasReferralBonus = !processed;
+    }
+  } catch (e) {
+    console.error('[send-verification-link] Firestore read failed (non-fatal):', e.message);
+  }
+
+  // 4. Generate the Firebase verification link via Admin REST API.
+  //    continueUrl uses the Pages alias (always allowlisted) — `loyalty.ipear.gr`
+  //    is not currently registered as an authorized domain in Firebase Auth.
+  let verifyUrl;
+  try {
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const oobRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+        body: JSON.stringify({
+          requestType:    'VERIFY_EMAIL',
+          idToken,
+          returnOobLink:  true,
+          continueUrl:    'https://ipear-loyalty.pages.dev/?verified=1',
+        }),
+      }
+    );
+    if (!oobRes.ok) {
+      const err = await oobRes.json().catch(() => ({}));
+      console.error('[send-verification-link] sendOobCode failed:', oobRes.status, JSON.stringify(err));
+      return resp({ error: 'Verification link generation failed' }, 502, CORS);
+    }
+    const oobData = await oobRes.json();
+    verifyUrl = oobData.oobLink;
+    if (!verifyUrl) return resp({ error: 'No link returned' }, 502, CORS);
+  } catch (e) {
+    console.error('[send-verification-link] OOB error:', e.message);
+    return resp({ error: 'Link generation failed' }, 502, CORS);
+  }
+
+  // 5. Build + send the branded email via Brevo.
+  const htmlContent = buildVerificationEmail(displayName || 'φίλε', verifyUrl, hasMarketingBonus, hasReferralBonus);
+  const subject = (hasMarketingBonus || hasReferralBonus)
+    ? '🍐 iPear Loyalty — Ξεκλείδωσε τα bonuses σου'
+    : '🍐 iPear Loyalty — Επιβεβαίωσε το email σου';
+
+  try {
+    const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key':      env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept':       'application/json',
+      },
+      body: JSON.stringify({
+        sender: {
+          name:  env.SENDER_NAME  || 'iPear Loyalty',
+          email: (env.SENDER_EMAIL || '').trim(),
+        },
+        to:      [{ email: verifiedEmail, name: displayName || '' }],
+        subject,
+        htmlContent,
+      }),
+    });
+    if (!brevoRes.ok) {
+      const err = await brevoRes.json().catch(() => ({}));
+      console.error('[send-verification-link] Brevo error:', brevoRes.status, JSON.stringify(err));
+      return resp({ error: 'Email send failed' }, 502, CORS);
+    }
+    console.log(`[send-verification-link] ✅ sent to ${verifiedEmail}, mk=${hasMarketingBonus} ref=${hasReferralBonus}`);
+    return resp({ ok: true, hasMarketingBonus, hasReferralBonus }, 200, CORS);
+  } catch (e) {
+    console.error('[send-verification-link] Brevo network:', e.message);
+    return resp({ error: 'Email send failed' }, 502, CORS);
+  }
+}
+
+function buildVerificationEmail(name, link, hasMarketing, hasReferral) {
+  const safeName = escHtml(name);
+  const safeLink = escHtml(link);
+
+  const bonuses = [];
+  if (hasMarketing) bonuses.push('+50 πόντοι καλωσορίσματος');
+  if (hasReferral)  bonuses.push('+100 πόντοι από την παραπομπή σου');
+
+  const hasAnyBonus = bonuses.length > 0;
+  const intro = hasAnyBonus
+    ? 'Είσαι ένα κλικ μακριά από τα bonuses σου! Επιβεβαίωσε το email για να ξεκλειδώσεις:'
+    : 'Επιβεβαίωσε το email σου για να ολοκληρώσεις την εγγραφή σου στο iPear Loyalty.';
+  const ctaLabel = hasAnyBonus ? 'Ξεκλείδωσε τα Bonuses →' : 'Επιβεβαίωση email →';
+
+  const bonusList = !hasAnyBonus ? '' : (
+    '<div style="background:#f8fbef;border-left:4px solid #8ae900;border-radius:10px;padding:18px 22px;margin:18px 0">' +
+    bonuses.map(t => `<div style="margin:6px 0;font-size:.95rem;color:#222;line-height:1.4"><span style="color:#6bb800;font-weight:900">✅</span>  ${escHtml(t)}</div>`).join('') +
+    '</div>'
+  );
+
+  return `<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iPear Loyalty — Επιβεβαίωση email</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#222">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:32px 0">
+  <tr><td align="center">
+    <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.10)">
+      <tr>
+        <td style="background:linear-gradient(135deg,#6bb800 0%,#8ae900 100%);padding:36px 40px;text-align:center">
+          <div style="font-size:30px;font-weight:900;color:#0a0a0a;letter-spacing:-1px;line-height:1">🍐 iPear<span style="color:#fff">Loyalty</span></div>
+          <div style="font-size:11px;color:rgba(0,0,0,.55);margin-top:6px;text-transform:uppercase;letter-spacing:3px;font-weight:700">Loyalty Program</div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:32px 40px 36px;line-height:1.55">
+          <h2 style="margin:0 0 12px;font-size:1.35rem;color:#111;font-weight:800">Γεια σου ${safeName}! 👋</h2>
+          <p style="margin:0;font-size:.96rem;color:#444">${intro}</p>
+          ${bonusList}
+          <div style="text-align:center;margin:30px 0 24px">
+            <a href="${safeLink}" style="display:inline-block;background:#8ae900;color:#0a0a0a;font-weight:900;font-size:1rem;padding:16px 38px;border-radius:11px;text-decoration:none;letter-spacing:.3px;box-shadow:0 4px 14px rgba(138,233,0,.35)">${ctaLabel}</a>
+          </div>
+          <p style="margin:0;font-size:.85rem;color:#666;text-align:center">Το link λήγει σε <strong>1 ώρα</strong>.</p>
+          <p style="margin:22px 0 0;font-size:.78rem;color:#999;border-top:1px solid #eee;padding-top:14px;text-align:center">Δεν εγγράφηκες στο iPear Loyalty; Αγνόησε αυτό το email — δεν θα γίνει καμία αλλαγή.</p>
+        </td>
+      </tr>
+      <tr>
+        <td style="background:#fafafa;padding:16px 40px;text-align:center;color:#999;font-size:.75rem">iPear · <a href="https://ipear.gr" style="color:#999;text-decoration:none">ipear.gr</a> · <a href="mailto:info@ipear.gr" style="color:#999;text-decoration:none">info@ipear.gr</a></td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>`;
 }
 
 function buildWelcomeEmail(name, points, appUrl) {
@@ -1868,14 +2090,17 @@ async function handleEmail(request, env, CORS) {
   try { body = await readJsonCapped(request, 32 * 1024); }
   catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
-  const { recipients, subject, message } = body;
+  const { recipients, subject, message, htmlContent } = body;
 
   if (!Array.isArray(recipients) || !recipients.length)
     return resp({ error: 'recipients array is required' }, 400, CORS);
   if (!subject?.trim())
     return resp({ error: 'subject is required' }, 400, CORS);
-  if (!message?.trim())
-    return resp({ error: 'message is required' }, 400, CORS);
+  // Either `message` (plain text, auto-wrapped + escaped) OR `htmlContent`
+  // (raw HTML, used as-is). Admin callers can pass `htmlContent` directly
+  // when they need clickable links or custom branded templates.
+  if (!message?.trim() && !htmlContent?.trim())
+    return resp({ error: 'message or htmlContent is required' }, 400, CORS);
   if (recipients.length > MAX_RECIPIENTS)
     return resp({ error: `Too many recipients (max ${MAX_RECIPIENTS})` }, 400, CORS);
 
@@ -1885,6 +2110,11 @@ async function handleEmail(request, env, CORS) {
   const chunks = chunkArray(valid, 900);
   let sent = 0, failed = 0;
 
+  // Body is already gated by ADMIN_SECRET (the bearer check upstream), so
+  // raw HTML from the caller is acceptable. Falls back to the legacy
+  // text→wrapped path when only `message` is provided.
+  const finalHtml = (htmlContent && htmlContent.trim()) ? htmlContent : buildHtmlEmail(message);
+
   for (const chunk of chunks) {
     const payload = {
       sender: {
@@ -1892,7 +2122,7 @@ async function handleEmail(request, env, CORS) {
         email: (env.SENDER_EMAIL || '').trim(),
       },
       subject,
-      htmlContent: buildHtmlEmail(message),
+      htmlContent: finalHtml,
       messageVersions: chunk.map(r => ({
         to: [{ email: r.email, name: r.name || r.email }],
         params: {

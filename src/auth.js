@@ -394,6 +394,11 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
   // derives email + UID from the token; mismatched body fields are rejected.
   // We still send the name (no token claim for it) and the marketing flag
   // (consent). The +50 marketing bonus is credited atomically by the worker.
+  //
+  // NOTE: at this point the brand-new account has emailVerified=false, so this
+  // call will return 403 (email-not-verified). That's fine — the bonus is
+  // re-triggered later when the customer clicks the verification link and
+  // the app's polling detects emailVerified flipping to true.
   (async () => {
     try {
       const idToken = await authUser.getIdToken(true);
@@ -408,10 +413,33 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
     }
   })();
 
+  // Dual-verification: alongside the SMS OTP the user just completed, send a
+  // branded verification email so the customer can unlock the +50/+100
+  // bonuses (server-side CRIT-1 fix gates both /send-welcome and
+  // /process-referral on emailVerified). The Worker reads the customer doc
+  // and queue server-side and tailors the email copy — no bonus copy if no
+  // bonus is pending. Fire-and-forget — the persistent app banner will
+  // surface failures to the user via the Resend button.
+  (async () => {
+    try {
+      const idToken = await authUser.getIdToken(true);
+      const res = await fetch(_WORKER_URL + '/send-verification-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      if (!res.ok) logger.warn('[verify-link] failed:', res.status);
+    } catch (e) {
+      logger.warn('[verify-link] error:', e.message);
+    }
+  })();
+
   _transitionToApp();
   showToast('✅ Καλωσήρθες στο iPear Loyalty! 🍐', 'green');
-  if (marketingOptIn) setTimeout(() => showToast('🎁 Marketing bonus: +50 πόντοι! 🎉', 'green'), 1200);
-  if (refCode) setTimeout(() => showToast('🎁 Referral bonus: +100 πόντοι για εσένα! 🎉', 'green'), marketingOptIn ? 3000 : 1800);
+  // The +50/+100 toasts are gated on email verification — show them only
+  // after the user verifies their email (handled by the polling in main.js).
+  // Display a guidance toast pointing the user to their inbox.
+  setTimeout(() => showToast('📧 Έλεγξε το email σου για να ξεκλειδώσεις τους πόντους σου', 'green'), 1500);
 
   if ('Notification' in window && Notification.permission === 'default') {
     setTimeout(_showPushOnboarding, 3500);

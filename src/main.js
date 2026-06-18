@@ -894,6 +894,7 @@ export async function startApp() {
   loadHistory();
   startLiveListener();
   _startMaintenanceListener();
+  _startEmailVerifyFlow();
 
   if ('Notification' in window && Notification.permission !== 'denied') {
     const pushSection = document.getElementById('push-section');
@@ -912,6 +913,185 @@ export async function startApp() {
   }
 
   _bindHeaderScroll(document.querySelector('.tab-pane.active'));
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  EMAIL-VERIFY BANNER + POLLING
+// ════════════════════════════════════════════════════════════════════════
+//
+// Dual-verification model (paired with SMS OTP already done at signup):
+//   • SMS OTP confirms phone → gates customer doc creation.
+//   • Email verification confirms inbox → gates +50/+100 bonuses
+//     (server-side CRIT-1 fix on /send-welcome and /process-referral).
+//
+// This function shows a persistent top banner whenever the signed-in user
+// has emailVerified=false. Polls authUser.reload() every 30s; when the user
+// flips to verified, the banner is removed, a success toast is shown, and
+// /send-welcome + /process-referral are re-triggered so any pending bonuses
+// finally land.
+//
+// Also auto-detects the return from Firebase's verify page: if URL contains
+// `?verified=1` (the continueUrl we asked Firebase to redirect to), we run
+// one immediate reload + bonus retrigger before settling into the 30s loop.
+let _emailVerifyTimer = null;
+let _emailVerifyLastResend = 0;
+const _EMAIL_VERIFY_RESEND_COOLDOWN_MS = 60_000;
+const _EMAIL_VERIFY_POLL_MS = 30_000;
+
+function _startEmailVerifyFlow() {
+  if (window.DEMO) return;
+  const authUser = window._auth?.currentUser;
+  if (!authUser) return;
+
+  // Auto-detect return from verify flow (?verified=1)
+  try {
+    const params = new URLSearchParams(location.search);
+    if (params.get('verified') === '1') {
+      // Clean the URL so reload doesn't re-trigger forever
+      const cleanUrl = location.pathname + location.hash;
+      history.replaceState({}, '', cleanUrl);
+      // Force a fast first check
+      setTimeout(() => _checkEmailVerified(true), 800);
+    }
+  } catch (_) {}
+
+  if (authUser.emailVerified === true) {
+    _hideEmailVerifyBanner();
+    return;
+  }
+
+  _showEmailVerifyBanner();
+  _stopEmailVerifyPolling();
+  _emailVerifyTimer = setInterval(_checkEmailVerified, _EMAIL_VERIFY_POLL_MS);
+}
+
+function _stopEmailVerifyPolling() {
+  if (_emailVerifyTimer) { clearInterval(_emailVerifyTimer); _emailVerifyTimer = null; }
+}
+
+async function _checkEmailVerified(fastPath = false) {
+  const authUser = window._auth?.currentUser;
+  if (!authUser) { _stopEmailVerifyPolling(); return; }
+  try {
+    await authUser.reload();
+  } catch (e) {
+    logger.warn('[verify-poll] reload failed:', e?.message || e);
+    return;
+  }
+  if (authUser.emailVerified !== true) return;
+
+  // ✅ Verified — celebrate, retrigger bonuses, stop polling.
+  _stopEmailVerifyPolling();
+  _hideEmailVerifyBanner();
+  showToast('🎉 Email επιβεβαιώθηκε! Τα bonuses ενεργοποιούνται…', 'green');
+
+  // Retrigger Worker bonuses now that the token will pass emailVerified gate.
+  try {
+    const idToken = await authUser.getIdToken(true);
+    const name = state.foundCustomer?.name || authUser.displayName || '';
+    const marketingOptIn = !!state.foundCustomer?.marketingOptIn;
+    // /send-welcome — idempotent via marketingWelcomeProcessed
+    fetch(_WORKER_URL + '/send-welcome', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken, name, marketingOptIn }),
+    }).catch(() => {});
+    // /process-referral — idempotent via referralProcessed flag in queue doc
+    fetch(_WORKER_URL + '/process-referral', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    }).catch(() => {});
+  } catch (e) {
+    logger.warn('[verify-poll] bonus retrigger failed:', e?.message || e);
+  }
+
+  if (fastPath) {
+    // Came back via ?verified=1 — give a longer toast trail.
+    setTimeout(() => showToast('🎁 Έλεγξε το ιστορικό για τους πόντους που μόλις προστέθηκαν!', 'green'), 2500);
+  }
+}
+
+function _showEmailVerifyBanner() {
+  if (document.getElementById('email-verify-banner')) return;
+
+  const authUser = window._auth?.currentUser;
+  const email = authUser?.email || '';
+
+  const banner = document.createElement('div');
+  banner.id = 'email-verify-banner';
+  banner.style.cssText = `
+    position:fixed;top:0;left:0;right:0;z-index:9000;
+    background:linear-gradient(135deg,#fff6e0 0%,#ffeec2 100%);
+    border-bottom:1px solid #f5c150;
+    padding:10px 14px;
+    font-family:var(--font);font-size:.84rem;line-height:1.35;color:#5a3d00;
+    display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;
+    box-shadow:0 2px 8px rgba(0,0,0,.06);
+  `;
+  banner.innerHTML = `
+    <span style="font-size:1.1rem">📧</span>
+    <span style="font-weight:700;flex:1;min-width:0">
+      Έλεγξε το <strong>${email ? email.replace(/[<>]/g, '') : 'email σου'}</strong> για να ξεκλειδώσεις τους πόντους σου
+    </span>
+    <button id="email-verify-resend" style="background:#0a0a0a;color:#8ae900;border:none;font-family:inherit;font-weight:900;font-size:.78rem;padding:7px 14px;border-radius:8px;cursor:pointer;letter-spacing:.3px">
+      Στείλε ξανά
+    </button>
+  `;
+  document.body.appendChild(banner);
+
+  // Push the app content down so the banner doesn't cover the header.
+  document.body.style.paddingTop = banner.offsetHeight + 'px';
+
+  document.getElementById('email-verify-resend').addEventListener('click', _resendVerifyEmail);
+}
+
+function _hideEmailVerifyBanner() {
+  const el = document.getElementById('email-verify-banner');
+  if (el) el.remove();
+  document.body.style.paddingTop = '';
+}
+
+async function _resendVerifyEmail() {
+  const btn = document.getElementById('email-verify-resend');
+  const now = Date.now();
+  if (now - _emailVerifyLastResend < _EMAIL_VERIFY_RESEND_COOLDOWN_MS) {
+    const sec = Math.ceil((_EMAIL_VERIFY_RESEND_COOLDOWN_MS - (now - _emailVerifyLastResend)) / 1000);
+    showToast(`⏳ Δοκίμασε ξανά σε ${sec}s.`, 'orange');
+    return;
+  }
+  _emailVerifyLastResend = now;
+  if (btn) { btn.disabled = true; btn.style.opacity = '.6'; btn.textContent = 'Αποστολή…'; }
+
+  try {
+    const authUser = window._auth?.currentUser;
+    if (!authUser) throw new Error('not signed in');
+    const idToken = await authUser.getIdToken(true);
+    const res = await fetch(_WORKER_URL + '/send-verification-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.alreadyVerified) {
+      _hideEmailVerifyBanner();
+      _stopEmailVerifyPolling();
+      showToast('✅ Το email σου είναι ήδη επιβεβαιωμένο!', 'green');
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    showToast('📨 Στάλθηκε! Έλεγξε το inbox σου (και τον φάκελο spam).', 'green');
+  } catch (e) {
+    logger.warn('[verify-resend] error:', e?.message || e);
+    showToast('❌ Αποτυχία αποστολής. Δοκίμασε σε λίγο.', 'red');
+    _emailVerifyLastResend = 0; // allow immediate retry on hard failure
+  } finally {
+    if (btn) {
+      setTimeout(() => {
+        btn.disabled = false; btn.style.opacity = '1'; btn.textContent = 'Στείλε ξανά';
+      }, 2000);
+    }
+  }
 }
 
 // ════════════════════════════════════════
