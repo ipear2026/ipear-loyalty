@@ -190,11 +190,65 @@ async function _generateUniquePendingCode(maxTries = 3) {
   return String(100000 + (_rnd[0] % 900000));
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  ACCOUNT DELETION KICK-OUT
+//  Centralised so listener + polling fallback + ghost-autoLogin guard
+//  all converge on the same teardown. Critical that we AWAIT signOut
+//  and hard-reload — otherwise Firebase Auth's persisted IndexedDB
+//  session resurrects on the next page load and the user appears
+//  "still signed in" to a deleted account.
+// ════════════════════════════════════════════════════════════════════
+let _kickInFlight = false;
+export async function _kickOutDeletedAccount(reason = 'deleted') {
+  if (_kickInFlight) return;
+  _kickInFlight = true;
+  logger.warn('[kick-out] account no longer exists — reason:', reason);
+  _forceCleanup();
+  state.foundCustomer = null;
+  // Clear EVERY persistence key the customer flow touches. The old code
+  // missed ipear_offline_card and any vendor sw key, so a quick reload
+  // could rehydrate stale identity from disk.
+  try {
+    [
+      'ipear_rem',
+      'ipear_customer_cache',
+      'ipear_offline_card',
+    ].forEach(k => localStorage.removeItem(k));
+  } catch(_) {}
+  // Block any concurrent UI from re-rendering against the dead doc.
+  try { document.getElementById('redeem-overlay').style.display = 'none'; } catch(_) {}
+  try { document.getElementById('offer-qr-overlay').style.display = 'none'; } catch(_) {}
+  // AWAIT signOut so the Firebase Auth IndexedDB session is actually
+  // torn down before we hand control back. Previously this was fire-
+  // and-forget which is the dominant cause of "still signed in after
+  // deletion" — the page would reload while signOut was mid-flight.
+  try {
+    if (window._auth?.currentUser && window._signOut) {
+      await window._signOut(window._auth);
+      logger.log('[kick-out] signOut completed');
+    }
+  } catch (e) {
+    logger.error('[kick-out] signOut failed — forcing reload anyway:', e?.code || e?.message || e);
+  }
+  showToast(reason === 'deleted'
+    ? '🗑 Ο λογαριασμός σου διαγράφηκε.'
+    : '⚠️ Η σύνδεσή σου τερματίστηκε.',
+    'red');
+  // Hard reload after a short visual delay. We use location.reload(true)
+  // semantics (modern: just location.reload) so any in-memory state is
+  // wiped and the next boot starts from a clean Firebase Auth state.
+  setTimeout(() => {
+    try { location.reload(); }
+    catch(_) { showScreen('s-phone'); _initCheckboxStyle(); }
+  }, 1800);
+}
+
 // ════════════════════════════════════════
 //  FORCE CLEANUP (all listeners/timers)
 // ════════════════════════════════════════
 export function _forceCleanup() {
   stopLiveListener();
+  _stopExistencePoll();
   stopOffersListener();
   stopLbListener();
   if (state._maintenanceUnsub) { try { state._maintenanceUnsub(); } catch(_) {} state._maintenanceUnsub = null; }
@@ -212,6 +266,7 @@ export function _forceCleanup() {
 function startLiveListener() {
   stopLiveListener();
   if (!state.foundCustomer?.id || window.DEMO) return;
+  _startExistencePoll();
   // HOTFIX: the first snapshot is INITIAL HYDRATION, not a points-change
   // event. Without this guard, users whose state.foundCustomer was
   // pre-populated from a query of a different doc (legacy random-id ≠
@@ -226,12 +281,33 @@ function startLiveListener() {
     _liveUnsub = window._onSnapshot(ref, snap => {
       try {
       if (!snap.exists()) {
-        _forceCleanup();
-        window._signOut?.(window._auth).catch(()=>{});
-        state.foundCustomer = null;
-        localStorage.removeItem(_REM_KEY); localStorage.removeItem('ipear_customer_cache');
-        showToast('🗑 Ο λογαριασμός σου διαγράφηκε.', 'red');
-        setTimeout(() => { showScreen('s-phone'); _initCheckboxStyle(); }, 1500);
+        // Doc removed by admin OR by the customer's own self-migration
+        // delete of the legacy random-id doc. Distinguish the two: a
+        // migration delete leaves a uid-keyed doc behind that the auth
+        // user can still read. If we can fetch ipear_customers/{auth.uid}
+        // and it exists, this is a migration cleanup — re-mount the
+        // listener on the new doc and do NOT kick the user out.
+        (async () => {
+          try {
+            const authUid = window._auth?.currentUser?.uid;
+            if (authUid && authUid !== state.foundCustomer?.id) {
+              const newRef  = window._doc(window._db, 'ipear_customers', authUid);
+              const newSnap = await window._getDoc(newRef);
+              if (newSnap.exists()) {
+                logger.log('[live] legacy doc gone but uid-keyed exists — re-mounting listener on uid');
+                state.foundCustomer = { id: authUid, ...newSnap.data() };
+                stopLiveListener();
+                startLiveListener();
+                return;
+              }
+            }
+            // Genuine deletion (no replacement doc): kick out.
+            _kickOutDeletedAccount('deleted');
+          } catch (e) {
+            logger.error('[live] resilience check failed — falling through to kick-out:', e?.code || e?.message || e);
+            _kickOutDeletedAccount('deleted');
+          }
+        })();
         return;
       }
       const data = snap.data();
@@ -240,11 +316,7 @@ function startLiveListener() {
       const newTot = data.totalPoints || 0;
       state.foundCustomer = { ...state.foundCustomer, ...data };
       if (data.blocked) {
-        _forceCleanup();
-        window._signOut(window._auth).catch(()=>{});
-        state.foundCustomer = null;
-        localStorage.removeItem(_REM_KEY); localStorage.removeItem('ipear_customer_cache');
-        showScreen('s-phone'); _initCheckboxStyle();
+        _kickOutDeletedAccount('blocked');
         return;
       }
       if (_isFirstFire) {
@@ -258,12 +330,69 @@ function startLiveListener() {
       if (_rcEl) _rcEl.textContent = data.referralCount || 0;
       try { localStorage.setItem('ipear_offline_card', JSON.stringify({ name: state.foundCustomer.name, card: state.foundCustomer.card, points: newPts, tier: _lastKnownTierCls || 'bronze', tierIcon: '' })); } catch(_) {}
       } catch(_liveErr) { logger.error('[live] callback error:', _liveErr); }
+    },
+    // Subscription-level error path. Most relevant code:
+    //   • permission-denied — rules now reject our read. Happens when the
+    //     doc has been deleted (resource.data is undefined → ownsCustomer
+    //     fails) or the customer was un-linked from the uid. Treat as
+    //     deletion and kick out.
+    //   • unavailable / cancelled — transient, the SDK auto-retries.
+    //     Existence-poll fallback covers the case where reconnect drops
+    //     a delete event; do nothing here.
+    (err) => {
+      logger.warn('[live] subscription error:', err?.code || err?.message || err);
+      if (err?.code === 'permission-denied') {
+        _kickOutDeletedAccount('deleted');
+      }
     });
   } catch(e) { logger.warn('[live]', e); }
 }
 
 function stopLiveListener() {
   if (_liveUnsub) { try { _liveUnsub(); } catch(_) {} _liveUnsub = null; }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  EXISTENCE POLLING FALLBACK
+//  onSnapshot can miss events when the tab was backgrounded, the device
+//  went offline, or the WebSocket reconnect dropped a delta. Belt-and-
+//  braces: every 2 min while signed in we re-read the customer doc; if
+//  it has gone missing we trigger the same kick-out path as the live
+//  listener. Light load (1 read / 2 min / user) and worth it for the
+//  GDPR-correctness guarantee.
+// ════════════════════════════════════════════════════════════════════
+let _existencePollTimer = null;
+const _EXISTENCE_POLL_MS = 2 * 60 * 1000;
+
+function _startExistencePoll() {
+  _stopExistencePoll();
+  if (window.DEMO) return;
+  _existencePollTimer = setInterval(async () => {
+    const id = state.foundCustomer?.id;
+    if (!id) { _stopExistencePoll(); return; }
+    try {
+      const snap = await window._getDoc(window._doc(window._db, 'ipear_customers', id));
+      if (!snap.exists()) {
+        logger.warn('[existence-poll] customer doc missing — triggering kick-out');
+        _kickOutDeletedAccount('deleted');
+      }
+    } catch (e) {
+      // Permission-denied is the signal that the doc is gone AND we're
+      // no longer allowed to read it (rule denied via ownsCustomer).
+      // Treat as deletion. Anything else (network / App Check) is a
+      // transient failure — silently retry next tick.
+      if (e?.code === 'permission-denied') {
+        logger.warn('[existence-poll] permission-denied — treating as deleted');
+        _kickOutDeletedAccount('deleted');
+      } else {
+        logger.warn('[existence-poll] transient error, retrying next tick:', e?.code || e?.message || e);
+      }
+    }
+  }, _EXISTENCE_POLL_MS);
+}
+
+function _stopExistencePoll() {
+  if (_existencePollTimer) { clearInterval(_existencePollTimer); _existencePollTimer = null; }
 }
 
 function _animateLivePointsChange(oldPts, newPts, newTot) {
