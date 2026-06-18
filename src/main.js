@@ -205,6 +205,15 @@ export function _forceCleanup() {
 function startLiveListener() {
   stopLiveListener();
   if (!state.foundCustomer?.id || window.DEMO) return;
+  // HOTFIX: the first snapshot is INITIAL HYDRATION, not a points-change
+  // event. Without this guard, users whose state.foundCustomer was
+  // pre-populated from a query of a different doc (legacy random-id ≠
+  // uid-keyed) — or any path where the live-listener target doc has a
+  // different `points` value than the hydrated state — see a spurious
+  // ±balance popup on every login (+4730, -600, etc.).
+  // The popup must only fire on REAL changes that happen WHILE the user
+  // is in the app (worker credits +50/+100, admin add/redeem, etc.).
+  let _isFirstFire = true;
   try {
     const ref = window._doc(window._db, 'ipear_customers', state.foundCustomer.id);
     _liveUnsub = window._onSnapshot(ref, snap => {
@@ -231,7 +240,11 @@ function startLiveListener() {
         showScreen('s-phone'); _initCheckboxStyle();
         return;
       }
-      if (newPts !== oldPts) {
+      if (_isFirstFire) {
+        // Initial sync — refresh the header silently, never popup.
+        _isFirstFire = false;
+        try { _refreshPointsUI(); } catch(_) {}
+      } else if (newPts !== oldPts) {
         _animateLivePointsChange(oldPts, newPts, newTot);
       }
       const _rcEl = document.getElementById('ref-count-val');
