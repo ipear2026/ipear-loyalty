@@ -500,6 +500,10 @@ export async function submitRegister() {
       btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
     }
 
+    // Pre-OTP duplicate check — saves an SMS credit when the email/phone is
+    // already registered. Fail-closed on network/5xx so we never burn SMS on
+    // an unverifiable signup attempt (was the cause of the credit leak —
+    // previously `catch(_) {}` proceeded silently to /send-sms-otp).
     try {
       const _checkUrl = _WORKER_URL + '/check-registration';
       const _checkRes = await fetch(_checkUrl, {
@@ -517,6 +521,15 @@ export async function submitRegister() {
           err.textContent = '⚠️ Υπάρχει ήδη λογαριασμός με αυτά τα στοιχεία. Δοκίμασε σύνδεση.';
           btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
         }
+        // If worker fell back to degraded mode (missing service-account, KV
+        // outage), it returns `{exists:false, degraded:true}`. We let signup
+        // continue — Firebase Auth's email-already-in-use error at create
+        // time is the next backstop and does not cost an SMS by itself, but
+        // the SMS would still be sent first. Surface the degradation as a
+        // soft warning so ops sees it in user reports.
+        if (_checkData.degraded) {
+          logger.warn('[register] check-registration degraded — proceeding without duplicate check');
+        }
       } else if (_checkRes.status === 429) {
         err.textContent = '🔴 Πολλές προσπάθειες. Δοκίμασε σε λίγα λεπτά.';
         btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
@@ -526,8 +539,20 @@ export async function submitRegister() {
       } else if (_checkRes.status >= 400 && _checkRes.status < 500) {
         err.textContent = '⚠️ Έλεγξε τα στοιχεία σου και δοκίμασε ξανά.';
         btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
+      } else {
+        // 5xx other than 503 → fail-closed; do not burn an SMS credit.
+        logger.warn('[register] check-registration unexpected status:', _checkRes.status);
+        err.textContent = '🔴 Προσωρινό πρόβλημα. Δοκίμασε σε λίγα λεπτά.';
+        btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
       }
-    } catch(_checkErr) {}
+    } catch (_checkErr) {
+      // Network failure / CORS / aborted — fail-closed. Previously this was
+      // a silent `catch(_) {}` that let the flow fall through to
+      // /send-sms-otp and burn a credit on every retry.
+      logger.warn('[register] check-registration network error:', _checkErr?.message || _checkErr);
+      err.textContent = '⚠️ Δεν μπόρεσα να επαληθεύσω τα στοιχεία. Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά.';
+      btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
+    }
 
     _regData = { name, phone, email, password: p1, birthday, refCode, marketingOptIn };
 

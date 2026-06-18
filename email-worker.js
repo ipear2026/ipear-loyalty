@@ -2528,28 +2528,25 @@ function isCheckRegLimited(ip) {
   return b.hits > CHECK_REG_RATE_MAX;
 }
 
-// MEDIUM-2: /check-registration is intentionally a NON-ORACLE now.
+// MEDIUM-2 → re-enabled with HIGH-4 mitigation.
 //
-// Previous behavior returned `{ exists: boolean, blocked: boolean }`, which —
-// even with a randomized timing delay — let an unauthenticated attacker
-// enumerate which emails/phones are registered (3 reqs/IP/15min × IPv6
-// rotation = unbounded harvest of a customer list). The endpoint stays alive
-// because removing it would 404 legacy client builds in the wild and the
-// frontend code branches gracefully on absent `exists`. We:
-//   • Keep input validation (defends against garbage payloads).
-//   • Keep rate limiting (defends against resource amplification).
-//   • Skip every Firestore read (saves cost + closes the oracle).
-//   • Preserve the 200-600 ms response delay so request timing is
-//     indistinguishable from the legacy code path.
-//   • Return a constant `{ ok: true }` regardless of input.
+// History:
+//   • Original: returned { exists, blocked } — a small enumeration oracle.
+//   • Post-MEDIUM-2: made into a no-op that always returned { ok: true } so
+//     attackers couldn't harvest the customer list via IPv6 rotation.
+//   • Post-HIGH-4 (IPv6 /64 collapse): rotating IPv6 buckets to /64 caps a
+//     single attacker at 3 reqs / 15 min / /64 even with a free /64 prefix.
+//     That changes the enumeration economics enough to re-enable the check
+//     and stop burning Brevo SMS credit on every duplicate signup attempt.
 //
-// Client implication: the signup duplicate-detection UI and the legacy
-// first-login auto-detection both rely on the old `exists` field. Both
-// degrade gracefully (signup falls through to Firebase Auth's
-// "email-already-in-use" error; legacy first-login users must use the
-// forgot-password flow). Plan a follow-up to remove the dead client calls
-// in src/auth.js and replace the legacy-first-login flow with a magic-link
-// or admin-issued claim mechanism.
+// Defenses kept in place:
+//   • Per-/64 rate limit (3 / 15 min) via rateLimitOrBlock with HIGH-4 key.
+//   • Constant-time 200–600 ms delay so request timing is independent of
+//     whether the email/phone hit a Firestore document.
+//   • Identical 200 response shape on both "exists" and "not exists" so
+//     downstream timing / size attacks see no difference.
+//   • Service-account Firestore read (not anonymous) so the query path is
+//     auditable in GCP logs alongside other admin endpoints.
 async function handleCheckRegistration(request, env, CORS) {
   const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
   pruneRateBuckets();
@@ -2568,11 +2565,72 @@ async function handleCheckRegistration(request, env, CORS) {
   if (phone && !/^6\d{9}$/.test(phone))
     return resp({ error: 'Invalid phone format' }, 400, CORS);
 
-  // Constant-time-ish delay so attackers can't distinguish input shapes
-  // (200–600 ms — matches the legacy response distribution).
-  await new Promise(r => setTimeout(r, 200 + Math.random() * 400));
+  // Constant-time-ish delay (200–600 ms) regardless of lookup outcome.
+  const delay = new Promise(r => setTimeout(r, 200 + Math.random() * 400));
 
-  return resp({ ok: true }, 200, CORS);
+  let exists = false;
+  let blocked = false;
+  try {
+    if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID) {
+      // No service account → fail OPEN (treat as "not found"). The client
+      // then proceeds to OTP; Firebase Auth's auth/email-already-in-use is
+      // the next backstop. We do not want to fail-closed on a config issue
+      // and lock everyone out of signup.
+      await delay;
+      return resp({ exists: false, blocked: false, degraded: true }, 200, CORS);
+    }
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId   = env.FCM_PROJECT_ID;
+    const fsBase      = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`;
+    const fsHeaders   = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+
+    async function structuredQuery(field, value) {
+      const q = {
+        structuredQuery: {
+          from: [{ collectionId: 'ipear_customers' }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: field },
+              op:    'EQUAL',
+              value: { stringValue: value },
+            },
+          },
+          limit: 1,
+        },
+      };
+      const r = await fetch(fsBase, { method: 'POST', headers: fsHeaders, body: JSON.stringify(q) });
+      if (!r.ok) return { exists: false, blocked: false };
+      const rows = await r.json();
+      for (const row of rows) {
+        if (row && row.document) {
+          const f = row.document.fields || {};
+          const isBlocked = f.blocked && (f.blocked.booleanValue === true);
+          return { exists: true, blocked: !!isBlocked };
+        }
+      }
+      return { exists: false, blocked: false };
+    }
+
+    if (email) {
+      const r = await structuredQuery('email', email);
+      exists  = exists  || r.exists;
+      blocked = blocked || r.blocked;
+    }
+    if (!exists && phone) {
+      const r = await structuredQuery('phone', phone);
+      exists  = exists  || r.exists;
+      blocked = blocked || r.blocked;
+    }
+  } catch (e) {
+    console.error('[check-registration] lookup failed:', e.message);
+    // Fail OPEN on transient errors (see note above). Worker tail will show
+    // the failure for ops investigation.
+    await delay;
+    return resp({ exists: false, blocked: false, degraded: true }, 200, CORS);
+  }
+
+  await delay;
+  return resp({ exists, blocked }, 200, CORS);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
