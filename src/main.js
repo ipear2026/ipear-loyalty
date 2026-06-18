@@ -52,13 +52,20 @@ export async function _migrateCustomerToUid(oldDocId, uid) {
   if (!uid || !oldDocId || oldDocId === uid || window.DEMO) return;
   const db = window._db;
   const newRef = window._doc(db, 'ipear_customers', uid);
-  const newSnap = await window._getDoc(newRef);
+  const oldRef = window._doc(db, 'ipear_customers', oldDocId);
+
+  // Fan out the two reads (saves ~150-300ms over the legacy serial path).
+  // The old-doc read is "wasted" only when uid-keyed already exists — the
+  // fast path we don't care about optimising further.
+  const [newSnap, oldSnap] = await Promise.all([
+    window._getDoc(newRef),
+    window._getDoc(oldRef),
+  ]);
+
   if (newSnap.exists()) {
     state.foundCustomer = { id: uid, ...newSnap.data() };
     return;
   }
-  const oldRef = window._doc(db, 'ipear_customers', oldDocId);
-  const oldSnap = await window._getDoc(oldRef);
   if (!oldSnap.exists()) return;
   const data = oldSnap.data();
   await window._setDoc(newRef, { ...data, uid, _migratedFrom: oldDocId });

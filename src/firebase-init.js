@@ -277,11 +277,22 @@ if (IS_DEMO) {
     } catch(e) {
       const { _setPushUI: resetUI } = await import('./push-notifications.js');
       resetUI(false);
-      const msg = e.message === 'timeout'
-        ? '⏳ Η ενεργοποίηση καθυστερεί, δοκιμάστε ξανά'
-        : '❌ ' + e.message;
-      showToast(msg, 'red');
-      logger.error('[push enable]', e);
+      // Map known FCM error codes to user-friendly Greek copy. Raw e.message
+      // is something like "FirebaseError: Messaging: A problem occurred while
+      // subscribing the user to FCM (messaging/permission-blocked). (...)" —
+      // useless to a real user. logger.error keeps the raw form for ops.
+      const friendly =
+          e.message === 'timeout'                                  ? '⏳ Η ενεργοποίηση καθυστερεί, δοκιμάστε ξανά'
+        : e.code === 'messaging/permission-blocked'                ? '🔕 Έχεις μπλοκάρει τα notifications από τις ρυθμίσεις του browser. Άνοιξε τις άδειες της σελίδας και δοκίμασε ξανά.'
+        : e.code === 'messaging/permission-default'                ? '🔕 Δεν δόθηκε άδεια. Δοκίμασε ξανά και πάτησε "Επιτρέπεται".'
+        : e.code === 'messaging/failed-service-worker-registration' ? '🔄 Πρόβλημα service worker. Κάνε hard refresh (Cmd/Ctrl+Shift+R) και δοκίμασε ξανά.'
+        : e.code === 'messaging/unsupported-browser'               ? '🚫 Ο browser σου δεν υποστηρίζει push notifications.'
+        : e.code === 'messaging/token-subscribe-failed'            ? '📡 Αποτυχία εγγραφής. Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά.'
+        : e.code === 'messaging/token-subscribe-no-token'          ? '📡 Δεν δόθηκε token από το FCM. Δοκίμασε ξανά σε λίγο.'
+        : e.name === 'AbortError'                                  ? '⏳ Λήξη χρόνου, δοκίμασε ξανά.'
+        :                                                            '❌ Σφάλμα ενεργοποίησης notifications.';
+      showToast(friendly, 'red');
+      logger.error('[push enable]', e.code || e.name, e.message);
     } finally {
       _pushBusy = false;
     }

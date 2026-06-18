@@ -225,8 +225,11 @@ export async function autoLogin(email) {
     localStorage.setItem(_CACHE_KEY, JSON.stringify(state.foundCustomer));
     const authUid = window._auth?.currentUser?.uid;
     if (authUid && state.foundCustomer.id !== authUid) {
-      try { await _migrateCustomerToUid(state.foundCustomer.id, authUid); }
-      catch (e) { logger.warn('[migrate-uid] failed:', e?.code || e?.message || e); }
+      // Fire-and-forget: UI advances on the (still-correct) legacy data while
+      // migration finishes in the background. setDoc + deleteDoc are
+      // idempotent, so a re-login while in-flight just retries cleanly.
+      _migrateCustomerToUid(state.foundCustomer.id, authUid)
+        .catch(e => logger.warn('[migrate-uid] background:', e?.code || e?.message || e));
     }
     logger.log('%c[AUTO-LOGIN] ✅ Firestore OK → _transitionToApp()', 'color:#00cc00;font-weight:bold;font-size:16px');
     _transitionToApp();
@@ -842,8 +845,11 @@ export async function submitPhone() {
     }
 
     if (firebaseUID && state.foundCustomer.id !== firebaseUID) {
-      try { await _migrateCustomerToUid(state.foundCustomer.id, firebaseUID); }
-      catch (e) { logger.warn('[migrate-uid] failed:', e?.code || e?.message || e); }
+      // Fire-and-forget so submitPhone returns control to the UI immediately;
+      // the user lands in the app on the legacy doc, migration converges
+      // in the background.
+      _migrateCustomerToUid(state.foundCustomer.id, firebaseUID)
+        .catch(e => logger.warn('[migrate-uid] background:', e?.code || e?.message || e));
     } else if (firebaseUID && state.foundCustomer.uid !== firebaseUID) {
       try {
         await window._updateDoc(window._doc(window._db,'ipear_customers',state.foundCustomer.id), {uid: firebaseUID});
