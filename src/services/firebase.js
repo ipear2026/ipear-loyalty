@@ -97,21 +97,37 @@ export function setPersistenceMode(mode) {
 //   3. query where email == email                  — legacy email-keyed
 //
 // Returns `{ customer, error }`:
-//   • customer  — the customer doc if any branch hit, else null
-//   • error     — the LAST transient failure observed, or null if every
-//                 attempted read succeeded (including "succeeded but empty").
+//   • customer    — the customer doc if any branch hit, else null
+//   • error       — `null` if every read succeeded (including "succeeded
+//                   but empty") OR if all failures were `permission-denied`
+//                   (which Firestore returns for queries that no longer
+//                   have any matching docs the caller can read — the
+//                   semantic equivalent of "not found" for our flow).
+//                   A non-null error means a TRANSIENT failure (network,
+//                   App Check, Firestore unavailable) — caller should
+//                   surface a "connection error" UI instead of "no account".
 //
-// Callers use the error/null distinction to show "σύνδεση απέτυχε" instead
-// of a misleading "δεν βρέθηκε λογαριασμός" when App Check / network /
-// Firestore is unreachable.
+// Why permission-denied is treated as "not found":
+//   After account deletion the customer's Firestore docs are gone, so
+//   the email-where query has no matching docs. Firestore rejects the
+//   query entirely (rather than returning empty) because the rule's
+//   isVerifiedAuth() branch cannot be satisfied for a missing resource.
+//   Conflating that with a network error sends users into a confusing
+//   "App Check problem" message when their account simply does not
+//   exist. Treating it as not-found is the correct UX.
 export async function findCustomerByAuth(authUid, email, { logger } = {}) {
   const _log = logger || { warn: () => {} };
   let found = null;
-  let lastError = null;
+  let transientError = null;
 
   function noteError(label, e) {
-    lastError = { label, code: e?.code || null, message: e?.message || String(e) };
-    _log.warn(`[findCustomerByAuth] ${label} failed:`, lastError.code || lastError.message);
+    const code = e?.code || null;
+    _log.warn(`[findCustomerByAuth] ${label} failed:`, code || e?.message || e);
+    // permission-denied = the caller has no claim to read this collection
+    // for this query shape — semantically "no account exists for me",
+    // not a network/App Check problem. Do not bubble it up as transient.
+    if (code === 'permission-denied') return;
+    transientError = { label, code, message: e?.message || String(e) };
   }
 
   if (authUid) {
@@ -139,5 +155,5 @@ export async function findCustomerByAuth(authUid, email, { logger } = {}) {
     } catch (e) { noteError('email', e); }
   }
 
-  return { customer: found, error: found ? null : lastError };
+  return { customer: found, error: found ? null : transientError };
 }

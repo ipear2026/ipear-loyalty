@@ -831,6 +831,15 @@ export async function submitPhone() {
     const lookup = await findCustomerByAuth(firebaseUID, email, { logger });
     state.foundCustomer = lookup.customer;
     if (!state.foundCustomer) {
+      // No customer doc + no transient error = the loyalty account does
+      // not exist (post-deletion, or never registered through this flow).
+      // We DID succeed at Firebase Auth signIn though — leaving that
+      // session alive lets onAuthStateChanged restore an orphan user on
+      // the next page load, which feels like "ghost login". Tear it down.
+      if (!lookup.error) {
+        try { await window._signOut(window._auth); }
+        catch (e) { logger.warn('[login] orphan signOut failed:', e?.code || e?.message || e); }
+      }
       err.textContent = lookup.error
         ? '⚠️ Σφάλμα σύνδεσης ή App Check. Έλεγξε το δίκτυό σου και δοκίμασε ξανά.'
         : '❌ Δεν βρέθηκε loyalty λογαριασμός για αυτό το email.';
