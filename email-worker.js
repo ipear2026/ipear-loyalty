@@ -2514,7 +2514,11 @@ async function handleResetPassword(request, env, CORS) {
 //  Rate-limited: 10 requests per 15 min per IP.
 //
 // ══════════════════════════════════════════════════════════════════════════
-const CHECK_REG_RATE_MAX = 3;
+// 10 / 15 min / /64 — relaxed from 3 once /check-registration became a real
+// Firestore lookup again (was a no-op under MEDIUM-2). 3 was too tight for
+// legitimate users hitting typo/refresh/back-button. Enumeration economics
+// are bounded by HIGH-4 IPv6 /64 collapse + constant-time delay.
+const CHECK_REG_RATE_MAX = 10;
 const _checkRegBuckets = new Map();
 
 function isCheckRegLimited(ip) {
