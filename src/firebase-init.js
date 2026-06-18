@@ -25,20 +25,22 @@ import {
 } from 'firebase/messaging';
 import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 
+// Build-time env only. No production-key fallbacks: a missing or placeholder
+// VITE_FB_API_KEY routes the app into DEMO mode (see IS_DEMO below) instead of
+// silently using prod credentials. CI uses .env.example placeholders → DEMO.
 export const firebaseConfig = {
-  apiKey:            import.meta.env.VITE_FB_API_KEY            ?? 'AIzaSyBNnRTmoR5ZIrJAXz3IwQbvXQZFgdt5zvY',
-  authDomain:        import.meta.env.VITE_FB_AUTH_DOMAIN        ?? 'loyalty-ipear.firebaseapp.com',
-  projectId:         import.meta.env.VITE_FB_PROJECT_ID         ?? 'loyalty-ipear',
-  storageBucket:     import.meta.env.VITE_FB_STORAGE_BUCKET     ?? 'loyalty-ipear.firebasestorage.app',
-  messagingSenderId: import.meta.env.VITE_FB_MSG_SENDER_ID      ?? '927652567960',
-  appId:             import.meta.env.VITE_FB_APP_ID             ?? '1:927652567960:web:8330b9de98d4ef215ca9ed',
+  apiKey:            import.meta.env.VITE_FB_API_KEY            ?? 'YOUR_API_KEY',
+  authDomain:        import.meta.env.VITE_FB_AUTH_DOMAIN        ?? '',
+  projectId:         import.meta.env.VITE_FB_PROJECT_ID         ?? '',
+  storageBucket:     import.meta.env.VITE_FB_STORAGE_BUCKET     ?? '',
+  messagingSenderId: import.meta.env.VITE_FB_MSG_SENDER_ID      ?? '',
+  appId:             import.meta.env.VITE_FB_APP_ID             ?? '',
 };
 export const CUSTOMER_BUILD_TAG = 'customer-20260615-v55';
 window.CUSTOMER_BUILD_TAG = CUSTOMER_BUILD_TAG;
 logger.log('customer.html loaded', CUSTOMER_BUILD_TAG);
 
-export const VAPID_KEY = import.meta.env.VITE_FCM_VAPID_KEY
-  ?? 'BIwQ-DWzj_i_fxAGA1WTps4aaledQ3ktF0A-M2MyW5k-PZrY7YxasQ9TWXz-2-b8t_qnnLxN-KgkBFj4hEBRVK8';
+export const VAPID_KEY = import.meta.env.VITE_FCM_VAPID_KEY ?? '';
 
 // E2E-FIX: capture silent promise rejections for diagnostics
 window.addEventListener('unhandledrejection', (ev) => {
@@ -53,7 +55,9 @@ if (!window._togglePush) {
   };
 }
 
-const IS_DEMO = firebaseConfig.apiKey==='YOUR_API_KEY';
+const IS_DEMO = !firebaseConfig.apiKey
+  || firebaseConfig.apiKey === 'YOUR_API_KEY'
+  || /^AIzaSy?X{3,}/i.test(firebaseConfig.apiKey);
 if (IS_DEMO) {
   window.DEMO=true;
   const _DC=[

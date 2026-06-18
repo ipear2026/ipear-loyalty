@@ -57,6 +57,37 @@ export default [
     },
   },
   {
-    ignores: ['dist/**', 'node_modules/**', 'functions/**', '_fb/**'],
+    // Cloudflare Worker root + extracted lib — Node/Worker globals, console allowed
+    files: ['email-worker.js', 'src/worker/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.worker,
+        ...globals.node,
+        crypto: 'readonly',
+      },
+    },
+    rules: {
+      'no-console': 'off',
+      // The worker root is a long-lived monolith with several intentionally
+      // retained helpers (in-memory rate limiters kept as fallbacks for the
+      // KV-backed path). Downgrade orphan-symbol checks to warnings so they
+      // don't gate CI, but keep them visible.
+      'no-unused-vars': ['warn', {
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        caughtErrors: 'all',
+        caughtErrorsIgnorePattern: '^_|^e$',
+      }],
+      'no-useless-escape': 'warn',
+    },
+  },
+  {
+    files: ['tests/**/*.js', 'vitest.config.js'],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
+  {
+    ignores: ['dist/**', 'node_modules/**', 'functions/**', '_fb/**', '.wrangler/**', '.firebase/**'],
   },
 ];

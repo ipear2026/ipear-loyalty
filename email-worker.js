@@ -38,6 +38,12 @@
 //  GET  /health-deep     → deep health check: Worker + Brevo + Firestore (requires ADMIN_SECRET)
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { normalizeIpForRateLimit } from './src/worker/lib/ip.js';
+import { normalizeGreekSMS } from './src/worker/lib/sms.js';
+import {
+  makeRedeemRateKey, makeFailKey, makeBlockKey,
+} from './src/worker/lib/redeem-keys.js';
+
 const MAX_RECIPIENTS = 5000;
 const MAX_TOKENS     = 5000;
 
@@ -54,8 +60,7 @@ const _referralBuckets = new Map();
 const REDEEM_FAIL_LIMIT = 5;
 const REDEEM_BLOCK_TTL_SECONDS = 15 * 60; // block for 15 minutes
 const REDEEM_FAIL_TTL_SECONDS = 15 * 60;  // keep the fail counter for 15 minutes
-const REDEEM_FAIL_KEY_PREFIX = 'redeem:fail:';
-const REDEEM_BLOCK_KEY_PREFIX = 'redeem:block:';
+// REDEEM_FAIL_KEY_PREFIX / REDEEM_BLOCK_KEY_PREFIX imported from worker/lib/redeem-keys.js
 
 function isRateLimited(ip) {
   const now = Date.now();
@@ -77,35 +82,7 @@ function isRateLimited(ip) {
 //
 // Returns: { limited: boolean, reason?: 'kv-unavailable' | 'rate-exceeded' }
 // Callers should treat `limited === true` as a hard 503/429.
-// HIGH-4: IPv6 collapse to /64 prefix. The full 128-bit IPv6 address is
-// attacker-controlled across an entire /64 they hold for free — bucketing
-// per full address means 2^64 buckets per origin and zero effective rate
-// limit. /64 is the smallest prefix typically assigned to a single client.
-// Also handles `::` shorthand by expanding to 8 explicit groups first.
-// Non-IPv6 strings (IPv4, "unknown", literal target keys like "t:foo") pass
-// through untouched.
-function normalizeIpForRateLimit(ip) {
-  if (!ip || typeof ip !== 'string') return ip;
-  if (!ip.includes(':')) return ip;             // IPv4 or non-IP key
-  if (ip.startsWith('t:')) return ip;           // compound target key — leave intact
-  try {
-    let s = ip;
-    if (s.includes('::')) {
-      const [left, right] = s.split('::', 2);
-      const leftParts  = left  ? left.split(':')  : [];
-      const rightParts = right ? right.split(':') : [];
-      const missing    = 8 - leftParts.length - rightParts.length;
-      if (missing < 0) return ip;               // malformed — pass through
-      const fill = new Array(missing).fill('0');
-      s = [...leftParts, ...fill, ...rightParts].join(':');
-    }
-    const parts = s.split(':');
-    if (parts.length < 4) return ip;            // malformed — pass through
-    return parts.slice(0, 4).join(':') + '::/64';
-  } catch (_) {
-    return ip;
-  }
-}
+// normalizeIpForRateLimit imported from worker/lib/ip.js (HIGH-4 IPv6 /64 collapse)
 
 async function isRateLimitedKV(env, ip, prefix, maxHits, windowSeconds) {
   if (!env.RATE_LIMIT_KV) {
@@ -188,17 +165,7 @@ async function readJsonCapped(request, maxBytes = 16 * 1024) {
   }
 }
 
-function makeRedeemRateKey(source, actorUid, sessionId, ip) {
-  return `${source}|${actorUid || 'anon'}|${sessionId || 'nosession'}|${ip}`;
-}
-
-function makeFailKey(key) {
-  return `${REDEEM_FAIL_KEY_PREFIX}${key}`;
-}
-
-function makeBlockKey(key) {
-  return `${REDEEM_BLOCK_KEY_PREFIX}${key}`;
-}
+// makeRedeemRateKey / makeFailKey / makeBlockKey imported from worker/lib/redeem-keys.js
 
 async function getRedeemFailState(env, failKey) {
   if (!env.RATE_LIMIT_KV) return { fails: 0, firstFailAt: 0 };
@@ -602,30 +569,7 @@ async function handleVerifySmsOtp(request, env, CORS) {
 //  Strips accents from Greek, uppercases everything → fits in 160-char GSM-7
 //  instead of 70-char UCS-2.
 // ══════════════════════════════════════════════════════════════════════════
-function normalizeGreekSMS(text) {
-  // GSM-7 supports only these Greek chars: Γ Δ Θ Λ Ξ Π Σ Φ Ψ Ω
-  // All others (Α Β Ε Ζ Η Ι Κ Μ Ν Ο Ρ Τ Υ Χ) must become Latin look-alikes
-  const map = {
-    // accented → Latin
-    'ά':'A','έ':'E','ή':'H','ί':'I','ΐ':'I','ό':'O','ύ':'Y','ΰ':'Y','ώ':'Ω',
-    'Ά':'A','Έ':'E','Ή':'H','Ί':'I','Ό':'O','Ύ':'Y','Ώ':'Ω',
-    'ϊ':'I','ϋ':'Y','Ϊ':'I','Ϋ':'Y',
-    // uppercase Greek → Latin look-alikes (NOT in GSM-7)
-    'Α':'A','Β':'B','Ε':'E','Ζ':'Z','Η':'H','Ι':'I','Κ':'K',
-    'Μ':'M','Ν':'N','Ο':'O','Ρ':'P','Τ':'T','Υ':'Y','Χ':'X',
-    // uppercase Greek → kept as-is (IN GSM-7)
-    'Γ':'Γ','Δ':'Δ','Θ':'Θ','Λ':'Λ','Ξ':'Ξ','Π':'Π','Σ':'Σ','Φ':'Φ','Ψ':'Ψ','Ω':'Ω',
-    // lowercase Greek → map via uppercase rules
-    'α':'A','β':'B','γ':'Γ','δ':'Δ','ε':'E','ζ':'Z','η':'H','θ':'Θ',
-    'ι':'I','κ':'K','λ':'Λ','μ':'M','ν':'N','ξ':'Ξ','ο':'O','π':'Π',
-    'ρ':'P','σ':'Σ','ς':'Σ','τ':'T','υ':'Y','φ':'Φ','χ':'X','ψ':'Ψ','ω':'Ω',
-  };
-  let out = '';
-  for (const ch of text) {
-    out += map[ch] || ch.toUpperCase();
-  }
-  return out;
-}
+// normalizeGreekSMS imported from worker/lib/sms.js (GSM-7 transliteration)
 
 // ══════════════════════════════════════════════════════════════════════════
 //  WELCOME EMAIL — sent after customer self-registration

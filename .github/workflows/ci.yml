@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  customer:
+    name: Customer app (lint + test + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build (uses placeholder env → DEMO mode)
+        run: |
+          cp .env.example .env
+          npm run build
+
+      - name: Audit (production deps only)
+        run: npm audit --omit=dev --audit-level=high
+
+  functions:
+    name: Cloud Functions (install + audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: functions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Smoke import
+        run: node -e "require('firebase-admin'); require('firebase-functions');"
+
+      - name: Audit
+        run: npm audit --audit-level=high

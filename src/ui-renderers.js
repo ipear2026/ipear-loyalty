@@ -2,6 +2,7 @@ import { logger } from './logger.js';
 import { state } from './state.js';
 import { esc, showToast, _trackEvent, _trapFocus, _releaseFocus, _fireConfetti, tier, _WORKER_URL } from './utils.js';
 import { _t } from './i18n.js';
+import { _migrateCustomerToUid } from './main.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  HIGH-3: Safe <img> factory.
@@ -513,10 +514,7 @@ export async function offerGenerateQR() {
   }
 
   if (authUid && state.foundCustomer.id !== authUid) {
-    try {
-      const { _migrateCustomerToUid } = await import('./main.js');
-      await _migrateCustomerToUid(state.foundCustomer.id, authUid);
-    } catch(_) {}
+    try { await _migrateCustomerToUid(state.foundCustomer.id, authUid); } catch(_) {}
   }
 
   const bp = _offerBonus(o);

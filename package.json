@@ -7,20 +7,29 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint src public/sw-customer.js public/sw.js public/firebase-messaging-sw.js",
+    "lint": "eslint src email-worker.js public/sw-customer.js public/sw.js public/firebase-messaging-sw.js tests vitest.config.js",
     "lint:fix": "eslint --fix src",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "format": "prettier --write \"src/**/*.js\" \"*.{json,md}\"",
     "format:check": "prettier --check \"src/**/*.js\""
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@vitest/coverage-v8": "^4.1.9",
     "eslint": "^9.39.4",
     "globals": "^17.6.0",
+    "jsdom": "^29.1.1",
     "prettier": "^3.8.4",
-    "vite": "^6.3.0"
+    "vite": "^6.3.0",
+    "vitest": "^4.1.9"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
-    "firebase": "10.12.2"
+    "firebase": "^10.14.1"
+  },
+  "overrides": {
+    "undici": "^7.16.0"
   }
 }

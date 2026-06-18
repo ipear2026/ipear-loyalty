@@ -5,7 +5,11 @@ import { _t } from './i18n.js';
 import { _showPushOnboarding } from './push-notifications.js';
 // Q-2 fix: static import for synchronous cleanup on logout. Circular import
 // is safe here because logout() runs long after both modules have loaded.
-import { _forceCleanup, _cancelActiveRedemption, switchTab } from './main.js';
+import {
+  _forceCleanup, _cancelActiveRedemption, switchTab,
+  startApp, _migrateCustomerToUid, _refreshPointsUI,
+} from './main.js';
+import { loadHistory } from './ui-renderers.js';
 
 // ════════════════════════════════════════
 //  AUTH STATE
@@ -105,7 +109,7 @@ async function _transitionToApp() {
   _showSplash();
   showScreen('s-app');
   try {
-    const { startApp } = await import('./main.js');
+    // startApp imported statically at top of module
     await startApp();
   } catch(e) {
     logger.error('[startApp] CRASHED:', e?.message || e);
@@ -225,7 +229,6 @@ export async function autoLogin(email) {
     localStorage.setItem(_CACHE_KEY, JSON.stringify(state.foundCustomer));
     const authUid = window._auth?.currentUser?.uid;
     if (authUid && state.foundCustomer.id !== authUid) {
-      const { _migrateCustomerToUid } = await import('./main.js');
       try { await _migrateCustomerToUid(state.foundCustomer.id, authUid); } catch(_) {}
     }
     logger.log('%c[AUTO-LOGIN] ✅ Firestore OK → _transitionToApp()', 'color:#00cc00;font-weight:bold;font-size:16px');
@@ -395,10 +398,10 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
               state.foundCustomer.points = Math.max(0, (state.foundCustomer.points || 0) - 100);
               state.foundCustomer.totalPoints = Math.max(0, (state.foundCustomer.totalPoints || 0) - 100);
             }
-            import('./main.js').then(m => m._refreshPointsUI());
+            _refreshPointsUI();
             showToast('⚠️ Ο κωδικός παραπομπής έχει φτάσει το όριο χρήσεων.', 'red');
           } else {
-            import('./ui-renderers.js').then(m => { if (typeof m.loadHistory === 'function') setTimeout(m.loadHistory, 500); });
+            if (typeof loadHistory === 'function') setTimeout(loadHistory, 500);
           }
         }).catch(e => logger.warn('[referral] worker call failed:', e.message));
       } catch(e) { logger.warn('[referral] queue/worker error:', e.message); }
@@ -837,7 +840,6 @@ export async function submitPhone() {
     }
 
     if (firebaseUID && state.foundCustomer.id !== firebaseUID) {
-      const { _migrateCustomerToUid } = await import('./main.js');
       try { await _migrateCustomerToUid(state.foundCustomer.id, firebaseUID); } catch(_) {}
     } else if (firebaseUID && state.foundCustomer.uid !== firebaseUID) {
       try {
@@ -917,7 +919,6 @@ export async function submitCreatePass() {
     const authResult = await window._createUser(window._auth, email, p1);
     const firebaseUID = authResult?.user?.uid || authResult?.uid || null;
     if (firebaseUID && state.foundCustomer?.id && state.foundCustomer.id !== firebaseUID) {
-      const { _migrateCustomerToUid } = await import('./main.js');
       try { await _migrateCustomerToUid(state.foundCustomer.id, firebaseUID); } catch(_) {}
     } else if (firebaseUID && state.foundCustomer?.id) {
       try {
