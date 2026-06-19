@@ -172,12 +172,18 @@ export async function approveOffer(redemptionId) {
         txn.update(custRef, { points: newPts, totalPoints: newTot });
         // Customer-facing ledger entry in the same commit (only when bonus > 0
         // so we don't pollute the ledger with zero-value approvals).
+        //
+        // Same field defensiveness as confirmOfferVerify: customerUid
+        // populated from offer-redemption.customerId (the auth uid) with
+        // a fallback to the live customer doc's uid, and customerEmail
+        // falls back to the customer doc. Either should match a customer
+        // read-rule branch in loadHistory.
         txn.set(window._doc(db, 'ipear_transactions', approveLedgerId), {
           customerId: custDocId,
-          customerUid: found.customerId || '',
+          customerUid: found.customerId || cust.uid || '',
           customerEmail: found.customerEmail || cust.email || '',
-          customerName: found.customerName,
-          card: found.card || '',
+          customerName: found.customerName || cust.name || '',
+          card: found.card || cust.card || '',
           type: 'add',
           points: bonus,
           category: '🎁 Προσφορά: ' + (found.offerTitle || ''),

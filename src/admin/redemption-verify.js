@@ -177,12 +177,18 @@ export async function confirmVerify(redemptionId, code) {
       txn.update(custRef, { points: newPts });
 
       // Customer-facing ledger entry — same commit.
+      // customerUid + customerEmail BOTH populated so the customer's
+      // loadHistory matches via either branch of the Firestore read rule
+      // (resource.data.customerUid == auth.uid OR customerEmail == auth.email).
+      // Fallbacks are intentional: the redemption doc doesn't store email,
+      // and customerUid can be empty if startRedemption ran before
+      // auth.currentUser was populated.
       txn.set(window._doc(db, 'ipear_transactions', verifyLedgerId), {
         customerId: custId,
-        customerUid: found.customerUid || '',
+        customerUid: found.customerUid || custData.uid || '',
         customerEmail: found.customerEmail || custData.email || '',
-        customerName: found.customerName,
-        card: found.card,
+        customerName: found.customerName || custData.name || '',
+        card: found.card || custData.card || '',
         type: 'redeem',
         points: -found.points,
         discount: found.discount,
@@ -281,12 +287,19 @@ export async function confirmOfferVerify(redemptionId) {
         txn.update(custRef, { points: newPts, totalPoints: newTot });
         // Ledger entry in the same commit — only written when bonus > 0
         // so we don't create empty audit rows for zero-bonus offers.
+        //
+        // Field defensiveness: customerUid + customerEmail BOTH populated so
+        // the customer's loadHistory hits a match via the rules' uid OR
+        // email branch. In ipear_offer_redemptions, customerId IS the auth
+        // uid (see startOfferRedemption in ui-renderers.js); customerDocId
+        // is the legacy doc id. We prefer auth-uid for the rule-matched
+        // customerUid field, falling back to the live customer doc's uid.
         txn.set(window._doc(db, 'ipear_transactions', offerLedgerId), {
           customerId: custDocId,
-          customerUid: found.customerId || '',
+          customerUid: found.customerId || cust.uid || '',
           customerEmail: found.customerEmail || cust.email || '',
-          customerName: found.customerName,
-          card: found.card || '',
+          customerName: found.customerName || cust.name || '',
+          card: found.card || cust.card || '',
           type: 'add',
           points: bonus,
           category: '🎁 Προσφορά: ' + (found.offerTitle || ''),
