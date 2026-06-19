@@ -633,7 +633,12 @@ async function confirmTabletRedeem(cost, disc) {
   const db = window._db;
   try {
     // ── Atomic Transaction (prevents double-spend race condition) ─────
+    // Balance update + audit row + customer-facing ledger row share a single
+    // Firestore commit. Was previously two separate writes (txn then addDoc)
+    // which could leave points deducted with no ledger entry on partial fail.
     let newPts;
+    const tabletNowIso = new Date().toISOString();
+    const tabletLedgerId = `redeem_manual_tablet_${c.id}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
     await window._runTransaction(db, async (txn) => {
       const custRef  = window._doc(db, 'ipear_customers', c.id);
       const custSnap = await txn.get(custRef);
@@ -646,7 +651,6 @@ async function confirmTabletRedeem(cost, disc) {
       }
 
       newPts = Math.max(0, (cust.points || 0) - cost);
-      const nowIso = new Date().toISOString();
 
       txn.update(custRef, { points: newPts });
 
@@ -654,19 +658,22 @@ async function confirmTabletRedeem(cost, disc) {
       const auditRef = window._doc(db, 'audit_logs', 'manual_' + c.id + '_' + Date.now());
       txn.set(auditRef, {
         action: 'manual_redeem', source: 'tablet',
-        approvedByUid: _tabletActorUid || '', approvedAt: nowIso,
+        approvedByUid: _tabletActorUid || '', approvedAt: tabletNowIso,
         customerId: c.id, customerUid: cust.uid || '',
         pointsDeducted: cost, discount: disc,
         storeId: _tabletStoreId || null, storeName: _tabletStoreName
       });
-    });
 
-    // Post-transaction: customer-facing transaction record
-    await window._addDoc(window._col(db, 'ipear_transactions'), {
-      customerId: c.id, customerUid: c.uid||'', customerName: c.name, card: c.card,
-      type: 'redeem', points: -cost, discount: disc, method: 'manual',
-      storeId: _tabletStoreId||null, storeName: _tabletStoreName,
-      date: new Date().toISOString()
+      // Customer-facing ledger entry (same transaction).
+      txn.set(window._doc(db, 'ipear_transactions', tabletLedgerId), {
+        customerId: c.id, customerUid: c.uid || cust.uid || '',
+        customerEmail: cust.email || '',
+        customerName: c.name, card: c.card,
+        type: 'redeem', points: -cost, discount: disc, method: 'manual',
+        storeId: _tabletStoreId || null, storeName: _tabletStoreName,
+        date: tabletNowIso,
+        approvedByTablet: _tabletActorUid || ''
+      });
     });
 
     window._foundCustomer.points = newPts;
@@ -798,7 +805,11 @@ async function confirmQRRedeem() {
     // All reads + both writes execute as one atomic unit.
     // If ANY check fails the whole transaction rolls back:
     // → no double-spend, no partial state, no orphan deductions.
+    // Ledger entry id is pre-generated so it lives in the same Firestore
+    // commit as the balance update and the audit row (was previously
+    // written via a separate addDoc that could fail post-deduction).
     let newPts, custUid, pointsToDeduct, discount, label, card, resolvedCustId;
+    const txLedgerId = `redeem_qr_${p.redemptionId}`;
     await window._runTransaction(db, async (txn) => {
 
       // 1. Re-read the redemption code INSIDE the transaction
@@ -869,22 +880,24 @@ async function confirmQRRedeem() {
         storeId: _tabletStoreId || null,
         storeName: _tabletStoreName
       });
-    });
 
-    // Post-transaction: write customer-facing transaction ledger
-    await window._addDoc(window._col(db, 'ipear_transactions'), {
-      customerId:   resolvedCustId,
-      customerUid:  custUid,
-      customerName: p.customerName,
-      card:         card,
-      type:         'redeem',
-      points:       -pointsToDeduct,
-      discount:     discount,
-      label:        label,
-      method:       'qr',
-      storeId:      _tabletStoreId || null,
-      storeName:    _tabletStoreName,
-      date:         new Date().toISOString()
+      // Customer-facing ledger entry — atomic with the deduction.
+      txn.set(window._doc(db, 'ipear_transactions', txLedgerId), {
+        customerId:    resolvedCustId,
+        customerUid:   custUid,
+        customerEmail: cust.email || '',
+        customerName:  p.customerName,
+        card:          card,
+        type:          'redeem',
+        points:        -pointsToDeduct,
+        discount:      discount,
+        label:         label,
+        method:        'qr',
+        storeId:       _tabletStoreId || null,
+        storeName:     _tabletStoreName,
+        date:          nowIso,
+        approvedByTablet: _tabletActorUid || ''
+      });
     });
 
     await _workerRedeemGuard('success', { code: p.code || '' });

@@ -37,6 +37,25 @@ import {
 } from './auth.js';
 
 // ════════════════════════════════════════
+//  IN-APP BROWSER DETECTION (silent)
+// ════════════════════════════════════════
+// Tag Instagram / FB / Messenger / TikTok WebViews silently — no banner, no
+// block. `window._inAppBrowser` lets the redemption error path show a clearer
+// message ONLY if Firestore actually rejects ("ο browser του Instagram
+// μπλοκάρει την εξαργύρωση") instead of a generic failure. Otherwise the
+// user experiences the app exactly like in Safari/Chrome.
+(function _flagInAppBrowsers() {
+  const ua = navigator.userAgent || '';
+  const isInsta = /Instagram/i.test(ua);
+  const isFB    = /FBAN|FBAV|FB_IAB|FB4A/i.test(ua);
+  const isMessenger = /Messenger/i.test(ua);
+  const isTikTok = /Bytedance|TikTok|musical_ly/i.test(ua);
+  if (!(isInsta || isFB || isMessenger || isTikTok)) return;
+  window._inAppBrowser = isInsta ? 'Instagram' : isFB ? 'Facebook' : isMessenger ? 'Messenger' : 'TikTok';
+  document.documentElement.classList.add('inapp-browser');
+})();
+
+// ════════════════════════════════════════
 //  LOCAL STATE (main.js scope)
 // ════════════════════════════════════════
 let _redeemTimer = null;
@@ -44,6 +63,13 @@ let _activeRedemptionDocId = null;
 let _redeemSnapshotUnsub = null;
 let _liveUnsub = null;
 let _lastKnownTierCls = null;
+
+// Expose a safe-to-reload predicate for the SW handshake (push-notifications.js).
+// Returns false while a redemption QR is active so a SW update doesn't tear it
+// down mid-scan at the till.
+window._safeToReloadForSW = function _safeToReloadForSW() {
+  return !_activeRedemptionDocId;
+};
 
 // ════════════════════════════════════════
 //  CUSTOMER DOC MIGRATION (random-ID → UID)
@@ -267,6 +293,7 @@ function startLiveListener() {
   stopLiveListener();
   if (!state.foundCustomer?.id || window.DEMO) return;
   _startExistencePoll();
+  startTxLiveListener();
   // HOTFIX: the first snapshot is INITIAL HYDRATION, not a points-change
   // event. Without this guard, users whose state.foundCustomer was
   // pre-populated from a query of a different doc (legacy random-id ≠
@@ -280,6 +307,11 @@ function startLiveListener() {
     const ref = window._doc(window._db, 'ipear_customers', state.foundCustomer.id);
     _liveUnsub = window._onSnapshot(ref, snap => {
       try {
+      // Guard: state.foundCustomer may have been cleared by a parallel logout
+      // / kick-out path between the time this listener was attached and the
+      // snapshot firing. Dereferencing .points on null below would throw and
+      // be swallowed silently. Bail cleanly instead.
+      if (!state.foundCustomer) { logger.log('[live] snapshot fired after foundCustomer cleared — skipping'); return; }
       if (!snap.exists()) {
         // Doc removed by admin OR by the customer's own self-migration
         // delete of the legacy random-id doc. Distinguish the two: a
@@ -312,6 +344,7 @@ function startLiveListener() {
       }
       const data = snap.data();
       const oldPts = state.foundCustomer.points || 0;
+      const oldTot = state.foundCustomer.totalPoints || 0;
       const newPts = data.points || 0;
       const newTot = data.totalPoints || 0;
       state.foundCustomer = { ...state.foundCustomer, ...data };
@@ -323,7 +356,10 @@ function startLiveListener() {
         // Initial sync — refresh the header silently, never popup.
         _isFirstFire = false;
         try { _refreshPointsUI(); } catch(_) {}
-      } else if (newPts !== oldPts) {
+      } else if (newPts !== oldPts || newTot !== oldTot) {
+        // Compare totalPoints too: an admin "add + redeem" that nets to the
+        // same `points` still moves `totalPoints`, and the customer should
+        // see the history refresh + animation either way.
         _animateLivePointsChange(oldPts, newPts, newTot);
       }
       const _rcEl = document.getElementById('ref-count-val');
@@ -350,6 +386,42 @@ function startLiveListener() {
 
 function stopLiveListener() {
   if (_liveUnsub) { try { _liveUnsub(); } catch(_) {} _liveUnsub = null; }
+  stopTxLiveListener();
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  REAL-TIME TRANSACTION LISTENER
+//  Filters by customerUid so the index requirement stays a single-field
+//  (auto-indexed) lookup — no composite index deploy required. Refreshes
+//  history on any add/redeem/expire so the customer never sees a stale
+//  ledger after a points event, even if our balance-update retry-ladder
+//  raced the ledger commit.
+// ════════════════════════════════════════════════════════════════════
+let _txLiveUnsub = null;
+let _txLiveFirst = true;
+function startTxLiveListener() {
+  stopTxLiveListener();
+  const uid = state.foundCustomer?.uid;
+  if (!uid || window.DEMO) return;
+  _txLiveFirst = true;
+  try {
+    const q = window._query(
+      window._col(window._db, 'ipear_transactions'),
+      window._where('customerUid', '==', uid)
+    );
+    _txLiveUnsub = window._onSnapshot(q, () => {
+      // Skip the first fire — loadHistory is already triggered by the
+      // transition / profile-open path, no need to double up.
+      if (_txLiveFirst) { _txLiveFirst = false; return; }
+      try { loadHistory(); } catch (e) { logger.warn('[tx-live] loadHistory:', e); }
+    }, err => {
+      logger.warn('[tx-live] subscription error:', err?.code || err?.message);
+    });
+  } catch (e) { logger.warn('[tx-live] init:', e); }
+}
+function stopTxLiveListener() {
+  if (_txLiveUnsub) { try { _txLiveUnsub(); } catch(_) {} _txLiveUnsub = null; }
+  _txLiveFirst = true;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -395,7 +467,23 @@ function _stopExistencePoll() {
   if (_existencePollTimer) { clearInterval(_existencePollTimer); _existencePollTimer = null; }
 }
 
+function _isSplashActive() {
+  const el = document.getElementById('splash-screen');
+  return !!(el && el.classList.contains('active') && !el.classList.contains('fade-out'));
+}
+
 function _animateLivePointsChange(oldPts, newPts, newTot) {
+  // If the splash is still on screen (typical for credits that land during
+  // the 2.8s post-login splash window — auto-retry of /send-welcome and
+  // /process-referral fires fast), defer the animation + toast until the
+  // splash dismisses. Otherwise the user misses the whole "+50/+100"
+  // celebration because it plays behind the splash.
+  if (_isSplashActive()) {
+    window.addEventListener('splash-hidden', () => {
+      _animateLivePointsChange(oldPts, newPts, newTot);
+    }, { once: true });
+    return;
+  }
   const diff = newPts - oldPts;
   const t   = tier(newTot);
   const pct = t.next ? Math.min(100, Math.round(((newTot - t.floor) / (t.next - t.floor)) * 100)) : 100;
@@ -452,7 +540,14 @@ function _animateLivePointsChange(oldPts, newPts, newTot) {
     ? `${totStr} / ${t.next.toLocaleString('el-GR')} → ${nName}`
     : '👑 Ανώτατη κατάταξη!';
 
-  setTimeout(loadHistory, 800);
+  // Ladder catches the race between balance-snapshot fire and ledger commit
+  // visibility — even with the new atomic txn writes, the tx live listener
+  // and the customer-doc listener can land on the SDK at slightly different
+  // tick boundaries. Three attempts at 0.8s / 2.5s / 6s covers all realistic
+  // backend windows without leaning on the live tx listener alone.
+  [800, 2500, 6000].forEach(ms => setTimeout(() => {
+    try { loadHistory(); } catch(_) {}
+  }, ms));
 
   _showLivePointsToast(diff);
 }
@@ -463,6 +558,9 @@ function _showLivePointsToast(diff) {
 
   const el = document.createElement('div');
   el.id = 'live-pts-toast';
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
+  el.setAttribute('aria-atomic', 'true');
   const isAdd = diff > 0;
   const sign = isAdd ? '+' : '';
   el.style.cssText = `
@@ -473,6 +571,7 @@ function _showLivePointsToast(diff) {
     box-shadow:0 10px 40px rgba(0,0,0,.25);pointer-events:none;
     transition:transform .35s cubic-bezier(.34,1.56,.64,1),opacity .35s;opacity:0;
     letter-spacing:-1px;
+    font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
   `;
   el.innerHTML = `${sign}${diff.toLocaleString('el-GR')}<div style="font-size:clamp(.7rem,2.5vw,1rem);margin-top:6px;opacity:.8;letter-spacing:0">πόντοι</div>`;
   document.body.appendChild(el);
@@ -543,6 +642,12 @@ export function switchTab(name) {
   if (name==='profile') {
     loadLeaderboard();
     _syncPushState();
+    // Refresh transactions every time the user opens their profile — worker-
+    // driven credits (referral, marketing) land asynchronously and don't
+    // trigger _animateLivePointsChange when the first snapshot already shows
+    // the updated balance. Without this, users see new points but an empty
+    // "Ιστορικό Συναλλαγών" until they fully relaunch the app.
+    loadHistory();
   }
   _bindHeaderScroll(pane);
 }
@@ -872,7 +977,22 @@ async function _startRedemptionInner(points, label) {
     _watchRedemptionDoc(docRef.id);
   } catch(e) {
     logger.error('[redeem-save] ERROR:', e?.code, e?.message, 'custId:', custId, 'authUid:', authUid);
-    showToast('❌ Αποτυχία αποθήκευσης κωδικού. Δοκίμασε ξανά.');
+    // Map Firestore failure codes to actionable Greek copy. The generic
+    // "Αποτυχία αποθήκευσης" message previously hid the most common causes
+    // (in-app browser permission-denied, expired session, offline).
+    let msg = '❌ Αποτυχία αποθήκευσης κωδικού. Δοκίμασε ξανά.';
+    if (e?.code === 'permission-denied') {
+      msg = window._inAppBrowser
+        ? `❌ Ο browser του ${window._inAppBrowser} μπλοκάρει την εξαργύρωση. Άνοιξε την εφαρμογή σε Safari/Chrome.`
+        : '❌ Δεν επιτρέπεται η εξαργύρωση. Κάνε logout/login και ξαναδοκίμασε.';
+    } else if (e?.code === 'unauthenticated' || !window._auth?.currentUser) {
+      msg = '❌ Έληξε η συνεδρία. Κάνε ξανά σύνδεση.';
+    } else if (e?.code === 'unavailable' || !navigator.onLine) {
+      msg = '📡 Πρόβλημα σύνδεσης. Έλεγξε internet και ξαναδοκίμασε.';
+    } else if (e?.message) {
+      msg = '❌ ' + e.message;
+    }
+    showToast(msg, 'red');
     document.getElementById('redeem-overlay').style.display = 'none';
     clearInterval(_redeemTimer);
   }
@@ -1048,7 +1168,40 @@ export async function startApp() {
     }
   }
 
+  // Retry any pending signup bonuses that didn't land at registration time
+  // (worker outage, Brevo email failure pre-fix, transient 5xx). Both worker
+  // endpoints are idempotent via the marketingWelcomeProcessed / referralProcessed
+  // flags, so a no-op when the bonus is already credited.
+  _retryPendingBonuses(c).catch(() => {});
+
   _bindHeaderScroll(document.querySelector('.tab-pane.active'));
+}
+
+async function _retryPendingBonuses(c) {
+  const authUser = window._auth?.currentUser;
+  if (!authUser) return;
+  const needsWelcome  = c.marketingOptIn === true && c.marketingWelcomeProcessed !== true;
+  const needsReferral = !!c.referredBy && c.referralProcessed !== true;
+  if (!needsWelcome && !needsReferral) return;
+  try {
+    const idToken = await authUser.getIdToken(true);
+    if (needsWelcome) {
+      fetch(_WORKER_URL + '/send-welcome', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken, name: c.name || '', marketingOptIn: true }),
+      }).catch(() => {});
+    }
+    if (needsReferral) {
+      fetch(_WORKER_URL + '/process-referral', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      }).catch(() => {});
+    }
+  } catch (e) {
+    logger.warn('[retry-bonuses] idToken failed:', e?.message || e);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════

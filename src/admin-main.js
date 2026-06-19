@@ -69,6 +69,7 @@ import {
   scanOrphans,
   deleteOrphanTxs,
   deleteGhostCustomer,
+  deleteSecondaryOrphans,
   runSystemHealthCheck,
   configureSystemHealth,
 } from './admin/system-health.js';
@@ -551,16 +552,51 @@ async function register() {
             toast(`⚠️ Ο referrer (${refCode}) έχει φτάσει το όριο ${MAX_REFERRALS_PER_USER} παραπομπών.`,'error');
             break;
           }
-          const newPts = (rdata.points||0)+100, newTot = (rdata.totalPoints||rdata.points||0)+100;
-          await window._updateDoc(window._doc(db,'ipear_customers',rd.id),{points:newPts,totalPoints:newTot, referralCount: refCount + 1});
-          await window._addDoc(window._col(db,'ipear_transactions'),{customerId:rd.id,customerUid:rdata.uid||'',customerEmail:rdata.email||'',customerName:rdata.name,card:rdata.card,type:'add',points:100,amount:0,category:'🎁 Referral Bonus',note:`Παραπομπή: ${card} (${refCount+1}/${MAX_REFERRALS_PER_USER})`,date:new Date().toISOString()});
+          // Atomic referrer credit: balance + ledger one commit.
+          const refNowIso = new Date().toISOString();
+          const refLedgerId = `referral_in_${rd.id}_${newId}`;
+          await window._runTransaction(db, async (txn) => {
+            const refRef = window._doc(db, 'ipear_customers', rd.id);
+            const refLiveSnap = await txn.get(refRef);
+            if (!refLiveSnap.exists()) throw new Error('Referrer not found');
+            const live = refLiveSnap.data();
+            const lp = (live.points || 0) + 100;
+            const lt = (live.totalPoints || live.points || 0) + 100;
+            txn.update(refRef, {
+              points: lp, totalPoints: lt,
+              referralCount: (live.referralCount || 0) + 1
+            });
+            txn.set(window._doc(db, 'ipear_transactions', refLedgerId), {
+              customerId: rd.id, customerUid: rdata.uid || '',
+              customerEmail: rdata.email || '', customerName: rdata.name,
+              card: rdata.card, type: 'add', points: 100, amount: 0,
+              category: '🎁 Referral Bonus',
+              note: `Παραπομπή: ${card} (${(live.referralCount||0)+1}/${MAX_REFERRALS_PER_USER})`,
+              date: refNowIso,
+              createdByAdmin: _adminActorUid || ''
+            });
+          });
           referrerAwarded = true;
         }
         if (referrerAwarded) {
-          // +100 for new customer too
-          await window._updateDoc(window._doc(db,'ipear_customers',newId),{points:100,totalPoints:100});
-          // Transaction record for new customer's referral bonus
-          await window._addDoc(window._col(db,'ipear_transactions'),{customerId:newId,customerUid:'',customerEmail:email,customerName:name,card:card,type:'add',points:100,amount:0,category:'🎁 Referral Bonus',note:`Μπόνους εγγραφής με παραπομπή: ${refCode}`,date:new Date().toISOString()});
+          // Atomic new-customer credit: balance + ledger one commit.
+          const newCustLedgerId = `referral_out_${newId}`;
+          const newCustNowIso   = new Date().toISOString();
+          await window._runTransaction(db, async (txn) => {
+            const ncRef = window._doc(db, 'ipear_customers', newId);
+            const ncSnap = await txn.get(ncRef);
+            if (!ncSnap.exists()) throw new Error('Νέος πελάτης δεν βρέθηκε.');
+            txn.update(ncRef, { points: 100, totalPoints: 100 });
+            txn.set(window._doc(db, 'ipear_transactions', newCustLedgerId), {
+              customerId: newId, customerUid: '',
+              customerEmail: email, customerName: name, card: card,
+              type: 'add', points: 100, amount: 0,
+              category: '🎁 Referral Bonus',
+              note: `Μπόνους εγγραφής με παραπομπή: ${refCode}`,
+              date: newCustNowIso,
+              createdByAdmin: _adminActorUid || ''
+            });
+          });
           toast(`✅ Εγγραφή επιτυχής! +100 πόντοι και στους δύο (referral)! 🎉`,'success');
         } else {
           toast('✅ Εγγραφή επιτυχής! Καλωσήρθε '+name+'! (Referral limit reached)','success');
@@ -677,10 +713,31 @@ async function renderCust(d) {
       if (!sessionStorage.getItem(lastBdayKey)) {
         sessionStorage.setItem(lastBdayKey,'1');
         if(confirm(`🎂 Γενέθλια ${d.name}!\nΘέλεις να προσθέσεις αυτόματα 200 πόντους ως δώρο γενεθλίων;`)) {
-          const db=DB(), newPts=(d.points||0)+200, newTot=(d.totalPoints||d.points||0)+200;
-          await window._updateDoc(window._doc(db,'ipear_customers',cid),{points:newPts,totalPoints:newTot});
-          await window._addDoc(window._col(db,'ipear_transactions'),{customerId:cid,customerUid:d.uid||'',customerEmail:d.email||'',customerName:d.name,card:d.card,type:'add',points:200,amount:0,category:'🎂 Birthday Bonus',note:'Δώρο γενεθλίων',storeId:_storeId||null,storeName:_storeName,date:new Date().toISOString()});
-          cdata.points=newPts; cdata.totalPoints=newTot;
+          const db = DB();
+          // Atomic: balance + ledger in one commit (was two separate writes).
+          // Per-year deterministic id keeps it idempotent on retries / refreshes.
+          let newPts, newTot;
+          const bdayLedgerId = `birthday_${cid}_${thisYear}`;
+          const nowIsoBd = new Date().toISOString();
+          await window._runTransaction(db, async (txn) => {
+            const ref  = window._doc(db, 'ipear_customers', cid);
+            const snap = await txn.get(ref);
+            if (!snap.exists()) throw new Error('Πελάτης δεν βρέθηκε.');
+            const live = snap.data();
+            newPts = (live.points || 0) + 200;
+            newTot = (live.totalPoints || live.points || 0) + 200;
+            txn.update(ref, { points: newPts, totalPoints: newTot });
+            txn.set(window._doc(db, 'ipear_transactions', bdayLedgerId), {
+              customerId: cid, customerUid: d.uid || '',
+              customerEmail: d.email || '', customerName: d.name, card: d.card,
+              type: 'add', points: 200, amount: 0,
+              category: '🎂 Birthday Bonus', note: 'Δώρο γενεθλίων',
+              storeId: _storeId || null, storeName: _storeName,
+              date: nowIsoBd,
+              createdByAdmin: _adminActorUid || ''
+            });
+          });
+          cdata.points = newPts; cdata.totalPoints = newTot;
           renderCust(cdata);
         }
       }
@@ -755,8 +812,15 @@ async function confirmAdd() {
   const addBtn = document.querySelector('#m-add .btn-green');
   if (addBtn) { addBtn.disabled=true; addBtn.textContent='⏳'; }
   try {
-    // ── Atomic Transaction — reads live balance, prevents stale-read overwrites ──
+    // ── Atomic Transaction — balance update + ledger entry committed together.
+    //    Previously the ipear_transactions write happened AFTER runTransaction,
+    //    so a failure between the two left points credited with no audit row.
+    //    Both writes now share one Firestore commit (max 500 writes / txn,
+    //    we use 2). Pre-generated id keeps the set() retry-safe across
+    //    Firestore's internal txn re-attempts on contention.
     let newPts, newTot;
+    const nowIso = new Date().toISOString();
+    const txDocId = `add_${cid}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
     await window._runTransaction(db, async (txn) => {
       const custRef = window._doc(db, 'ipear_customers', cid);
       const snap = await txn.get(custRef);
@@ -765,9 +829,23 @@ async function confirmAdd() {
       newPts = (live.points || 0) + pts;
       newTot = (live.totalPoints || live.points || 0) + pts;
       txn.update(custRef, { points: newPts, totalPoints: newTot });
+      txn.set(window._doc(db, 'ipear_transactions', txDocId), {
+        customerId: cid,
+        customerUid: cdata.uid || '',
+        customerEmail: cdata.email || '',
+        customerName: cdata.name,
+        card: cdata.card,
+        type: 'add',
+        points: pts,
+        amount: amt,
+        category: cat,
+        note,
+        storeId: _storeId || null,
+        storeName: _storeName,
+        date: nowIso,
+        createdByAdmin: _adminActorUid || ''
+      });
     });
-    await window._addDoc(window._col(db,'ipear_transactions'),
-      {customerId:cid,customerUid:cdata.uid||'',customerEmail:cdata.email||'',customerName:cdata.name,card:cdata.card,type:'add',points:pts,amount:amt,category:cat,note,storeId:_storeId||null,storeName:_storeName,date:new Date().toISOString()});
     cdata.points=newPts; cdata.totalPoints=newTot;
     renderCust(cdata); toast(`✅ +${pts} πόντοι για ${cdata.name}`,'success'); closeM();
     _publishLeaderboard(); // refresh leaderboard after points change
@@ -796,8 +874,13 @@ async function confirmRedeem() {
   const redeemBtn = document.querySelector('#m-redeem .btn-green');
   if (redeemBtn) { redeemBtn.disabled=true; redeemBtn.textContent='⏳'; }
   try {
-    // ── Atomic Transaction — prevents double-click / concurrent deductions ──
+    // ── Atomic Transaction — balance + audit log + ledger entry in one commit.
+    //    Previously the ipear_transactions write happened OUTSIDE runTransaction,
+    //    so a failure between the two left points deducted with no customer-
+    //    facing ledger row. Now all three writes share the same commit.
     let newPts;
+    const nowIso = new Date().toISOString();
+    const txDocId = `redeem_manual_${cid}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
     await window._runTransaction(db, async (txn) => {
       const custRef  = window._doc(db, 'ipear_customers', cid);
       const custSnap = await txn.get(custRef);
@@ -807,7 +890,6 @@ async function confirmRedeem() {
       const currentPts = custData.points || 0;
       if (currentPts < cost) throw new Error(`Ανεπαρκείς πόντοι (${currentPts} < ${cost})`);
       newPts = Math.max(0, currentPts - cost);
-      const nowIso = new Date().toISOString();
       txn.update(custRef, { points: newPts });
 
       const auditRef = window._doc(db, 'audit_logs', `manual_redeem_${cid}_${nowIso.replace(/[^0-9]/g,'')}`);
@@ -823,9 +905,23 @@ async function confirmRedeem() {
         storeId: _storeId || null,
         storeName: _storeName
       });
+
+      txn.set(window._doc(db, 'ipear_transactions', txDocId), {
+        customerId: cid,
+        customerUid: custData.uid || cdata.uid || '',
+        customerEmail: cdata.email || '',
+        customerName: cdata.name,
+        card: cdata.card,
+        type: 'redeem',
+        points: -cost,
+        discount: disc,
+        method: 'manual',
+        storeId: _storeId || null,
+        storeName: _storeName,
+        date: nowIso,
+        approvedByAdmin: _adminActorUid || ''
+      });
     });
-    await window._addDoc(window._col(db,'ipear_transactions'),
-      {customerId:cid,customerUid:cdata.uid||'',customerEmail:cdata.email||'',customerName:cdata.name,card:cdata.card,type:'redeem',points:-cost,discount:disc,storeId:_storeId||null,storeName:_storeName,date:new Date().toISOString()});
     cdata.points=newPts; renderCust(cdata);
     toast(`💶 Εξαργύρωση ${disc}€! Αφαιρέθηκαν ${cost} πόντοι.`,'success'); closeM();
     _publishLeaderboard(); // refresh leaderboard after points change
@@ -1305,40 +1401,48 @@ async function processReferralQueue() {
             await markDone({skipped:'referral-limit-reached', referrerCard:q.referrerCard});
             continue;
           }
-          const rPts = (refData.points||0)+100, rTot = (refData.totalPoints||refData.points||0)+100;
-          await window._updateDoc(window._doc(db,'ipear_customers',refId), {
-            points:rPts, totalPoints:rTot, referralCount: refCount + 1
-          });
-          await window._addDoc(window._col(db,'ipear_transactions'), {
-            customerId:refId, customerUid:refData.uid||'', customerEmail:refData.email||'', customerName:refData.name,
-            card:refData.card, type:'add', points:100, amount:0,
-            category:'🎁 Referral Bonus', note:`Παραπομπή: ${q.newCustomerCard} (${refCount+1}/${MAX_REFERRALS_PER_USER})`, date:new Date().toISOString()
-          });
-        }
-        // Write transaction for the NEW customer (skip if already written by self-registration)
-        try {
-          const existTx = await window._getDocs(window._query(
-            window._col(db,'ipear_transactions'),
-            window._where('customerId','==',q.newCustomerId),
-            window._where('category','==','🎁 Referral Bonus')
-          ));
-          if (existTx.empty) {
-            await window._addDoc(window._col(db,'ipear_transactions'), {
-              customerId:q.newCustomerId, customerUid:q.newCustomerUid||'', customerEmail:q.newCustomerEmail||'', customerName:q.newCustomerName,
-              card:q.newCustomerCard, type:'add', points:100, amount:0,
-              category:'🎁 Referral Bonus', note:'Bonus εγγραφής με referral', date:new Date().toISOString()
+          // Atomic referrer credit (balance + ledger in same commit).
+          const refQNowIso = new Date().toISOString();
+          const refQLedgerId = `referral_queue_in_${refId}_${q.newCustomerId}`;
+          await window._runTransaction(db, async (txn) => {
+            const refRef = window._doc(db, 'ipear_customers', refId);
+            const refLiveSnap = await txn.get(refRef);
+            if (!refLiveSnap.exists()) throw new Error('Referrer missing');
+            const live = refLiveSnap.data();
+            const rPts = (live.points || 0) + 100;
+            const rTot = (live.totalPoints || live.points || 0) + 100;
+            txn.update(refRef, {
+              points: rPts, totalPoints: rTot,
+              referralCount: (live.referralCount || 0) + 1
             });
-          }
-        } catch(_) {
-          // Fallback: write anyway (duplicate is better than missing)
-          await window._addDoc(window._col(db,'ipear_transactions'), {
-            customerId:q.newCustomerId, customerUid:q.newCustomerUid||'', customerEmail:q.newCustomerEmail||'', customerName:q.newCustomerName,
-            card:q.newCustomerCard, type:'add', points:100, amount:0,
-            category:'🎁 Referral Bonus', note:'Bonus εγγραφής με referral', date:new Date().toISOString()
+            txn.set(window._doc(db, 'ipear_transactions', refQLedgerId), {
+              customerId: refId, customerUid: refData.uid || '',
+              customerEmail: refData.email || '', customerName: refData.name,
+              card: refData.card, type: 'add', points: 100, amount: 0,
+              category: '🎁 Referral Bonus',
+              note: `Παραπομπή: ${q.newCustomerCard} (${(live.referralCount||0)+1}/${MAX_REFERRALS_PER_USER})`,
+              date: refQNowIso
+            });
           });
         }
-        // Lock new customer's doc so duplicate queue entries can't re-process
-        await window._updateDoc(window._doc(db,'ipear_customers',q.newCustomerId), {referralProcessed:true});
+        // Write ledger for the NEW customer + lock referralProcessed in one commit.
+        // Deterministic id de-dupes vs the self-registration write that may have
+        // already happened (set() with same id is a no-op overwrite — fine).
+        const ncLedgerId = `referral_queue_out_${q.newCustomerId}`;
+        await window._runTransaction(db, async (txn) => {
+          const ncRef = window._doc(db, 'ipear_customers', q.newCustomerId);
+          const ncSnapLive = await txn.get(ncRef);
+          if (!ncSnapLive.exists()) throw new Error('New customer missing');
+          txn.update(ncRef, { referralProcessed: true });
+          txn.set(window._doc(db, 'ipear_transactions', ncLedgerId), {
+            customerId: q.newCustomerId, customerUid: q.newCustomerUid || '',
+            customerEmail: q.newCustomerEmail || '', customerName: q.newCustomerName,
+            card: q.newCustomerCard, type: 'add', points: 100, amount: 0,
+            category: '🎁 Referral Bonus',
+            note: 'Bonus εγγραφής με referral',
+            date: new Date().toISOString()
+          });
+        });
         await markDone();
       } catch(_) {}
     }
@@ -1726,6 +1830,7 @@ window.executeTierDowngrade = executeTierDowngrade;
 window._scanOrphans = scanOrphans;
 window._deleteGhostCustomer = deleteGhostCustomer;
 window._deleteOrphanTxs = deleteOrphanTxs;
+window._deleteSecondaryOrphans = deleteSecondaryOrphans;
 window._runSystemHealthCheck = runSystemHealthCheck;
 window.loadDeletionRequests = loadDeletionRequests;
 window.gdprDeleteCustomer = gdprDeleteCustomer;

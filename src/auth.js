@@ -86,7 +86,12 @@ function _hideSplash() {
   if (!el || !el.classList.contains('active') || el.classList.contains('fade-out')) return;
   document.getElementById('splash-lbl').textContent = 'Καλωσήρθες! 🍐';
   el.classList.add('fade-out');
-  setTimeout(() => { el.classList.remove('active','fade-out'); }, 600);
+  setTimeout(() => {
+    el.classList.remove('active','fade-out');
+    // Broadcast so deferred UI (live-points animation queued while splash
+    // was up) can fire AFTER the splash is fully gone, not behind it.
+    window.dispatchEvent(new Event('splash-hidden'));
+  }, 600);
 }
 
 function _spawnSparkles(scene) {
@@ -497,7 +502,11 @@ export async function submitRegister() {
       err.textContent = `⏳ Έχεις ήδη λάβει SMS στον ${phone}. Δοκίμασε ξανά σε ${_m > 0 ? _m + 'λ ' : ''}${_s}δ.`;
       btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
     }
-    const _globalLog = JSON.parse(localStorage.getItem(_smsGlobalKey) || '[]').filter(t => _now - t < 60 * 60 * 1000);
+    // Corrupted localStorage entry would crash submitRegister with SyntaxError
+    // and leave the modal hanging — guard the parse and fall back to "no log".
+    let _globalLog = [];
+    try { _globalLog = (JSON.parse(localStorage.getItem(_smsGlobalKey) || '[]') || []).filter(t => _now - t < 60 * 60 * 1000); }
+    catch(_) { _globalLog = []; }
     if (_globalLog.length >= 3) {
       err.textContent = '🔴 Πολλές προσπάθειες από αυτή τη συσκευή. Δοκίμασε σε 1 ώρα.';
       btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
@@ -759,7 +768,10 @@ export async function resendOTP() {
 
   const _smsGlobalKey = '_sms_g';
   const _now2 = Date.now();
-  const _globalLog2 = JSON.parse(localStorage.getItem(_smsGlobalKey) || '[]').filter(t => _now2 - t < 60 * 60 * 1000);
+  // Same guard as submitRegister — corrupted localStorage must not crash resend.
+  let _globalLog2 = [];
+  try { _globalLog2 = (JSON.parse(localStorage.getItem(_smsGlobalKey) || '[]') || []).filter(t => _now2 - t < 60 * 60 * 1000); }
+  catch(_) { _globalLog2 = []; }
   if (_globalLog2.length >= 3) {
     err.textContent = '🔴 Πολλές προσπάθειες από αυτή τη συσκευή. Δοκίμασε σε 1 ώρα.';
     document.getElementById('otp-resend-btn').style.display = 'inline';
@@ -798,6 +810,28 @@ export function cancelOTP() {
   showScreen('s-register');
 }
 
+// ────────────────────────────────────────
+//  Structured error renderer for boxed .err-msg containers.
+//  Falls back to plain textContent when only `title` is passed.
+// ────────────────────────────────────────
+function _renderErr(el, { icon = '', title = '', body = '', cta = null, kind = 'error' } = {}) {
+  if (!el) return;
+  el.classList.toggle('err-warn', kind === 'warn');
+  if (!body && !cta) {
+    el.textContent = icon ? `${icon} ${title}` : title;
+    return;
+  }
+  const safeTitle = String(title).replace(/[<>&]/g, ch => ({ '<':'&lt;','>':'&gt;','&':'&amp;' }[ch]));
+  const safeBody  = String(body ).replace(/[<>&]/g, ch => ({ '<':'&lt;','>':'&gt;','&':'&amp;' }[ch]));
+  let html = `<span class="err-title">${icon ? icon + ' ' : ''}${safeTitle}</span>`;
+  if (body) html += `<span class="err-body">${safeBody}</span>`;
+  if (cta && cta.label && cta.onClickAttr) {
+    const safeLbl = String(cta.label).replace(/[<>&]/g, ch => ({ '<':'&lt;','>':'&gt;','&':'&amp;' }[ch]));
+    html += `<button type="button" class="err-cta" ${cta.onClickAttr}>${safeLbl}</button>`;
+  }
+  el.innerHTML = html;
+}
+
 // ════════════════════════════════════════
 //  EMAIL + PASSWORD LOGIN
 // ════════════════════════════════════════
@@ -820,7 +854,23 @@ export async function submitPhone() {
     logger.log('%c[LOGIN] CHECKBOX VALUE IS:', 'color:#ff00ff;font-weight:bold;font-size:14px', remCb?.checked);
     if (window._setPersistenceMode) {
       logger.log('%c[LOGIN] Calling _setPersistenceMode with:', 'color:#ff6600;font-weight:bold;font-size:14px', remCb?.checked ? 'LOCAL 👑' : 'SESSION ⏳');
-      await window._setPersistenceMode(remCb?.checked ? 'local' : 'session');
+      try {
+        await window._setPersistenceMode(remCb?.checked ? 'local' : 'session');
+      } catch (pe) {
+        // iOS Safari private mode / strict ITP / cross-site cookie block.
+        // Login still proceeds — but if the user asked to be remembered,
+        // they should know it won't stick. Non-blocking copy that auto-
+        // clears after a few seconds.
+        logger.warn('[login] persistence set failed:', pe?.code || pe?.message || pe);
+        if (remCb?.checked) {
+          _renderErr(err, {
+            icon: '⚠️', kind: 'warn',
+            title: '"Να με θυμάσαι" δεν είναι διαθέσιμο',
+            body: 'Το browser δεν επιτρέπει αποθήκευση συνεδρίας (πιθανώς ιδιωτική περιήγηση). Θα παραμείνεις συνδεδεμένος μόνο σε αυτή τη συνεδρία.'
+          });
+          setTimeout(() => { try { err.textContent = ''; } catch(_) {} }, 5000);
+        }
+      }
     } else {
       logger.log('%c[LOGIN] ⚠️ window._setPersistenceMode IS MISSING!', 'color:#ff0000;font-weight:bold;font-size:16px');
     }
@@ -831,18 +881,65 @@ export async function submitPhone() {
     const lookup = await findCustomerByAuth(firebaseUID, email, { logger });
     state.foundCustomer = lookup.customer;
     if (!state.foundCustomer) {
-      // No customer doc + no transient error = the loyalty account does
-      // not exist (post-deletion, or never registered through this flow).
-      // We DID succeed at Firebase Auth signIn though — leaving that
-      // session alive lets onAuthStateChanged restore an orphan user on
-      // the next page load, which feels like "ghost login". Tear it down.
-      if (!lookup.error) {
+      // Two distinct failure modes need distinct UX:
+      //   • Transient error (network / App Check) → keep session, keep card,
+      //     ask user to retry. Wiping here would log out a customer whose
+      //     account is fine, plus drop their offline QR.
+      //   • findCustomer returned null with no error → AMBIGUOUS. Could be
+      //     a deleted account OR a legacy doc that the rules hide from the
+      //     authenticated-but-not-verified user. Worker /check-registration
+      //     is the authoritative oracle (admin-context Firestore read,
+      //     bypasses rules). Confirm with the worker BEFORE doing the
+      //     destructive sign-out + offline-card wipe.
+      if (lookup.error) {
+        _renderErr(err, {
+          icon: '⚠️', kind: 'warn',
+          title: 'Σφάλμα σύνδεσης',
+          body: 'Δεν μπορούμε να φτάσουμε στη βάση τώρα. Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά.'
+        });
+        btn.disabled = false; btn.innerHTML = 'Είσοδος →'; return;
+      }
+
+      let confirmedMissing = false;
+      try {
+        const r = await fetch(_WORKER_URL + '/check-registration', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        if (r.ok) {
+          const d = await r.json();
+          // exists:false + degraded:false ⇒ authoritative "no such account".
+          // exists:true ⇒ account is there, rules are hiding it from this
+          //               auth state (most often: legacy doc + unverified
+          //               email). degraded ⇒ worker couldn't verify, do
+          //               not act on it.
+          confirmedMissing = (d?.exists === false && d?.degraded !== true);
+        }
+      } catch (e) {
+        logger.warn('[login] check-registration failed:', e?.message || e);
+      }
+
+      if (confirmedMissing) {
         try { await window._signOut(window._auth); }
         catch (e) { logger.warn('[login] orphan signOut failed:', e?.code || e?.message || e); }
+        try {
+          [_REM_KEY, _CACHE_KEY, 'ipear_offline_card'].forEach(k => localStorage.removeItem(k));
+        } catch(_) {}
+        _renderErr(err, {
+          icon: '❌',
+          title: 'Δεν βρέθηκε λογαριασμός',
+          body: 'Δεν υπάρχει loyalty account για αυτό το email. Δημιούργησε νέο ή επικοινώνησε με το κατάστημα.',
+          cta: { label: 'Δημιουργία λογαριασμού →', onClickAttr: 'onclick="openRegister()"' }
+        });
+      } else {
+        _renderErr(err, {
+          icon: '⚠️', kind: 'warn',
+          title: 'Ο λογαριασμός χρειάζεται ενημέρωση',
+          body: 'Έχει υπάρχει αλλά απαιτείται επαλήθευση. Δοκίμασε επαλήθευση email ή ξέχασα τον κωδικό μου.',
+          cta: { label: 'Ξέχασα τον κωδικό →', onClickAttr: 'onclick="openForgotPass()"' }
+        });
       }
-      err.textContent = lookup.error
-        ? '⚠️ Σφάλμα σύνδεσης ή App Check. Έλεγξε το δίκτυό σου και δοκίμασε ξανά.'
-        : '❌ Δεν βρέθηκε loyalty λογαριασμός για αυτό το email.';
       btn.disabled = false; btn.innerHTML = 'Είσοδος →'; return;
     }
 
