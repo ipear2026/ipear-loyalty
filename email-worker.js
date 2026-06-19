@@ -62,7 +62,7 @@ const REDEEM_BLOCK_TTL_SECONDS = 15 * 60; // block for 15 minutes
 const REDEEM_FAIL_TTL_SECONDS = 15 * 60;  // keep the fail counter for 15 minutes
 // REDEEM_FAIL_KEY_PREFIX / REDEEM_BLOCK_KEY_PREFIX imported from worker/lib/redeem-keys.js
 
-function isRateLimited(ip) {
+function _isRateLimited(ip) {
   const now = Date.now();
   const bucket = _rateBuckets.get(ip);
   if (!bucket || now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
@@ -129,7 +129,7 @@ async function rateLimitOrBlock(env, ip, prefix, maxHits, windowSeconds, CORS, c
 // targetKey examples: 'phone:306900000000', 'email:victim@example.com'.
 // The IP and target buckets are checked sequentially against the same window
 // and threshold — if EITHER is over the limit, we 429. Two KV writes per call.
-async function rateLimitCompound(env, ip, targetKey, prefix, maxHits, windowSeconds, CORS, customMsg) {
+async function _rateLimitCompound(env, ip, targetKey, prefix, maxHits, windowSeconds, CORS, customMsg) {
   const ipRes = await rateLimitOrBlock(env, ip, prefix, maxHits, windowSeconds, CORS, customMsg);
   if (ipRes) return ipRes;
   if (!targetKey) return null;
@@ -198,7 +198,7 @@ async function isRedeemBlocked(env, blockKey) {
   return (await env.RATE_LIMIT_KV.get(blockKey)) !== null;
 }
 
-function isReferralRateLimited(ip) {
+function _isReferralRateLimited(ip) {
   const now = Date.now();
   const bucket = _referralBuckets.get(ip);
   if (!bucket || now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
@@ -224,11 +224,16 @@ function pruneRateBuckets() {
   for (const [ph, ts] of _otpBuckets) {
     if (now - ts > OTP_PHONE_COOLDOWN_MS * 2) _otpBuckets.delete(ph);
   }
+  // KV-leak fix: _logEventBuckets is isolate-local now (was KV-backed); prune
+  // it on the same schedule so it doesn't grow unbounded per isolate lifetime.
+  for (const [ip, b] of _logEventBuckets) {
+    if (now - b.windowStart > RATE_LIMIT_WINDOW_MS) _logEventBuckets.delete(ip);
+  }
 }
 
 export default {
   // ── Cron Trigger: runs /health-deep every 30 minutes ──
-  async scheduled(event, env, ctx) {
+  async scheduled(event, env, _ctx) {
     console.log('[cron] health-deep check triggered at', new Date().toISOString());
     const fakeUrl = 'https://worker/health-deep';
     const fakeReq = new Request(fakeUrl, {
@@ -313,7 +318,15 @@ export default {
     if (path === '/verify-sms-otp') return handleVerifySmsOtp(request, env, CORS);
     if (path === '/woo-sync-tier')   return handleWooSyncTier(request, env, CORS);
     if (path === '/client-error')    return handleClientError(request, env, CORS);
-    if (path === '/log-event')       return handleLogEvent(request, env, CORS);
+    if (path === '/log-event')       return handleLogEvent(request, env, CORS, ctx);
+    // /push has DUAL-mode auth handled inside the handler:
+    //   • ADMIN_SECRET → broadcast to any tokens array (admin marketing blasts)
+    //   • idToken      → self-push only, server resolves caller's own fcmToken
+    //                    from Firestore (so the SPA's enable-push confirmation
+    //                    works without exposing the broadcast surface).
+    // Routed BEFORE the central ADMIN_SECRET gate so the idToken branch isn't
+    // pre-rejected.
+    if (path === '/push')       return handlePush(request, env, CORS);
 
     // All other endpoints require ADMIN_SECRET
     const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -321,7 +334,6 @@ export default {
       return resp({ error: 'Unauthorized' }, 401, CORS);
     }
 
-    if (path === '/push')       return handlePush(request, env, CORS);
     if (path === '/push-debug') return handlePushDebug(request, env, CORS);
     if (path === '/bulk-sms') return handleBulkSMS(request, env, CORS);
     if (path === '/woo-create-coupon') return handleWooCreateCoupon(request, env, CORS);
@@ -382,7 +394,7 @@ async function handleSendSmsOtp(request, env, CORS) {
   try { body = await readJsonCapped(request, 32 * 1024); }
   catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
-  const rawPhone = String(body.phone || '').replace(/[\s\-\(\)]/g, '');
+  const rawPhone = String(body.phone || '').replace(/[\s\-()]/g, '');
   if (!rawPhone || !/^6\d{9}$/.test(rawPhone))
     return resp({ error: 'Μη έγκυρος αριθμός (π.χ. 6912345678)' }, 400, CORS);
 
@@ -452,7 +464,7 @@ async function handleVerifySmsOtp(request, env, CORS) {
   try { body = await readJsonCapped(request, 32 * 1024); }
   catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
-  const rawPhone = String(body.phone || '').replace(/[\s\-\(\)]/g, '');
+  const rawPhone = String(body.phone || '').replace(/[\s\-()]/g, '');
   const userCode = String(body.code || '').trim();
   const email    = String(body.email || '').trim().toLowerCase();
   if (!rawPhone || !userCode) return resp({ error: 'phone and code required' }, 400, CORS);
@@ -482,6 +494,25 @@ async function handleVerifySmsOtp(request, env, CORS) {
   // ── Success — delete OTP ──
   await env.RATE_LIMIT_KV.delete(kvKey);
   console.log('[verify-sms-otp] ✅ verified', rawPhone);
+
+  // ── Phone-OTP receipt: lets /send-welcome and /process-referral grant
+  //    the +50 / +100 bonuses to the Brevo OTP signup path, where the Auth
+  //    user is created via email/password and has no `phoneNumber` claim.
+  //    Without this, the phone-claim gate (round-3 hardening) blocks every
+  //    Brevo signup from receiving bonuses. The receipt key is the phone
+  //    itself, so the bonus endpoints can verify by reading the customer
+  //    doc's phone field. 30-day TTL is generous enough for retries while
+  //    bounded for KV hygiene. Direct-REST signUp attackers without a real
+  //    OTP still get 403'd because no receipt exists for their phone.
+  try {
+    await env.RATE_LIMIT_KV.put(
+      `phone-otp:${rawPhone}`,
+      JSON.stringify({ at: Date.now() }),
+      { expirationTtl: 30 * 86400 }
+    );
+  } catch (recErr) {
+    console.warn('[verify-sms-otp] phone-otp receipt write failed (non-fatal):', recErr.message);
+  }
 
   // ── BUGFIX: clean up orphan Firebase Auth users that admin deletion left behind ──
   // Scenario: admin deletes a customer → Firestore wiped but Auth user remained
@@ -595,6 +626,95 @@ async function handleVerifySmsOtp(request, env, CORS) {
 //  app shows the correct total immediately. Idempotent: if the customer
 //  already has `marketingWelcomeProcessed: true`, the credit is skipped.
 // ══════════════════════════════════════════════════════════════════════════
+// Republishes ipear_leaderboard/latest from the worker. The customer app
+// reads this doc and uses it to render the top-N. Previously only the admin
+// app republished it (on loadAll / add / redeem), so customers who earned
+// points purely through worker-driven flows (welcome bonus, referrals) were
+// invisible on the board until an admin happened to open the dashboard.
+// That manifested as a "phantom" pinned "Εσύ" row tied with whoever last
+// held #10. Best-effort: never throws, never blocks the caller.
+async function republishLeaderboardFromWorker(env, accessToken) {
+  try {
+    const projectId = env.FCM_PROJECT_ID;
+    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+    const queryRes = await fetch(`${fsBase}:runQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'ipear_customers' }],
+          orderBy: [{ field: { fieldPath: 'totalPoints' }, direction: 'DESCENDING' }],
+          limit: 100
+        }
+      })
+    });
+    if (!queryRes.ok) return;
+    const rows = await queryRes.json();
+    const lbAll = [];
+    for (const row of (rows || [])) {
+      const f = row.document?.fields;
+      if (!f) continue;
+      if (f.blocked?.booleanValue === true) continue;
+      lbAll.push({
+        name: f.name?.stringValue || '—',
+        points: Number(f.points?.integerValue || 0),
+        totalPoints: Number(f.totalPoints?.integerValue || 0),
+        card: f.card?.stringValue || '',
+      });
+    }
+    lbAll.sort((a, b) => b.totalPoints - a.totalPoints || (a.name || '').localeCompare(b.name || '', 'el'));
+    const top20 = lbAll.slice(0, 20).map(c => ({
+      name: (c.name || '').split(' ').map((w, i) => i === 0 ? w : (w[0] || '') + '.').join(' '),
+      points: c.points,
+      totalPoints: c.totalPoints,
+      card: c.card,
+    }));
+
+    const lbFields = {
+      top: { arrayValue: { values: top20.map(c => ({ mapValue: { fields: {
+        name:        { stringValue: c.name || '' },
+        points:      { integerValue: c.points || 0 },
+        totalPoints: { integerValue: c.totalPoints || 0 },
+        card:        { stringValue: c.card || '' },
+      }}})) }},
+      total:     { integerValue: lbAll.length },
+      updatedAt: { stringValue: new Date().toISOString() },
+    };
+    await fetch(`${fsBase}/ipear_leaderboard/latest`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+      body: JSON.stringify({ fields: lbFields })
+    });
+  } catch (e) {
+    console.warn('[leaderboard] worker republish failed (non-fatal):', e.message);
+  }
+}
+
+// Helper used by /send-welcome and /process-referral to check the Brevo
+// OTP receipt left by /verify-sms-otp. Reads the customer doc to find the
+// phone number, then checks `phone-otp:{phone}` in KV. Returns true if a
+// fresh OTP receipt exists. accessToken must be a service-account access
+// token so the customer doc read bypasses Firestore rules.
+async function hasPhoneOtpReceipt(env, uid, accessToken) {
+  if (!env.RATE_LIMIT_KV) return false;
+  try {
+    const projectId = env.FCM_PROJECT_ID;
+    const docRes = await fetch(
+      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_customers/${uid}`,
+      { headers: { 'Authorization': 'Bearer ' + accessToken } }
+    );
+    if (!docRes.ok) return false;
+    const docJson = await docRes.json();
+    const rawPhone = String(docJson?.fields?.phone?.stringValue || '').replace(/[\s\-()]/g, '');
+    if (!/^6\d{9}$/.test(rawPhone)) return false;
+    const receipt = await env.RATE_LIMIT_KV.get(`phone-otp:${rawPhone}`);
+    return !!receipt;
+  } catch (e) {
+    console.warn('[phone-otp-receipt] check failed:', e.message);
+    return false;
+  }
+}
+
 async function handleSendWelcome(request, env, CORS) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   { const _rl = await rateLimitOrBlock(env, ip, 'welcome', RATE_LIMIT_MAX_HITS, 900, CORS); if (_rl) return _rl; }
@@ -621,19 +741,30 @@ async function handleSendWelcome(request, env, CORS) {
     const verifyData = await verifyRes.json();
     const u = verifyData?.users?.[0];
     if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
-    // Phone-verification gate (replaces the deprecated emailVerified gate).
-    // SMS OTP at signup is the sole identity check, so we require the user
-    // record to have a verified phoneNumber. Firebase only populates this
-    // field after a successful Phone Auth flow — an attacker who signs up
-    // via signUp REST (email+password, no SMS) has no phoneNumber and is
-    // rejected here, closing the bonus-mint + phishing-reflector path the
-    // original CRIT-1 fix defended against.
-    const hasPhone = typeof u.phoneNumber === 'string' && u.phoneNumber.length > 0;
-    if (!hasPhone) {
-      return resp({ error: 'phone-not-verified' }, 403, CORS);
-    }
+    // Phone-verification gate. SMS OTP at signup is the sole identity check.
+    // We accept EITHER:
+    //   (a) Firebase Auth user has a phoneNumber claim — set when registration
+    //       used Firebase Phone Auth (signInWithPhoneNumber + linkCredential).
+    //   (b) A fresh `phone-otp:{phone}` receipt exists in KV for the customer
+    //       doc's phone — set by /verify-sms-otp when the Brevo OTP path is
+    //       used. The Brevo path creates an email/password-only Auth user, so
+    //       phoneNumber is empty even though a real SMS OTP was just verified.
+    //
+    // A direct-REST signUp attacker (email+password, no SMS) has neither: no
+    // phoneNumber on the Auth record, and no OTP receipt for any phone they
+    // could put in the customer doc. They still get 403'd, closing the
+    // bonus-mint + phishing-reflector path the original CRIT-1 fix defended
+    // against.
     verifiedUid   = u.localId;
     verifiedEmail = String(u.email).trim().toLowerCase();
+    const hasPhone = typeof u.phoneNumber === 'string' && u.phoneNumber.length > 0;
+    if (!hasPhone) {
+      const accessTokenForCheck = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+      const hasReceipt = await hasPhoneOtpReceipt(env, verifiedUid, accessTokenForCheck);
+      if (!hasReceipt) {
+        return resp({ error: 'phone-not-verified' }, 403, CORS);
+      }
+    }
   } catch (e) {
     console.error('[send-welcome] token verify failed:', e.message);
     return resp({ error: 'Token verification failed' }, 401, CORS);
@@ -652,44 +783,15 @@ async function handleSendWelcome(request, env, CORS) {
   }
   const marketingOptIn = !!body.marketingOptIn;
 
-  // 3. Send the welcome email (to verified address only).
-  //    The points display is illustrative; the authoritative balance lives
-  //    in Firestore and is awarded below.
-  const appUrl = (env.APP_URL || 'https://loyalty.ipear.gr') + '/customer.html';
-  const displayPoints = marketingOptIn ? 50 : 0;
-  const htmlContent = buildWelcomeEmail(name, displayPoints, appUrl);
-
-  try {
-    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'api-key':      env.BREVO_API_KEY,
-        'Content-Type': 'application/json',
-        'Accept':       'application/json',
-      },
-      body: JSON.stringify({
-        sender: {
-          name:  env.SENDER_NAME  || 'iPear Loyalty',
-          email: (env.SENDER_EMAIL || '').trim(),
-        },
-        to: [{ email: verifiedEmail, name }],
-        subject: '🍐 Καλώς ήρθες στο iPear Loyalty!',
-        htmlContent,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      console.error('[send-welcome] Brevo error:', res.status, err?.message || '');
-      return resp({ error: 'Failed to send welcome email' }, 502, CORS);
-    }
-    console.log('[send-welcome] ✅ sent to', verifiedEmail);
-
-    // 4. CRITICAL-2 pair: server-side awards the +50 marketing bonus.
-    //    The Firestore rule now forces points=0 at signup, so this is the
-    //    only place the bonus can land. Atomic + idempotent.
-    let bonusAwarded = false;
-    if (marketingOptIn) {
+  // 3. CRITICAL-2 pair: server-side awards the +50 marketing bonus FIRST,
+  //    independent of email-send success. Previously the bonus was credited
+  //    only after a successful Brevo email send — when Brevo failed (quota,
+  //    transient error, invalid sender), the worker returned 502 and the
+  //    +50 was silently dropped. Customer-facing impact: zero points despite
+  //    a clear marketing opt-in. The bonus is the contractual promise; the
+  //    email is a nice-to-have. Atomic + idempotent via marketingWelcomeProcessed.
+  let bonusAwarded = false;
+  if (marketingOptIn) {
       try {
         const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
         const projectId  = env.FCM_PROJECT_ID;
@@ -756,19 +858,53 @@ async function handleSendWelcome(request, env, CORS) {
           if (!txRes.ok) console.error('[send-welcome] marketing TX log failed:', txRes.status);
           else console.log('[send-welcome] ✅ marketing +50 credited to', verifiedUid);
           bonusAwarded = true;
+          await republishLeaderboardFromWorker(env, accessToken);
         }
       } catch (txErr) {
         console.error('[send-welcome] marketing credit error:', txErr.message);
-        // Don't fail the response — the welcome email already went out and the
-        // idempotency guard above lets the client retry safely.
+        // Don't fail the response — the idempotency guard above lets the
+        // client retry safely on the next /send-welcome call (e.g. next login).
       }
     }
 
-    return resp({ ok: true, bonusAwarded }, 200, CORS);
-  } catch(e) {
-    console.error('[send-welcome]', e.message);
-    return resp({ error: 'Internal error' }, 500, CORS);
+  // 4. Send the welcome email — best-effort, never blocks the bonus.
+  //    A Brevo failure (quota, transient 5xx, sender misconfig) must NOT
+  //    silently drop the +50 customer-facing credit; the email is the
+  //    nice-to-have, the points are the contract.
+  try {
+    const appUrl = (env.APP_URL || 'https://loyalty.ipear.gr') + '/customer.html';
+    const displayPoints = marketingOptIn ? 50 : 0;
+    const htmlContent = buildWelcomeEmail(name, displayPoints, appUrl);
+
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key':      env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept':       'application/json',
+      },
+      body: JSON.stringify({
+        sender: {
+          name:  env.SENDER_NAME  || 'iPear Loyalty',
+          email: (env.SENDER_EMAIL || '').trim(),
+        },
+        to: [{ email: verifiedEmail, name }],
+        subject: '🍐 Καλώς ήρθες στο iPear Loyalty!',
+        htmlContent,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error('[send-welcome] Brevo error (non-fatal):', res.status, err?.message || '');
+    } else {
+      console.log('[send-welcome] ✅ sent to', verifiedEmail);
+    }
+  } catch (mailErr) {
+    console.error('[send-welcome] email fetch failed (non-fatal):', mailErr.message);
   }
+
+  return resp({ ok: true, bonusAwarded }, 200, CORS);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -1230,13 +1366,11 @@ async function handleWooAddPoints(request, env, CORS, ctx) {
     const docId = doc.name.split('/').pop();
     const docPath = `${fsBase}/ipear_customers/${docId}`;
     const fields = doc.fields || {};
-    const currentPts = Number(fields.points?.integerValue || 0);
-    const currentTot = Number(fields.totalPoints?.integerValue || 0);
 
     // 2. Calculate points: 1€ = 10 πόντοι
+    //    Authoritative totals come from the transactional re-read below;
+    //    no need to capture pre-transaction values here.
     const earnedPoints = Math.floor(orderTotal * 10);
-    const newPts = currentPts + earnedPoints;
-    const newTot = currentTot + earnedPoints;
 
     // 3. Atomic update via Firestore transaction (prevents race condition on concurrent orders)
     const beginRes = await fetch(
@@ -1920,7 +2054,7 @@ async function handleSMS(request, env, CORS) {
   if (!phone?.trim())   return resp({ error: 'phone is required' }, 400, CORS);
   if (!message?.trim()) return resp({ error: 'message is required' }, 400, CORS);
 
-  const clean = phone.replace(/[\s\-\(\)]/g, '');
+  const clean = phone.replace(/[\s\-()]/g, '');
   const intl  = clean.startsWith('+') ? clean : '+30' + clean;
   if (!/^\+\d{7,15}$/.test(intl))
     return resp({ error: 'Μη έγκυρος αριθμός τηλεφώνου' }, 400, CORS);
@@ -1993,7 +2127,7 @@ async function handleBulkSMS(request, env, CORS) {
   for (const chunk of chunkArray(recipients, 5)) {
     const results = await Promise.allSettled(
       chunk.map(async (r) => {
-        const phone = (r.phone || '').replace(/[\s\-\(\)]/g, '');
+        const phone = (r.phone || '').replace(/[\s\-()]/g, '');
         if (!phone) throw new Error('no phone');
         const intl = phone.startsWith('+') ? phone : '+30' + phone;
         if (!/^\+\d{7,15}$/.test(intl)) throw new Error('invalid phone');
@@ -2113,17 +2247,70 @@ async function handleEmail(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 
 async function handlePush(request, env, CORS) {
-  // Admin-gated; 5000 tokens × ~200 bytes ≈ 1 MB worst-case payload.
+  // Dual auth modes:
+  //   ADMIN_SECRET → broadcast: caller passes a `tokens` array, we push to all
+  //                  (marketing blasts from the admin dashboard).
+  //   idToken      → self-push: caller passes their Firebase ID token; we
+  //                  resolve their UID, look up their own fcmToken from
+  //                  Firestore, and push only to that. The body's `tokens`
+  //                  array is IGNORED in this branch so a logged-in customer
+  //                  can't aim the push at anyone else.
+  // The SPA's "🔔 enabled" confirmation push uses the idToken branch.
   let body;
   try { body = await readJsonCapped(request, 2 * 1024 * 1024); }
   catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
-  const { tokens, title, message } = body;
+  const authHeader = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  const isAdmin = !!authHeader && env.ADMIN_SECRET && (await timingSafeEqual(authHeader, env.ADMIN_SECRET));
+
+  let { tokens, title, message } = body;
+
+  if (!title?.trim())
+    return resp({ error: 'title is required' }, 400, CORS);
+
+  if (!isAdmin) {
+    // Non-admin caller MUST present a valid idToken AND the only token we
+    // accept to push to is the one stored on their own customer doc.
+    const idToken = (body.idToken || '').trim();
+    if (!idToken) return resp({ error: 'Unauthorized' }, 401, CORS);
+    if (!env.FIREBASE_API_KEY) return resp({ error: 'Server not configured' }, 503, CORS);
+
+    let callerUid;
+    try {
+      const vRes = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
+      );
+      const vData = await vRes.json();
+      callerUid = vData?.users?.[0]?.localId;
+      if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
+    } catch (e) {
+      console.error('[push] idToken verify failed:', e.message);
+      return resp({ error: 'Token verification failed' }, 401, CORS);
+    }
+
+    // Look up the caller's own fcmToken — this is the ONLY destination
+    // self-push can target.
+    try {
+      const fsAccessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+      const projectId = env.FCM_PROJECT_ID;
+      const custRes = await fetch(
+        `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_customers/${callerUid}`,
+        { headers: { 'Authorization': 'Bearer ' + fsAccessToken } }
+      );
+      if (!custRes.ok) return resp({ error: 'Customer not found' }, 404, CORS);
+      const cust = await custRes.json();
+      const ownToken = cust.fields?.fcmToken?.stringValue || '';
+      if (!ownToken) return resp({ error: 'No fcmToken on file' }, 400, CORS);
+      tokens = [ownToken];
+    } catch (e) {
+      console.error('[push] self-push lookup failed:', e.message);
+      return resp({ error: 'Lookup failed' }, 500, CORS);
+    }
+  }
 
   if (!Array.isArray(tokens) || !tokens.length)
     return resp({ error: 'tokens array is required' }, 400, CORS);
-  if (!title?.trim())
-    return resp({ error: 'title is required' }, 400, CORS);
   if (tokens.length > MAX_TOKENS)
     return resp({ error: `Too many tokens (max ${MAX_TOKENS})` }, 400, CORS);
 
@@ -2521,7 +2708,7 @@ async function handleResetPassword(request, env, CORS) {
 const CHECK_REG_RATE_MAX = 10;
 const _checkRegBuckets = new Map();
 
-function isCheckRegLimited(ip) {
+function _isCheckRegLimited(ip) {
   const now = Date.now();
   const b = _checkRegBuckets.get(ip);
   if (!b || now - b.windowStart > RATE_LIMIT_WINDOW_MS) {
@@ -2561,7 +2748,7 @@ async function handleCheckRegistration(request, env, CORS) {
   catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
   const email = (body.email || '').trim().toLowerCase();
-  const phone = (body.phone || '').replace(/[\s\-\(\)]/g, '');
+  const phone = (body.phone || '').replace(/[\s\-()]/g, '');
 
   if (!email && !phone) return resp({ error: 'email or phone required' }, 400, CORS);
   if (email && (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254))
@@ -2677,19 +2864,23 @@ async function handleProcessReferral(request, env, CORS) {
     const u = verifyData?.users?.[0];
     const callerUid = u?.localId;
     if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
-    // Phone-verification gate (replaces the deprecated emailVerified gate).
-    // Rejects tokens whose Auth record never completed Phone Auth — i.e.
-    // direct-REST email+password signups that bypass the SMS OTP step the
-    // SPA enforces. Combined with the per-uid referralProcessed flag and
-    // the existing IPv6 /64 rate limit, this closes the fake-account
-    // referral-mint path.
-    const hasPhone = typeof u?.phoneNumber === 'string' && u.phoneNumber.length > 0;
-    if (!hasPhone) {
-      return resp({ error: 'phone-not-verified' }, 403, CORS);
-    }
 
     // 2. Get service account access token for Firestore
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+
+    // Phone-verification gate. Accepts EITHER (a) Firebase phoneNumber claim
+    // (legacy Phone Auth path) OR (b) a fresh `phone-otp:{phone}` receipt
+    // written by /verify-sms-otp (Brevo OTP path, which links no phone to
+    // the email/password Auth user). Direct-REST signUp attackers have
+    // neither and still get 403'd — closing the fake-account referral-mint
+    // path that the original round-3 fix defended against.
+    const hasPhone = typeof u?.phoneNumber === 'string' && u.phoneNumber.length > 0;
+    if (!hasPhone) {
+      const hasReceipt = await hasPhoneOtpReceipt(env, callerUid, accessToken);
+      if (!hasReceipt) {
+        return resp({ error: 'phone-not-verified' }, 403, CORS);
+      }
+    }
     const projectId = env.FCM_PROJECT_ID;
     const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
     const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
@@ -2959,6 +3150,12 @@ async function handleProcessReferral(request, env, CORS) {
         processedAt: { stringValue: new Date().toISOString() }
       }})
     });
+
+    // 10. Refresh the public leaderboard so the new customer (and the
+    //     referrer's updated totalPoints) show up immediately.
+    if (referrerAwarded || newCustomerAwarded) {
+      await republishLeaderboardFromWorker(env, accessToken);
+    }
 
     return resp({ ok: true, referrerAwarded, newCustomerAwarded }, 200, CORS);
 
@@ -3581,16 +3778,86 @@ const ALLOWED_EVENTS = [
   'reward_opened', 'reward_redeemed', 'reward_cancelled',
 ];
 
-async function handleLogEvent(request, env, CORS) {
-  const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
-  // MEDIUM-6: KV-backed fail-closed limiter (replaces leaky per-isolate Map).
-  // /log-event is high-volume analytics, so cap at 30 events per IP per 15 min.
-  {
-    const _r = await isRateLimitedKV(env, clientIP, 'logevent', 30, 900);
-    if (_r.limited && _r.reason === 'kv-unavailable') {
-      return resp({ error: 'Service temporarily unavailable' }, 503, CORS);
+// ── KV-leak fix (URGENT) ─────────────────────────────────────────────────────
+// Previously: every /log-event hit consumed ~4 KV writes (2 for the IP rate
+// limit, 2 for the per-event daily counter). The free-tier ceiling is 1k
+// writes/day total, so a handful of active customers exhausted half the quota
+// in hours. This rewrite keeps Firestore as the single source of truth for the
+// admin analytics dashboard and moves both rate-limit + counter accumulation
+// into the worker isolate. Firestore writes are amortized via a periodic
+// flush, so N raw events → ~1 Firestore write per isolate per 30s.
+//
+// Tradeoffs explicitly accepted:
+//   • Isolate eviction loses any unflushed counts (a few seconds of analytics).
+//     Acceptable — these are funnel counters, not financial records.
+//   • Rate limit is per-isolate, not global. An attacker rotating across CF
+//     edges could exceed 30 events / 15 min, but the worst-case cost is paid
+//     in Firestore reads (1 read + 1 write per isolate per 30s), not KV
+//     writes. The quota damage is bounded.
+const _logEventBuckets = new Map();           // ip → { windowStart, hits }
+const LOG_EVENT_RATE_MAX = 30;                // events / IP / 15 min, isolate-local
+const _eventBuffer = new Map();               // event name → accumulated count
+let _eventBufferLastFlushAt = 0;
+const EVENT_FLUSH_INTERVAL_MS = 30_000;       // amortize Firestore writes
+
+function _isLogEventRateLimited(ip) {
+  const now = Date.now();
+  const b = _logEventBuckets.get(ip);
+  if (!b || now - b.windowStart > RATE_LIMIT_WINDOW_MS) {
+    _logEventBuckets.set(ip, { windowStart: now, hits: 1 });
+    return false;
+  }
+  b.hits++;
+  return b.hits > LOG_EVENT_RATE_MAX;
+}
+
+async function _flushEventBuffer(env) {
+  if (_eventBuffer.size === 0) return;
+  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID) return;
+
+  // Snapshot + reset so concurrent /log-event calls accumulate into a fresh
+  // bucket while we PATCH Firestore.
+  const snapshot = new Map(_eventBuffer);
+  _eventBuffer.clear();
+
+  try {
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId = env.FCM_PROJECT_ID;
+    const today = new Date().toISOString().slice(0, 10);
+    const docPath = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_analytics/daily_${today}`;
+    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+
+    const readRes = await fetch(docPath, { headers: fsHeaders });
+    let fields = {};
+    if (readRes.ok) {
+      const doc = await readRes.json();
+      fields = doc.fields || {};
     }
-    if (_r.limited) return resp({ ok: true }, 200, CORS); // silent drop on rate-exceed
+
+    for (const [event, delta] of snapshot) {
+      const currentCount = Number(fields[event]?.integerValue || 0);
+      fields[event] = { integerValue: currentCount + delta };
+    }
+    fields.updatedAt = { stringValue: new Date().toISOString() };
+    fields.date = { stringValue: today };
+
+    await fetch(docPath, {
+      method: 'PATCH', headers: fsHeaders,
+      body: JSON.stringify({ fields })
+    });
+  } catch (e) {
+    console.warn('[log-event] flush failed:', e.message);
+    // Best-effort restore so the deltas are retried on the next flush.
+    for (const [event, delta] of snapshot) {
+      _eventBuffer.set(event, (_eventBuffer.get(event) || 0) + delta);
+    }
+  }
+}
+
+async function handleLogEvent(request, env, CORS, ctx) {
+  const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+  if (_isLogEventRateLimited(clientIP)) {
+    return resp({ ok: true }, 200, CORS); // silent drop, no KV write
   }
 
   let body;
@@ -3602,50 +3869,17 @@ async function handleLogEvent(request, env, CORS) {
     return resp({ error: 'Unknown event' }, 400, CORS);
   }
 
-  // Strategy A: KV-backed daily counters (lightweight, no Firestore cost)
-  if (env.RATE_LIMIT_KV) {
-    const today = new Date().toISOString().slice(0, 10);
-    const key = `analytics:${today}:${event}`;
-    try {
-      const raw = await env.RATE_LIMIT_KV.get(key);
-      const count = raw ? parseInt(raw, 10) + 1 : 1;
-      await env.RATE_LIMIT_KV.put(key, String(count), { expirationTtl: 30 * 86400 }); // 30 days
-    } catch (e) {
-      console.warn('[log-event] KV write failed:', e.message);
-    }
-  }
+  // In-isolate accumulation. Zero KV ops on the hot path.
+  _eventBuffer.set(event, (_eventBuffer.get(event) || 0) + 1);
 
-  // Strategy B: Firestore daily aggregation document (for admin dashboard visibility)
-  // Uses ipear_analytics/daily_YYYY-MM-DD — admin-writable, created by worker
-  if (env.FCM_CLIENT_EMAIL && env.FCM_PRIVATE_KEY && env.FCM_PROJECT_ID) {
-    try {
-      const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-      const projectId = env.FCM_PROJECT_ID;
-      const today = new Date().toISOString().slice(0, 10);
-      const docPath = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_analytics/daily_${today}`;
-      const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-      // Read current doc
-      const readRes = await fetch(docPath, { headers: fsHeaders });
-      let fields = {};
-      if (readRes.ok) {
-        const doc = await readRes.json();
-        fields = doc.fields || {};
-      }
-
-      // Increment the event counter
-      const currentCount = Number(fields[event]?.integerValue || 0);
-      fields[event] = { integerValue: currentCount + 1 };
-      fields.updatedAt = { stringValue: new Date().toISOString() };
-      fields.date = { stringValue: today };
-
-      await fetch(docPath, {
-        method: 'PATCH', headers: fsHeaders,
-        body: JSON.stringify({ fields })
-      });
-    } catch (e) {
-      console.warn('[log-event] Firestore write failed:', e.message);
-    }
+  // Opportunistic background flush — claim the slot via timestamp BEFORE
+  // awaiting so concurrent handlers don't double-schedule.
+  const now = Date.now();
+  if (now - _eventBufferLastFlushAt > EVENT_FLUSH_INTERVAL_MS) {
+    _eventBufferLastFlushAt = now;
+    const flushP = _flushEventBuffer(env);
+    if (ctx && ctx.waitUntil) ctx.waitUntil(flushP);
+    else flushP.catch(() => {});
   }
 
   return resp({ ok: true }, 200, CORS);
