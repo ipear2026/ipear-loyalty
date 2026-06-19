@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { escHtml, escJs } from '../utils.js';
 import { toast } from './ui.js';
+import { publishLeaderboard } from './leaderboard.js';
 
 const DB = () => window._db;
 
@@ -202,6 +203,13 @@ export async function confirmVerify(redemptionId, code) {
     });
 
     _ctx.onRedemptionApproved({ customerId: custId, newPoints: newPts });
+    // Fire-and-forget leaderboard refresh so the customer's snapshot
+    // listener on ipear_leaderboard/latest picks up the new rank.
+    // Was missing — the old non-atomic path in admin-main.js called
+    // _publishLeaderboard after every points change, but the verify
+    // paths in this module never did, so reward redemptions silently
+    // stopped updating the live leaderboard.
+    publishLeaderboard().catch(() => {});
 
     document.getElementById('rcode-result').innerHTML = `<div style="background:linear-gradient(135deg,#0f1f00,#1a3300);border:1px solid #8ae900;border-radius:11px;padding:20px;text-align:center">
       <div style="font-size:2.5rem;margin-bottom:8px">✅</div>
@@ -321,6 +329,7 @@ export async function confirmOfferVerify(redemptionId) {
     document.getElementById('rcode-in').value = '';
     toast('🎁 ' + (found.offerTitle || 'Προσφορά') + ' — +' + bonus + ' πόντοι → ' + found.customerName, 'success');
     _ctx.refreshAdminViews();
+    if (bonus > 0) publishLeaderboard().catch(() => {});
   } catch (e) {
     toast('❌ ' + e.message, 'error');
     if (vBtn && document.body.contains(vBtn)) {

@@ -394,11 +394,16 @@ function stopLiveListener() {
 //  Filters by customerUid so the index requirement stays a single-field
 //  (auto-indexed) lookup — no composite index deploy required. Refreshes
 //  history on any add/redeem/expire so the customer never sees a stale
-//  ledger after a points event, even if our balance-update retry-ladder
-//  raced the ledger commit.
+//  ledger after a points event.
+//
+//  Debounced: rapid back-to-back admin operations (add → redeem in 1s)
+//  coalesce into a single loadHistory call, instead of stampeding the
+//  history queries and freezing the UI thread on every doc change.
 // ════════════════════════════════════════════════════════════════════
 let _txLiveUnsub = null;
 let _txLiveFirst = true;
+let _txLiveDebounceTimer = null;
+const _TX_LIVE_DEBOUNCE_MS = 600;
 function startTxLiveListener() {
   stopTxLiveListener();
   const uid = state.foundCustomer?.uid;
@@ -413,7 +418,11 @@ function startTxLiveListener() {
       // Skip the first fire — loadHistory is already triggered by the
       // transition / profile-open path, no need to double up.
       if (_txLiveFirst) { _txLiveFirst = false; return; }
-      try { loadHistory(); } catch (e) { logger.warn('[tx-live] loadHistory:', e); }
+      if (_txLiveDebounceTimer) clearTimeout(_txLiveDebounceTimer);
+      _txLiveDebounceTimer = setTimeout(() => {
+        _txLiveDebounceTimer = null;
+        try { loadHistory(); } catch (e) { logger.warn('[tx-live] loadHistory:', e); }
+      }, _TX_LIVE_DEBOUNCE_MS);
     }, err => {
       logger.warn('[tx-live] subscription error:', err?.code || err?.message);
     });
@@ -421,6 +430,7 @@ function startTxLiveListener() {
 }
 function stopTxLiveListener() {
   if (_txLiveUnsub) { try { _txLiveUnsub(); } catch(_) {} _txLiveUnsub = null; }
+  if (_txLiveDebounceTimer) { clearTimeout(_txLiveDebounceTimer); _txLiveDebounceTimer = null; }
   _txLiveFirst = true;
 }
 
@@ -540,14 +550,13 @@ function _animateLivePointsChange(oldPts, newPts, newTot) {
     ? `${totStr} / ${t.next.toLocaleString('el-GR')} → ${nName}`
     : '👑 Ανώτατη κατάταξη!';
 
-  // Ladder catches the race between balance-snapshot fire and ledger commit
-  // visibility — even with the new atomic txn writes, the tx live listener
-  // and the customer-doc listener can land on the SDK at slightly different
-  // tick boundaries. Three attempts at 0.8s / 2.5s / 6s covers all realistic
-  // backend windows without leaning on the live tx listener alone.
-  [800, 2500, 6000].forEach(ms => setTimeout(() => {
-    try { loadHistory(); } catch(_) {}
-  }, ms));
+  // Single delayed safety call. The tx live listener catches new ledger
+  // rows directly; this 1.5s call covers the rare case where the customer
+  // doc snapshot arrives before the matching transaction is queryable.
+  // (Originally a 3-step ladder at 0.8/2.5/6s — that was firing 3 full
+  // history scans per balance change AND racing the live listener, causing
+  // jank on the customer profile during rapid admin activity.)
+  setTimeout(() => { try { loadHistory(); } catch(_) {} }, 1500);
 
   _showLivePointsToast(diff);
 }

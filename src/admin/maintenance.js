@@ -4,6 +4,7 @@ import {
 import { tier, escHtml } from '../utils.js';
 import { toast } from './ui.js';
 import { authState } from './auth-state.js';
+import { publishLeaderboard } from './leaderboard.js';
 
 let _expireTargets = [];
 let _downgradeTargets = [];
@@ -126,6 +127,7 @@ export async function executeExpirePoints() {
     document.getElementById('expire-preview').innerHTML = '';
   }
   toast(`✅ Εκπνοή: ${done} πελάτες μηδενίστηκαν${failed ? ' · ' + failed + ' σφάλματα' : ''}`, 'success');
+  if (done > 0) publishLeaderboard().catch(() => {});
 }
 
 // ── Tier Downgrade ──
@@ -245,4 +247,5 @@ export async function executeTierDowngrade() {
     document.getElementById('downgrade-preview').innerHTML = '';
   }
   toast(`✅ Tier Downgrade: ${done} πελάτες ανανεώθηκαν${failed ? ' · ' + failed + ' σφάλματα' : ''}`, 'success');
+  if (done > 0) publishLeaderboard().catch(() => {});
 }

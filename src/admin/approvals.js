@@ -10,6 +10,7 @@
 import { escHtml, escJs } from '../utils.js';
 import { logger } from '../logger.js';
 import { toast } from './ui.js';
+import { publishLeaderboard } from './leaderboard.js';
 
 const DB = () => window._db;
 
@@ -197,6 +198,7 @@ export async function approveOffer(redemptionId) {
     });
     toast('✅ Εγκρίθηκε! ' + (found.offerTitle || '') + (bonus > 0 ? ' — +' + bonus + ' πόντοι' : ''), 'success');
     _ctx.refreshAdminViews();
+    if (bonus > 0) publishLeaderboard().catch(() => {});
   } catch (e) {
     toast('❌ ' + e.message, 'error');
   } finally {

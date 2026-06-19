@@ -6,6 +6,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from '../logger.js';
 import { toast } from './ui.js';
+import { publishLeaderboard } from './leaderboard.js';
 
 const DB = () => window._db;
 export const BDAY_BONUS_PTS = 50;
@@ -83,6 +84,10 @@ export async function processBirthdayClaims() {
         `🎂 Birthday bonus: +${BDAY_BONUS_PTS} πόντοι σε ${awarded} πελάτ${customerLabel}`,
         'success'
       );
+      // Single batched publish at the end so the leaderboard reflects all
+      // birthday awards in one customer-visible update, instead of N
+      // separate full-scan publishes per claim.
+      publishLeaderboard().catch(() => {});
     }
   } catch (e) {
     logger.warn('[birthday-claims]', e.message);

@@ -182,11 +182,47 @@ function _renderOffersSnap(snap) {
     } catch(e) { logger.warn('[offers] skipping malformed doc:', d.id, e); }
   });
 
-  const fingerprint = active.map(o => o.title + '|' + (o.imageUrl||'') + '|' + (o.endDate||'')).join(';;');
+  // Fingerprint must include EVERY field that any renderer reads — otherwise
+  // an admin edit that only touches a non-fingerprinted field (e.g. bumping
+  // bonusPoints from +100 to +1000) snapshots through Firestore but skips
+  // re-render here, leaving stale values in both the preview and the open
+  // offer sheet until a hard reload. Earlier versions only fingerprinted
+  // title/imageUrl/endDate, which is why points/desc/singleUse/coupon edits
+  // weren't propagating.
+  const fingerprint = active.map(o => [
+    o.id,
+    o.title,
+    o.description,
+    o.emoji,
+    o.imageUrl,
+    o.startDate,
+    o.endDate,
+    o.bonusPoints,
+    o.pointsCost,
+    o.singleUse ? 1 : 0,
+    o.active   ? 1 : 0,
+    o.eshopDiscountType,
+    o.eshopDiscountAmount,
+    o.updatedAt,
+  ].join('|')).join(';;');
   if (fingerprint === _offersLastFingerprint) return;
   _offersLastFingerprint = fingerprint;
 
   _activeOffers = active;
+
+  // If the customer has the offer sheet open while the admin edits the
+  // underlying offer (e.g. bumps bonusPoints from +100 to +1000), refresh
+  // the open sheet in place so the user sees the new value immediately
+  // — rather than the stale snapshot frozen at openOfferSheet() time.
+  // `_selectedOffer` is matched by id; the matching record from the new
+  // `active` array replaces it and we re-fire openOfferSheet at that index.
+  if (_selectedOffer && document.getElementById('offer-sheet')?.classList.contains('show')) {
+    const newIdx = active.findIndex(o => o.id === _selectedOffer.id);
+    if (newIdx >= 0) {
+      _offerSheetBusy = false;   // bypass the 600ms re-entry guard
+      openOfferSheet(newIdx);
+    }
+  }
 
   // HIGH-3: delegates to the module-scoped safe factories (top of file).
   const _imgTag = _safeImgTag;
@@ -209,7 +245,7 @@ function _renderOffersSnap(snap) {
 
   const previewEl = document.getElementById('h-offers-preview');
   if (previewEl) previewEl.innerHTML = preview ||
-    '<div style="color:var(--grl);font-size:.84rem;text-align:center;padding:16px">Δεν υπάρχουν ενεργές προσφορές αυτή τη στιγμή.</div>';
+    '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🎁</div><div class="empty-state__title">Καμία ενεργή προσφορά</div><div class="empty-state__sub">Έλεγξε ξανά σύντομα για νέες προσφορές</div></div>';
 
   const full = active.map((o, idx) => {
     const expDate  = o.endDate && typeof o.endDate !== 'object'
@@ -240,7 +276,7 @@ function _renderOffersSnap(snap) {
 
   const fullEl = document.getElementById('offers-list');
   if (fullEl) fullEl.innerHTML = full ||
-    '<div style="color:var(--grl);font-size:.84rem;text-align:center;padding:32px">Δεν υπάρχουν ενεργές προσφορές.</div>';
+    '<div class="empty-state"><div class="empty-state__icon">🎁</div><div class="empty-state__title">Δεν υπάρχουν ενεργές προσφορές</div><div class="empty-state__sub">Νέες προσφορές προστίθενται τακτικά — έλεγξε ξανά αύριο</div></div>';
 }
 
 export function loadOffersData() { startOffersListener(); }
@@ -313,8 +349,35 @@ export function openOfferSheet(idx) {
 
   document.getElementById('offer-sheet').classList.add('show');
   document.body.classList.add('modal-open');
+  _lockBgScroll();
   _trapFocus(document.getElementById('offer-sheet'));
   _trackEvent('offer_opened');
+}
+
+// iOS Safari ignores `overflow:hidden` set via a class on a scrolling div in
+// some cases — the body keeps rubber-banding / the tab-pane keeps panning
+// behind the modal. Belt-and-suspenders: also pin the active tab-pane with
+// inline styles and remember its scrollTop so we can restore on close.
+let _bgScrollLocked = false;
+let _bgScrollSavedTop = 0;
+function _lockBgScroll() {
+  if (_bgScrollLocked) return;
+  const t = document.querySelector('.tab-pane.active');
+  if (!t) return;
+  _bgScrollSavedTop = t.scrollTop;
+  t.style.overflow = 'hidden';
+  t.style.touchAction = 'none';
+  _bgScrollLocked = true;
+}
+function _unlockBgScroll() {
+  if (!_bgScrollLocked) return;
+  const t = document.querySelector('.tab-pane.active');
+  if (t) {
+    t.style.overflow = '';
+    t.style.touchAction = '';
+    t.scrollTop = _bgScrollSavedTop;
+  }
+  _bgScrollLocked = false;
 }
 
 async function _checkOfferUsed(o, cta) {
@@ -354,11 +417,12 @@ export function closeOfferSheet(fromSwipe) {
   if (!sheet) return;
   const panel = sheet.querySelector('.os-panel');
   const bd = sheet.querySelector('.os-backdrop');
-  if (!panel) { sheet.classList.remove('show'); document.body.classList.remove('modal-open'); return; }
+  if (!panel) { sheet.classList.remove('show'); document.body.classList.remove('modal-open'); _unlockBgScroll(); return; }
 
   function _cleanup() {
     sheet.classList.remove('show', 'closing');
     document.body.classList.remove('modal-open');
+    _unlockBgScroll();
     panel.style.transform = '';
     panel.style.transition = '';
     panel.style.animation = '';
@@ -478,6 +542,7 @@ export function offerRedeemStep1() {
   _sheet.querySelector('.os-panel').style.transition = '';
   _sheet.classList.remove('show', 'closing');
   document.body.classList.remove('modal-open');
+  _unlockBgScroll();
   document.getElementById('offer-confirm').classList.add('show');
   _trapFocus(document.getElementById('offer-confirm'));
   _trackEvent('offer_confirmed');
@@ -770,7 +835,7 @@ function _renderLeaderboardData(lb) {
   const top = lb.top || [];
   const totalCount = lb.total || top.length;
   if (!top.length) {
-    el.innerHTML = '<div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">🏆 Δεν υπάρχουν δεδομένα ακόμα</div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Δεν υπάρχουν δεδομένα ακόμα</div></div>';
     return;
   }
 
@@ -819,12 +884,18 @@ function _renderLeaderboardData(lb) {
   let pinnedHtml = '';
   if (!myInTop10 && state.foundCustomer) {
     const myTotalPts = state.foundCustomer?.totalPoints || 0;
-    let estRank = top.length + 1;
+    // Estimate rank as (# of published entries with STRICTLY more points) + 1.
+    // Using `>=` previously promoted the viewer to the same slot as the last
+    // visible top10 entry on a tie — UI then showed two "#10" rows (e.g. the
+    // tied competitor plus the pinned "Εσύ" footer) which read as duplication.
+    // Strict `>` places the viewer immediately after the tie, which is the
+    // honest position when their card isn't in the published top-20 yet.
+    let aheadCount = 0;
     for (let ri = 0; ri < top.length; ri++) {
-      // Use >= so a tie places the viewer at the same rank, not below it
-      if (myTotalPts >= (top[ri].totalPoints || 0)) { estRank = ri + 1; break; }
+      if ((top[ri].totalPoints || 0) > myTotalPts) aheadCount++;
     }
-    if (estRank > top.length) estRank = Math.max(estRank, totalCount > top.length ? totalCount : top.length + 1);
+    let estRank = aheadCount + 1;
+    if (estRank > top.length && totalCount > top.length) estRank = Math.max(estRank, totalCount);
     pinnedHtml = `<div style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-top:2px dashed rgba(0,0,0,.1);background:linear-gradient(90deg,rgba(107,184,0,.18),rgba(138,233,0,.10))">
       <div style="font-size:1rem;font-weight:800;color:var(--gd);min-width:28px;text-align:center">#${estRank}</div>
       <div style="flex:1;min-width:0"><div style="font-weight:800;font-size:.88rem;color:#2a6000">👤 Εσύ</div></div>
@@ -856,21 +927,21 @@ export function loadLeaderboard() {
   if (_lbUnsub) return;
 
   if (window.DEMO) {
-    el.innerHTML = '<div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">🏆 Leaderboard διαθέσιμο με πραγματικά δεδομένα</div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Leaderboard διαθέσιμο σύντομα</div><div class="empty-state__sub">Θα φανεί όταν συγκεντρωθούν αρκετά δεδομένα</div></div>';
     return;
   }
   if (!window._db || !window._onSnapshot) {
-    el.innerHTML = '<div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">⚠️ Δεν υπάρχει σύνδεση</div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">📡</div><div class="empty-state__title">Δεν υπάρχει σύνδεση</div></div>';
     return;
   }
 
-  el.innerHTML = '<div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">⏳ Φόρτωση...</div>';
+  el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">⏳</div><div class="empty-state__title">Φόρτωση...</div></div>';
 
   try {
     const ref = window._doc(window._db, 'ipear_leaderboard', 'latest');
     _lbUnsub = window._onSnapshot(ref, (snap) => {
       if (!snap.exists()) {
-        el.innerHTML = '<div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">🏆 Το leaderboard ετοιμάζεται...</div>';
+        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Το leaderboard ετοιμάζεται...</div></div>';
         return;
       }
       _renderLeaderboardData(snap.data());
@@ -885,12 +956,12 @@ export function loadLeaderboard() {
           <div style="font-size:.82rem;color:var(--grl)">Επίπεδο ${pct}% — ${t.next ? 'Επόμενο: '+(t.next - (state.foundCustomer.totalPoints||0))+' πόντοι' : 'Ανώτατη κατάταξη!'}</div>
         </div>`;
       } else {
-        el.innerHTML = '<div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">🏆 Σύντομα διαθέσιμο</div>';
+        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
       }
     });
   } catch(e) {
     logger.warn('[leaderboard] listener setup failed:', e.message);
-    el.innerHTML = '<div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">🏆 Σύντομα διαθέσιμο</div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
   }
 }
 
@@ -913,9 +984,16 @@ export function _collapseLb() {
 //  HISTORY
 // ════════════════════════════════════════
 let _historyBusy = false;
+let _historyLastRunAt = 0;
+const _HISTORY_MIN_GAP_MS = 800;
 export async function loadHistory() {
   if (_historyBusy) return;
+  // Coalesce rapid back-to-back calls (live listener + tab-open + balance
+  // animation can all trigger this within milliseconds). 800ms gap keeps
+  // the customer profile from re-running ~16 Firestore queries per redeem.
+  if (Date.now() - _historyLastRunAt < _HISTORY_MIN_GAP_MS) return;
   _historyBusy = true;
+  _historyLastRunAt = Date.now();
   const el = document.getElementById('pr-history');
   try {
     const col = window._col(window._db,'ipear_transactions');
@@ -933,25 +1011,30 @@ export async function loadHistory() {
       return count;
     };
 
+    // Query selection strategy:
+    //   Uid-keyed customer (id == uid): customerUid query catches every new
+    //     ledger row (we always write customerUid on writes since the atomic
+    //     pass landed). customerEmail is a small safety-net for any pre-uid
+    //     historical rows whose customerUid field was empty.
+    //   Legacy customer (id != uid): customerUid (when populated post-bind)
+    //     and customerEmail together cover both new + old rows. The legacy
+    //     `customerId == foundCustomer.id` query path is dropped: the rules
+    //     reject it (customerId must equal auth.uid for the rule to prove
+    //     safety), so it just adds noise + a guaranteed permission-denied
+    //     error per call.
     const _hq = [];
-    if (authEmail) {
-      _hq.push(window._getDocs(window._query(col, window._where('customerEmail','==',authEmail)))
-        .then(addResults).catch(e => errors.push('Q1 email: ' + (e.code||e.message))));
-    }
     if (state.foundCustomer.uid) {
       _hq.push(window._getDocs(window._query(col, window._where('customerUid','==',state.foundCustomer.uid)))
-        .then(addResults).catch(e => errors.push('Q2 uid: ' + (e.code||e.message))));
-      _hq.push(window._getDocs(window._query(col, window._where('customerId','==',state.foundCustomer.uid)))
-        .then(addResults).catch(e => errors.push('Q3 custId==uid: ' + (e.code||e.message))));
+        .then(addResults).catch(e => errors.push('Q-uid: ' + (e.code||e.message))));
     }
-    if (state.foundCustomer.id && state.foundCustomer.id !== state.foundCustomer.uid) {
-      _hq.push(window._getDocs(window._query(col, window._where('customerId','==',state.foundCustomer.id)))
-        .then(addResults).catch(e => errors.push('Q4 custId==id: ' + (e.code||e.message))));
+    if (authEmail) {
+      _hq.push(window._getDocs(window._query(col, window._where('customerEmail','==',authEmail)))
+        .then(addResults).catch(e => errors.push('Q-email: ' + (e.code||e.message))));
     }
-    if (state.foundCustomer._migratedFrom && state.foundCustomer._migratedFrom !== state.foundCustomer.uid) {
-      _hq.push(window._getDocs(window._query(col, window._where('customerId','==',state.foundCustomer._migratedFrom)))
-        .then(addResults).catch(e => errors.push('Q5 migrated: ' + (e.code||e.message))));
-    }
+    // _migratedFrom: only meaningful when the customer is uid-keyed and
+    // their previous legacy doc id used to carry transactions; we query by
+    // customerUid (the auth uid hasn't changed across migration), so this
+    // is implicitly covered. No extra query needed.
     await Promise.all(_hq);
 
     if (errors.length > 0) {
@@ -966,10 +1049,11 @@ export async function loadHistory() {
     }
 
     if (!txs.length) {
-      const msg = errors.length > 0 && !navigator.onLine
-        ? 'Ελέγξτε τη σύνδεσή σας και δοκιμάστε ξανά.'
-        : 'Δεν υπάρχουν συναλλαγές ακόμα.';
-      el.innerHTML='<div style="text-align:center;color:var(--grl);padding:16px;font-size:.85rem">' + esc(msg) + '</div>';
+      const offline = errors.length > 0 && !navigator.onLine;
+      const icon  = offline ? '📡' : '🧾';
+      const title = offline ? 'Δεν υπάρχει σύνδεση' : 'Καμία συναλλαγή ακόμα';
+      const sub   = offline ? 'Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά' : 'Όταν κάνεις την πρώτη αγορά θα εμφανιστεί εδώ';
+      el.innerHTML = `<div class="empty-state empty-state--compact"><div class="empty-state__icon">${icon}</div><div class="empty-state__title">${title}</div><div class="empty-state__sub">${sub}</div></div>`;
       return;
     }
     txs.sort((a,b) => new Date(b.date) - new Date(a.date));
