@@ -1,5 +1,5 @@
 import {
-  getDb, collection, doc, getDocs, updateDoc, addDoc,
+  getDb, collection, doc, getDocs, runTransaction,
 } from '../services/firebase.js';
 import { tier, escHtml } from '../utils.js';
 import { toast } from './ui.js';
@@ -84,16 +84,36 @@ export async function executeExpirePoints() {
   let done = 0, failed = 0;
   try {
     const db = getDb();
+    const expireYear = new Date().getFullYear();
     for (const c of _expireTargets) {
       try {
-        await updateDoc(doc(db, 'ipear_customers', c.id), { points: 0 });
-        await addDoc(collection(db, 'ipear_transactions'), {
-          customerId: c.id, customerUid: c.uid || '', customerEmail: c.email || '', customerName: c.name, card: c.card,
-          type: 'expire', points: -(c.points || 0), amount: 0,
-          category: '⏳ Εκπνοή Πόντων',
-          note: 'Μηδενισμός λόγω αδράνειας 12+ μηνών',
-          storeId: authState.storeId || null, storeName: authState.storeName,
-          date: new Date().toISOString(),
+        // Atomic per-customer: balance zero + ledger entry in one commit.
+        // Deterministic id keeps this idempotent if the admin re-runs the
+        // batch after a partial failure earlier in the loop.
+        const ledgerId = `expire_${c.id}_${expireYear}`;
+        const nowIso = new Date().toISOString();
+        await runTransaction(db, async (txn) => {
+          const custRef = doc(db, 'ipear_customers', c.id);
+          const snap = await txn.get(custRef);
+          if (!snap.exists()) throw new Error('missing');
+          const live = snap.data();
+          const lost = live.points || 0;
+          txn.update(custRef, { points: 0 });
+          txn.set(doc(db, 'ipear_transactions', ledgerId), {
+            customerId: c.id,
+            customerUid: c.uid || '',
+            customerEmail: c.email || live.email || '',
+            customerName: c.name || live.name || '',
+            card: c.card || live.card || '',
+            type: 'expire',
+            points: -lost,
+            amount: 0,
+            category: '⏳ Εκπνοή Πόντων',
+            note: 'Μηδενισμός λόγω αδράνειας 12+ μηνών',
+            storeId: authState.storeId || null,
+            storeName: authState.storeName,
+            date: nowIso,
+          });
         });
         done++;
       } catch (_) { failed++; }
@@ -184,18 +204,35 @@ export async function executeTierDowngrade() {
   let done = 0, failed = 0;
   try {
     const db = getDb();
+    const dgYear = new Date().getFullYear();
     for (const c of _downgradeTargets) {
       try {
-        await updateDoc(doc(db, 'ipear_customers', c.id), { totalPoints: c.newTot });
-        await addDoc(collection(db, 'ipear_transactions'), {
-          customerId: c.id, customerUid: c.uid || '', customerEmail: c.email || '', customerName: c.name, card: c.card,
-          type: 'tier_downgrade',
-          points: c.newTot - (c.totalPoints || 0),
-          amount: 0,
-          category: '📉 Tier Downgrade',
-          note: `${c.currentTier.icon} ${c.currentTier.name} → ${c.newTier.icon} ${c.newTier.name} (αδράνεια ${new Date().getFullYear()})`,
-          storeId: authState.storeId || null, storeName: authState.storeName,
-          date: new Date().toISOString(),
+        // Atomic per-customer commit (balance + ledger). Deterministic id
+        // keeps re-runs idempotent.
+        const ledgerId = `tier_downgrade_${c.id}_${dgYear}`;
+        const nowIso = new Date().toISOString();
+        await runTransaction(db, async (txn) => {
+          const custRef = doc(db, 'ipear_customers', c.id);
+          const snap = await txn.get(custRef);
+          if (!snap.exists()) throw new Error('missing');
+          const live = snap.data();
+          const diff = c.newTot - (live.totalPoints || 0);
+          txn.update(custRef, { totalPoints: c.newTot });
+          txn.set(doc(db, 'ipear_transactions', ledgerId), {
+            customerId: c.id,
+            customerUid: c.uid || '',
+            customerEmail: c.email || live.email || '',
+            customerName: c.name || live.name || '',
+            card: c.card || live.card || '',
+            type: 'tier_downgrade',
+            points: diff,
+            amount: 0,
+            category: '📉 Tier Downgrade',
+            note: `${c.currentTier.icon} ${c.currentTier.name} → ${c.newTier.icon} ${c.newTier.name} (αδράνεια ${dgYear})`,
+            storeId: authState.storeId || null,
+            storeName: authState.storeName,
+            date: nowIso,
+          });
         });
         done++;
       } catch (_) { failed++; }

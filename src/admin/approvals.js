@@ -115,6 +115,14 @@ export async function approveOffer(redemptionId) {
     let found;
     let custDocId;
     let bonus = 0;
+    // Pre-generate ledger id so the customer-facing transaction row commits
+    // INSIDE the same runTransaction as the balance credit + redemption
+    // mark-used. Was a separate addDoc after — would leave bonus credited
+    // with no history row on partial failure, hiding the offer event from
+    // the customer's "Ιστορικό Συναλλαγών".
+    const approveLedgerId = `offer_approve_${redemptionId}`;
+    const approveNowIso = new Date().toISOString();
+    const { storeId, storeName } = _ctx.getStoreContext();
 
     await window._runTransaction(db, async (txn) => {
       // ── ALL READS FIRST ──
@@ -157,29 +165,30 @@ export async function approveOffer(redemptionId) {
       txn.update(redRef, {
         used: true,
         status: 'approved',
-        usedAt: new Date().toISOString(),
+        usedAt: approveNowIso,
         approvedBy: 'admin',
       });
-      if (bonus > 0) txn.update(custRef, { points: newPts, totalPoints: newTot });
+      if (bonus > 0) {
+        txn.update(custRef, { points: newPts, totalPoints: newTot });
+        // Customer-facing ledger entry in the same commit (only when bonus > 0
+        // so we don't pollute the ledger with zero-value approvals).
+        txn.set(window._doc(db, 'ipear_transactions', approveLedgerId), {
+          customerId: custDocId,
+          customerUid: found.customerId || '',
+          customerEmail: found.customerEmail || cust.email || '',
+          customerName: found.customerName,
+          card: found.card || '',
+          type: 'add',
+          points: bonus,
+          category: '🎁 Προσφορά: ' + (found.offerTitle || ''),
+          note: 'Offer approved via admin',
+          method: 'admin-approve',
+          storeId: storeId || null,
+          storeName,
+          date: approveNowIso,
+        });
+      }
     });
-
-    if (bonus > 0) {
-      const { storeId, storeName } = _ctx.getStoreContext();
-      await window._addDoc(window._col(db, 'ipear_transactions'), {
-        customerId: custDocId,
-        customerUid: found.customerId || '',
-        customerEmail: found.customerEmail || '',
-        customerName: found.customerName,
-        card: found.card || '',
-        type: 'add',
-        points: bonus,
-        category: '🎁 Προσφορά: ' + (found.offerTitle || ''),
-        note: 'Offer approved via admin',
-        storeId: storeId || null,
-        storeName,
-        date: new Date().toISOString(),
-      });
-    }
     toast('✅ Εγκρίθηκε! ' + (found.offerTitle || '') + (bonus > 0 ? ' — +' + bonus + ' πόντοι' : ''), 'success');
     _ctx.refreshAdminViews();
   } catch (e) {

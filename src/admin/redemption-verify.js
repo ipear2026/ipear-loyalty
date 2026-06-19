@@ -123,6 +123,14 @@ export async function confirmVerify(redemptionId, code) {
     let found;
     let custId;
     let newPts;
+    // Pre-generate ledger id so it lands in the SAME Firestore commit as the
+    // balance debit + redemption mark-used. Was previously a separate addDoc
+    // AFTER runTransaction, which could leave points deducted with no
+    // customer-facing history row on network/permission/timing failure —
+    // the exact "η εξαργύρωση reward δεν φαίνεται στο ιστορικό" bug.
+    const verifyLedgerId = `redeem_verify_${redemptionId}`;
+    const verifyNowIso = new Date().toISOString();
+    const { storeId, storeName } = _ctx.getStoreContext();
 
     await window._runTransaction(db, async (txn) => {
       const redemRef = window._doc(db, 'ipear_redemptions', redemptionId);
@@ -165,25 +173,26 @@ export async function confirmVerify(redemptionId, code) {
       }
       newPts = currentPts - found.points;
 
-      txn.update(redemRef, { used: true, usedAt: new Date().toISOString(), status: 'used' });
+      txn.update(redemRef, { used: true, usedAt: verifyNowIso, status: 'used' });
       txn.update(custRef, { points: newPts });
-    });
 
-    const { storeId, storeName } = _ctx.getStoreContext();
-    await window._addDoc(window._col(db, 'ipear_transactions'), {
-      customerId: custId,
-      customerUid: found.customerUid || '',
-      customerEmail: found.customerEmail || '',
-      customerName: found.customerName,
-      card: found.card,
-      type: 'redeem',
-      points: -found.points,
-      discount: found.discount,
-      label: found.label,
-      redemptionCode: code,
-      storeId: storeId || null,
-      storeName,
-      date: new Date().toISOString(),
+      // Customer-facing ledger entry — same commit.
+      txn.set(window._doc(db, 'ipear_transactions', verifyLedgerId), {
+        customerId: custId,
+        customerUid: found.customerUid || '',
+        customerEmail: found.customerEmail || custData.email || '',
+        customerName: found.customerName,
+        card: found.card,
+        type: 'redeem',
+        points: -found.points,
+        discount: found.discount,
+        label: found.label,
+        redemptionCode: code,
+        method: 'admin-verify',
+        storeId: storeId || null,
+        storeName,
+        date: verifyNowIso,
+      });
     });
 
     _ctx.onRedemptionApproved({ customerId: custId, newPoints: newPts });
@@ -218,6 +227,14 @@ export async function confirmOfferVerify(redemptionId) {
     let found;
     let custDocId;
     let bonus = 0;
+    // Pre-generate ledger id + capture store context so the ledger entry
+    // can be written INSIDE the runTransaction. Was previously a separate
+    // addDoc after the txn — same partial-failure shape as the reward
+    // verify bug above, but for offer bonuses ("η εξαργύρωση προσφοράς
+    // δεν φαίνεται").
+    const offerLedgerId = `offer_verify_${redemptionId}`;
+    const offerNowIso = new Date().toISOString();
+    const { storeId, storeName } = _ctx.getStoreContext();
 
     await window._runTransaction(db, async (txn) => {
       // ── ALL READS FIRST ──
@@ -259,27 +276,28 @@ export async function confirmOfferVerify(redemptionId) {
       const newTot = (cust.totalPoints || 0) + bonus;
 
       // ── ALL WRITES AFTER ──
-      txn.update(redRef, { used: true, status: 'used', usedAt: new Date().toISOString() });
-      if (bonus > 0) txn.update(custRef, { points: newPts, totalPoints: newTot });
+      txn.update(redRef, { used: true, status: 'used', usedAt: offerNowIso });
+      if (bonus > 0) {
+        txn.update(custRef, { points: newPts, totalPoints: newTot });
+        // Ledger entry in the same commit — only written when bonus > 0
+        // so we don't create empty audit rows for zero-bonus offers.
+        txn.set(window._doc(db, 'ipear_transactions', offerLedgerId), {
+          customerId: custDocId,
+          customerUid: found.customerId || '',
+          customerEmail: found.customerEmail || cust.email || '',
+          customerName: found.customerName,
+          card: found.card || '',
+          type: 'add',
+          points: bonus,
+          category: '🎁 Προσφορά: ' + (found.offerTitle || ''),
+          note: 'Offer approved via admin',
+          method: 'admin-offer-verify',
+          storeId: storeId || null,
+          storeName,
+          date: offerNowIso,
+        });
+      }
     });
-
-    if (bonus > 0) {
-      const { storeId, storeName } = _ctx.getStoreContext();
-      await window._addDoc(window._col(db, 'ipear_transactions'), {
-        customerId: custDocId,
-        customerUid: found.customerId || '',
-        customerEmail: found.customerEmail || '',
-        customerName: found.customerName,
-        card: found.card || '',
-        type: 'add',
-        points: bonus,
-        category: '🎁 Προσφορά: ' + (found.offerTitle || ''),
-        note: 'Offer approved via admin',
-        storeId: storeId || null,
-        storeName,
-        date: new Date().toISOString(),
-      });
-    }
 
     document.getElementById('rcode-result').innerHTML = `<div style="background:linear-gradient(135deg,#0f1f00,#1a3300);border:1px solid #8ae900;border-radius:11px;padding:20px;text-align:center">
       <div style="font-size:2.5rem;margin-bottom:8px">🎁</div>
