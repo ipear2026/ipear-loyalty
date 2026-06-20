@@ -1064,6 +1064,24 @@ html[data-theme="dark"]{
 .hist-pts.add{color:var(--gd)}
 .hist-pts.redeem{color:var(--red)}
 
+/* History pagination — collapse/reveal + load-more */
+.hist-more-btn{
+  display:block;width:100%;
+  margin-top:8px;padding:10px;
+  background:transparent;border:1.5px solid var(--bd);border-radius:10px;
+  font-family:var(--font);font-size:.78rem;font-weight:700;color:var(--grl);
+  cursor:pointer;
+  transition:border-color .15s,color .15s,background-color .15s,transform .12s;
+}
+.hist-more-btn:hover{border-color:var(--g);color:var(--bk)}
+.hist-more-btn:active{transform:scale(.98)}
+.hist-more-btn:disabled{opacity:.6;cursor:wait;transform:none}
+.hist-more-btn:focus-visible{outline:3px solid rgba(138,233,0,.5);outline-offset:2px}
+.hist-more-btn--paginate{
+  background:var(--gp);border-color:var(--g);color:#3a6e00;
+}
+.hist-more-btn--paginate:hover{background:var(--g);color:var(--bk)}
+
 .logout-btn{width:100%;background:transparent;border:1px solid var(--bd);border-radius:8px;padding:13px;font-family:var(--font);font-size:.88rem;font-weight:600;color:var(--gr);cursor:pointer;transition:border-color .15s,color .15s,background-color .15s,transform .12s;margin-top:4px}
 .logout-btn:hover{border-color:var(--bk);color:var(--bk)}
 .logout-btn:active{transform:scale(.97)}

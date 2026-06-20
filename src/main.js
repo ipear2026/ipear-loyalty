@@ -19,7 +19,7 @@ import {
   renderHomeRewards, renderRewardsList,
   startOffersListener, stopOffersListener, loadOffersData,
   loadLeaderboard, stopLbListener,
-  loadHistory,
+  loadHistory, loadHistoryMore,
   generateQR,
   openOfferSheet, closeOfferSheet, offerRedeemStep1, closeOfferConfirm,
   offerGenerateQR, cancelOfferQR, offerGenerateEshopCoupon, _copyEshopCoupon,
@@ -1638,6 +1638,7 @@ window.shareReferral = shareReferral;
 window._expandLeaderboard = _expandLeaderboard;
 window._collapseLb = _collapseLb;
 window._toggleHistory = _toggleHistory;
+window.loadHistoryMore = loadHistoryMore;
 window._dismissPushOnboard = _dismissPushOnboard;
 window._acceptPushOnboard = _acceptPushOnboard;
 window._installApp = _installApp;

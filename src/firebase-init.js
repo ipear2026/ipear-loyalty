@@ -1,4 +1,4 @@
-import { showToast } from './utils.js';
+import { showToast, _WORKER_URL } from './utils.js';
 import { state } from './state.js';
 import { logger, tagLog } from './logger.js';
 
@@ -8,7 +8,7 @@ import { logger, tagLog } from './logger.js';
 import { initializeApp } from 'firebase/app';
 import {
   getFirestore, collection, addDoc, setDoc, updateDoc, deleteDoc,
-  doc, getDoc, getDocs, query, where, orderBy, limit,
+  doc, getDoc, getDocs, query, where, orderBy, limit, startAfter,
   onSnapshot, runTransaction,
   getCountFromServer, getAggregateFromServer, sum, average,
 } from 'firebase/firestore';
@@ -93,6 +93,7 @@ if (IS_DEMO) {
   window._where=(f,op,v)=>({_t:'w',f,op,v});
   window._orderBy=(f,d)=>({_t:'o',f,dir:d});
   window._limit=n=>({_t:'l',n});
+  window._startAfter=cur=>({_t:'sa',cur});
   window._addDoc=async(ref,data)=>{const id='d'+Date.now();if(ref._n==='ipear_redemptions'){const codes=JSON.parse(localStorage.getItem('_ipear_codes')||'[]');codes.push({id,...data});localStorage.setItem('_ipear_codes',JSON.stringify(codes));}return{id};};
   window._setDoc=async(ref,data)=>{const arr=ref._col==='ipear_customers'?_DC:[];const i=arr.findIndex(d=>d.id===ref._id);if(i>=0)Object.assign(arr[i],data);else if(ref._col==='ipear_customers')arr.push({id:ref._id,...data});};
   window._deleteDoc=async(ref)=>{if(ref._col==='ipear_customers'){const i=_DC.findIndex(d=>d.id===ref._id);if(i>=0)_DC.splice(i,1);}};
@@ -157,7 +158,7 @@ if (IS_DEMO) {
   const db=getFirestore(app);
   window._db=db; window._col=collection; window._getDocs=getDocs;
   window._query=query; window._where=where; window._orderBy=orderBy;
-  window._limit=limit; window._addDoc=addDoc;
+  window._limit=limit; window._startAfter=startAfter; window._addDoc=addDoc;
   window._updateDoc=updateDoc; window._setDoc=setDoc; window._doc=doc;
   window._deleteDoc=deleteDoc; window._runTransaction=runTransaction;
   window._getDoc=getDoc; window._onSnapshot=onSnapshot;
@@ -232,6 +233,22 @@ if (IS_DEMO) {
     if (!_messaging) return showToast('❌ Messaging μη διαθέσιμο','red');
     if (!VAPID_KEY || VAPID_KEY === 'YOUR_FCM_VAPID_KEY') return showToast('⚠️ VAPID key δεν έχει οριστεί','red');
 
+    // iOS Safari does NOT deliver web push unless the site is installed as a
+    // PWA (Home Screen). Without this check the user grants permission, we
+    // store a token, the toggle shows "on" — but no notification ever lands.
+    // Apple has required PWA-install for web push since iOS 16.4 and this is
+    // not negotiable, so block clearly here rather than letting the user blame
+    // the app.
+    const _ua = navigator.userAgent || '';
+    const _isIOS = /iphone|ipad|ipod/i.test(_ua);
+    const _isStandalone =
+      window.matchMedia?.('(display-mode: standalone)').matches ||
+      window.matchMedia?.('(display-mode: fullscreen)').matches ||
+      window.navigator.standalone === true;
+    if (_isIOS && !_isStandalone) {
+      return showToast('📱 Για iPhone: πρόσθεσε πρώτα την εφαρμογή στην Αρχική Οθόνη (Safari → Κοινοποίηση → Προσθήκη στην Αρχική Οθόνη). Μετά άνοιξέ την από το εικονίδιο και ενεργοποίησε ξανά.', 'red');
+    }
+
     _pushBusy = true;
     const { _setPushUI, _PUSH_TIMEOUT_MS } = await import('./push-notifications.js');
     _setPushUI('loading');
@@ -274,6 +291,28 @@ if (IS_DEMO) {
 
       _setPushUI(true);
       showToast('✅ Push notifications ενεργοποιήθηκαν!','green');
+
+      // Confirmation push — proves end-to-end delivery (SW registered, FCM
+      // accepted the token, OS surfaces the notification). Uses the worker's
+      // self-push branch (idToken auth): server verifies the token, resolves
+      // OUR uid, looks up OUR fcmToken from Firestore, pushes only to that.
+      // The `tokens` array is intentionally not sent — the worker ignores it
+      // in self-push mode so a customer can't aim a push at anyone else.
+      (async () => {
+        try {
+          const idToken = await window._auth?.currentUser?.getIdToken();
+          if (!idToken) return;
+          await fetch(_WORKER_URL + '/push', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              idToken,
+              title: '🍐 iPear Loyalty',
+              message: 'Έτοιμος για ειδοποιήσεις! Θα ενημερώνεσαι πρώτος για προσφορές & πόντους.'
+            })
+          });
+        } catch(_) {}
+      })();
     } catch(e) {
       const { _setPushUI: resetUI } = await import('./push-notifications.js');
       resetUI(false);
@@ -341,6 +380,38 @@ if (IS_DEMO) {
     });
   });
   tagLog('AUTH-RESTORE', `auth.currentUser at firebase-ready: ${auth.currentUser ? `✅ ${auth.currentUser.email}` : '❌ NULL'}`);
+
+  // ═════════════════════════════════════════════════════════════════════════
+  //  CONTINUOUS AUTH STATE VALIDATOR
+  //  Detects orphan states where Firebase Auth has a user but Firestore has
+  //  no matching customer doc — the "Notis Bountouris" symptom (login fails,
+  //  register says "exists", password reset bypasses). The initial restore
+  //  listener above only runs once; this one stays subscribed for the app
+  //  lifetime. Triggers ONLY when the auth state genuinely changes (not on
+  //  every page load) and only when we're past the bootstrap window.
+  // ═════════════════════════════════════════════════════════════════════════
+  let _bootstrapDone = false;
+  // Give the autoLogin path 3.5s to do its thing before we start patrolling.
+  setTimeout(() => { _bootstrapDone = true; }, 3500);
+  onAuthStateChanged(auth, async (user) => {
+    if (!_bootstrapDone) return;
+    if (!user) return;  // signed out — nothing to validate
+    // If app already mounted us against a customer doc, trust that.
+    if (state.foundCustomer?.id) return;
+    // We are signed in to Firebase Auth but no customer doc is bound to the
+    // session. Give the legitimate login path a beat to bind, then probe.
+    await new Promise(r => setTimeout(r, 1200));
+    if (state.foundCustomer?.id) return;
+    tagLog('AUTH-VALIDATOR', `⚠️ orphan auth detected — uid=${user.uid} email=${user.email}, no customer doc bound. Signing out to force clean re-login.`);
+    try { await signOut(auth); } catch(_) {}
+    try {
+      ['ipear_rem', 'ipear_customer_cache', 'ipear_offline_card'].forEach(k => localStorage.removeItem(k));
+    } catch(_) {}
+    // Don't hard-reload — let the natural login flow surface. If the user
+    // truly has no doc, they'll see "Δεν βρέθηκε λογαριασμός" and can
+    // register fresh. If a doc exists with a different uid binding, the
+    // login path's migration logic will repair it on the next sign-in.
+  });
 
   window._firebaseReady = true;
   window.dispatchEvent(new Event('firebase-ready'));

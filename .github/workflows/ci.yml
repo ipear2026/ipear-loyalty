@@ -2,9 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'refactor/**', 'feat/**', 'fix/**']
   pull_request:
     branches: [main]
+
+# Cancel superseded runs on the same branch — saves CI minutes when
+# you push multiple commits in quick succession.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -26,6 +32,13 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Worker syntax check
+        # Parse email-worker.js with Node to catch fatal syntax errors
+        # before wrangler deploy runs against production. Lint catches
+        # most of this but a separate parse pass guards against ESLint
+        # rule gaps and shows up as its own failing step in the CI UI.
+        run: node --check email-worker.js
 
       - name: Unit tests
         run: npm test

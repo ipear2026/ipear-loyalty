@@ -17,6 +17,22 @@
         { "fieldPath": "customerDocId", "order": "ASCENDING" },
         { "fieldPath": "used", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "ipear_transactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "customerUid", "order": "ASCENDING" },
+        { "fieldPath": "date",        "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "ipear_transactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "customerEmail", "order": "ASCENDING" },
+        { "fieldPath": "date",          "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
