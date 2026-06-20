@@ -131,6 +131,63 @@ export function _applyTierColors(cls) {
   });
 }
 
+// ── Reduced-motion gate (WCAG 2.3.3 / iOS Reduce Motion / Android Animations off) ─
+function _prefersReducedMotion() {
+  try {
+    return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch (_) { return false; }
+}
+
+// ── Haptic feedback — Android + some PWAs. Silently no-ops elsewhere ─────
+// Pattern presets keep call sites consistent and let us tune feel in one place.
+const _HAPTIC_PATTERNS = {
+  tap:     [10],            // single tap (button press)
+  success: [10, 30, 10],    // QR scanned, points credited, redemption complete
+  pop:     [6],             // reward card tap, chip nav, copy
+  warn:    [12, 18, 12],    // soft warning before a non-blocking error toast
+};
+export function _haptic(kind = 'tap') {
+  // Honour the user's reduced-motion preference — haptics are motion too.
+  if (_prefersReducedMotion()) return;
+  if (!navigator.vibrate) return;
+  const pattern = _HAPTIC_PATTERNS[kind] || _HAPTIC_PATTERNS.tap;
+  try { navigator.vibrate(pattern); } catch (_) { /* private mode / SecurityError */ }
+}
+
+// ── Count-up animation for live-changing numbers ─────────────────────────
+// Drives a single numeric element from `from` → `to` over `duration` ms,
+// formatted via toLocaleString('el-GR'). Cancels any in-flight count-up on
+// the same element so back-to-back balance changes don't double-tween.
+// `prefix` is prepended verbatim (e.g. '+' for delta toasts); not part of
+// the interpolation.
+const _animateNumberHandles = new WeakMap();
+export function _animateNumber(el, from, to, { duration = 700, prefix = '' } = {}) {
+  if (!el) return;
+  const cancel = _animateNumberHandles.get(el);
+  if (cancel) cancelAnimationFrame(cancel);
+  // Reduced motion: snap to final value, no tween.
+  if (_prefersReducedMotion() || from === to) {
+    el.textContent = prefix + Number(to).toLocaleString('el-GR');
+    _animateNumberHandles.delete(el);
+    return;
+  }
+  const start = performance.now();
+  const delta = to - from;
+  // easeOutCubic — feels snappy at the start, settles smoothly at the end.
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  function tick(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const v = Math.round(from + delta * ease(t));
+    el.textContent = prefix + v.toLocaleString('el-GR');
+    if (t < 1) {
+      _animateNumberHandles.set(el, requestAnimationFrame(tick));
+    } else {
+      _animateNumberHandles.delete(el);
+    }
+  }
+  _animateNumberHandles.set(el, requestAnimationFrame(tick));
+}
+
 // ── Confetti helper — fires branded green/gold burst ─────────────────────
 export function _fireConfetti(opts = {}) {
   if (typeof confetti !== 'function') return;

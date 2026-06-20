@@ -119,7 +119,8 @@ async function _transitionToApp() {
     await startApp();
   } catch(e) {
     logger.error('[startApp] CRASHED:', e?.message || e);
-    showToast('⚠️ Σφάλμα φόρτωσης: ' + (e?.message || 'unknown'), 'red');
+    // Raw e.message is logged elsewhere; user sees clean copy.
+    showToast('⚠️ Δεν φόρτωσε. Δοκίμασε ξανά', 'red');
   }
   _splashDone();
 }
@@ -216,7 +217,7 @@ export async function autoLogin(email) {
         logger.log('%c[AUTO-LOGIN] ⚠️ lookup error:', 'color:#ff6600;font-weight:bold;font-size:14px', lookup.error);
         const cached = _getCachedCustomer(email);
         if (cached) { state.foundCustomer = cached; _transitionToApp(); return; }
-        showToast('⚠️ Σφάλμα σύνδεσης. Δοκίμασε ξανά σε λίγο.', 'red');
+        showToast('⚠️ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
         showScreen('s-phone'); _initCheckboxStyle(); return;
       }
       logger.log('%c[AUTO-LOGIN] ❌ Firestore snap EMPTY', 'color:#ff0000;font-weight:bold;font-size:14px');
@@ -404,7 +405,7 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
               state.foundCustomer.totalPoints = Math.max(0, (state.foundCustomer.totalPoints || 0) - 100);
             }
             _refreshPointsUI();
-            showToast('⚠️ Ο κωδικός παραπομπής έχει φτάσει το όριο χρήσεων.', 'red');
+            showToast('⚠️ Ο κωδικός παραπομπής έχει εξαντληθεί', 'red');
           } else {
             if (typeof loadHistory === 'function') setTimeout(loadHistory, 500);
           }
@@ -438,9 +439,9 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
   })();
 
   _transitionToApp();
-  showToast('✅ Καλωσήρθες στο iPear Loyalty! 🍐', 'green');
-  if (marketingOptIn) setTimeout(() => showToast('🎁 Marketing bonus: +50 πόντοι! 🎉', 'green'), 1200);
-  if (refCode) setTimeout(() => showToast('🎁 Referral bonus: +100 πόντοι για εσένα! 🎉', 'green'), marketingOptIn ? 3000 : 1800);
+  showToast('🍐 Καλώς ήρθες στο iPear Loyalty', 'green');
+  if (marketingOptIn) setTimeout(() => showToast('🎁 +50 πόντοι bonus', 'green'), 1200);
+  if (refCode) setTimeout(() => showToast('🎁 +100 πόντοι από παραπομπή', 'green'), marketingOptIn ? 3000 : 1800);
 
   if ('Notification' in window && Notification.permission === 'default') {
     setTimeout(_showPushOnboarding, 3500);
@@ -791,7 +792,7 @@ export async function resendOTP() {
     localStorage.setItem('_sms_p_' + _regData.phone, _now2.toString());
     localStorage.setItem(_smsGlobalKey, JSON.stringify([..._globalLog2, _now2]));
     _startOTPResendTimer(60);
-    showToast('📱 Νέο SMS εστάλη!', 'green');
+    showToast('📱 Νέο SMS στάλθηκε', 'green');
   } catch(e) {
     logger.error('[resendOTP] ❌ error:', e.message);
     err.textContent = '❌ ' + (e.message || 'Αποτυχία αποστολής SMS. Δοκίμασε ξανά.');
@@ -1111,7 +1112,7 @@ export function logout() {
 let _deletionBusy = false;
 export async function requestAccountDeletion() {
   if (_deletionBusy) return;
-  if (!state.foundCustomer?.id) { showToast('⚠️ Δεν βρέθηκε λογαριασμός.', 'red'); return; }
+  if (!state.foundCustomer?.id) { showToast('⚠️ Δεν βρέθηκε λογαριασμός', 'red'); return; }
   if (!confirm('⚠️ Θέλεις σίγουρα να διαγράψεις τον λογαριασμό σου;\n\nΌλοι οι πόντοι και τα δεδομένα σου θα χαθούν ΟΡΙΣΤΙΚΑ.')) return;
   if (!confirm('ΤΕΛΙΚΗ ΕΠΙΒΕΒΑΙΩΣΗ:\nΗ διαγραφή είναι μη αναστρέψιμη. Συνέχεια;')) return;
   _deletionBusy = true;
@@ -1120,9 +1121,9 @@ export async function requestAccountDeletion() {
       deletionRequested: true,
       deletionRequestedAt: new Date().toISOString()
     });
-    showToast('✅ Το αίτημα διαγραφής καταχωρήθηκε. Θα ενημερωθείς σύντομα.', 'green');
+    showToast('✅ Καταχωρήθηκε. Θα ενημερωθείς σύντομα', 'green');
   } catch(e) {
-    showToast('❌ Σφάλμα: ' + (e.message || 'Δοκίμασε ξανά.'), 'red');
+    showToast('❌ Δεν στάλθηκε. Δοκίμασε ξανά', 'red');
   } finally {
     _deletionBusy = false;
   }

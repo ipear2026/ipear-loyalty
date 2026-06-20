@@ -1,6 +1,27 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //  i18n — Internationalization (Greek / English)
 //  Detects browser language; defaults to Greek. Use _t('key') everywhere.
+//
+//  ── COPY STYLE GUIDE (toast / error / CTA strings across the app) ──
+//
+//  Apply these rules when adding ANY user-facing string in the customer
+//  app (and ideally in admin/tablet too):
+//
+//    1. Singular informal — "Δοκίμασε ξανά" not "Παρακαλούμε δοκιμάστε".
+//       The app talks to one customer at a time, like a friend at the till.
+//    2. ≤ 1 emoji per string, at the START. Never trailing 🎉/🍐 fireworks.
+//       "✅ Αντιγράφηκε" — yes.  "✅ Αντιγράφηκε! 🎉" — no.
+//    3. No trailing periods on short toasts (≤ 6 words). Periods on
+//       longer copy and on multi-sentence errors only.
+//    4. Imperative CTAs — "Συνδέσου", "Δοκίμασε ξανά", "Πάρε την προσφορά".
+//       Avoid passive ("Δοκιμάστε επανασύνδεση").
+//    5. Prefer "Δεν έγινε X" over "Σφάλμα κατά X" for human readability.
+//       The user doesn't need to know which subsystem failed.
+//    6. Use the single-character ellipsis (…) in pending states, never "...".
+//    7. Never expose raw e.message to the user — log it, show a clean line.
+//
+//  Existing toasts that don't follow these rules were tightened in the
+//  delight-pass commit; new ones should follow from the start.
 // ═══════════════════════════════════════════════════════════════════════════
 export const _i18n = {
   el: {

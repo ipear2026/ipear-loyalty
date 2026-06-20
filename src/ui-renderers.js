@@ -1,6 +1,6 @@
 import { logger } from './logger.js';
 import { state } from './state.js';
-import { esc, showToast, _trackEvent, _trapFocus, _releaseFocus, _fireConfetti, tier, _WORKER_URL } from './utils.js';
+import { esc, showToast, _trackEvent, _trapFocus, _releaseFocus, _fireConfetti, tier, _WORKER_URL, _haptic } from './utils.js';
 import { _t } from './i18n.js';
 import { _migrateCustomerToUid } from './main.js';
 
@@ -563,7 +563,7 @@ export async function offerGenerateQR() {
   _offerQRBusy = true;
   document.getElementById('offer-confirm').classList.remove('show');
   const o = _offerToRedeem;
-  if (!o || !state.foundCustomer) { showToast('⚠️ Σφάλμα. Δοκίμασε ξανά.'); _offerQRBusy = false; return; }
+  if (!o || !state.foundCustomer) { showToast('⚠️ Κάτι πήγε στραβά. Δοκίμασε ξανά'); _offerQRBusy = false; return; }
 
   const now = new Date();
   const expires = new Date(now.getTime() + 5*60*1000);
@@ -573,7 +573,7 @@ export async function offerGenerateQR() {
 
   const authUid = window._auth?.currentUser?.uid;
   if (!authUid) {
-    showToast('⚠️ Σύνδεση απαιτείται. Δοκίμασε να ξανασυνδεθείς.');
+    showToast('⚠️ Συνδέσου ξανά για να συνεχίσεις');
     _offerQRBusy = false;
     return;
   }
@@ -630,7 +630,7 @@ export async function offerGenerateQR() {
     logger.error('[offer-save] ERROR:', e?.code, e?.message, 'foundCustomer.id:', state.foundCustomer?.id, 'authUid:', authUid);
     clearInterval(_offerQRTimer);
     document.getElementById('offer-qr-overlay').style.display = 'none';
-    showToast('⚠️ Σφάλμα: ' + (e?.code || e?.message || 'Άγνωστο'), 'error');
+    showToast('⚠️ Κάτι πήγε στραβά. Δοκίμασε ξανά', 'error');
   } finally {
     _offerQRBusy = false;
     _offerToRedeem = null;
@@ -655,7 +655,7 @@ export function _offerTick() {
     tmr.setAttribute('aria-live', 'assertive');
     setTimeout(() => {
       document.getElementById('offer-qr-overlay').style.display = 'none';
-      showToast('⏰ Ο κωδικός προσφοράς έληξε. Δοκίμασε ξανά.', 'warn');
+      showToast('⏰ Ο κωδικός έληξε. Δοκίμασε ξανά', 'warn');
     }, 2000);
     return;
   }
@@ -688,7 +688,7 @@ function _watchOfferRedemptionDoc(docId) {
         _offerQRBusy = false;
         _activeOfferRedemptionId = null;
         document.getElementById('offer-qr-overlay').style.display = 'none';
-        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα.', 'red');
+        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα', 'red');
         return;
       }
       const d = snap.data();
@@ -698,7 +698,7 @@ function _watchOfferRedemptionDoc(docId) {
         _offerQRBusy = false;
         _activeOfferRedemptionId = null;
         document.getElementById('offer-qr-overlay').style.display = 'none';
-        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα.', 'red');
+        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα', 'red');
         return;
       }
       if (d.used === true || d.status === 'approved' || d.status === 'used') {
@@ -708,7 +708,8 @@ function _watchOfferRedemptionDoc(docId) {
         _activeOfferRedemptionId = null;
         document.getElementById('offer-qr-overlay').style.display = 'none';
         const bp = d.bonusPoints || 0;
-        showToast('✅ Προσφορά εγκρίθηκε!' + (bp > 0 ? ' +' + bp + ' πόντοι' : ''), 'green');
+        showToast('✅ Προσφορά εγκρίθηκε' + (bp > 0 ? ' · +' + bp + ' πόντοι' : ''), 'green');
+        _haptic('success');
         setTimeout(() => _fireConfetti({ particleCount: 150, spread: 100 }), 200);
       }
     });
@@ -749,18 +750,18 @@ export async function cancelOfferQR() {
 export async function offerGenerateEshopCoupon() {
   document.getElementById('offer-confirm').classList.remove('show');
   const o = _offerToRedeem;
-  if (!o) { showToast('⚠️ Σφάλμα. Δοκίμασε ξανά.'); return; }
+  if (!o) { showToast('⚠️ Κάτι πήγε στραβά. Δοκίμασε ξανά'); return; }
   _offerToRedeem = null;
 
   const discType = o.eshopDiscountType || '';
   const discAmt  = Number(o.eshopDiscountAmount) || 0;
   if (!discType || discAmt <= 0) {
-    showToast('⚠️ Αυτή η προσφορά δεν έχει ρυθμιστεί για e-shop κουπόνι.', 'warn');
+    showToast('⚠️ Δεν διατίθεται κουπόνι e-shop για αυτή την προσφορά', 'warn');
     return;
   }
 
   const authUser = window._auth?.currentUser;
-  if (!authUser) { showToast('⚠️ Σύνδεση απαιτείται.'); return; }
+  if (!authUser) { showToast('⚠️ Συνδέσου ξανά'); return; }
 
   showToast('⏳ Δημιουργία κουπονιού…');
   try {
@@ -785,7 +786,7 @@ export async function offerGenerateEshopCoupon() {
     _showEshopCouponResult(data.code, label, data.expiresAt);
   } catch (e) {
     logger.warn('[eshop-coupon]', e);
-    showToast('❌ Σφάλμα σύνδεσης. Δοκίμασε ξανά.', 'error');
+    showToast('❌ Δεν συνδέθηκε. Δοκίμασε ξανά', 'error');
   }
 }
 
@@ -1230,6 +1231,7 @@ export async function copyReferral() {
     await navigator.clipboard.writeText(code);
     if (btn) { const orig = btn.textContent; btn.textContent = '✅ Αντιγράφηκε!'; btn.style.background = '#111'; btn.style.color = '#8ae900'; setTimeout(() => { btn.textContent = orig; btn.style.background = ''; btn.style.color = ''; }, 1500); }
     showToast('✅ Αντιγράφηκε: ' + code, 'green');
+    _haptic('pop');
   } catch(e) { showToast('Κωδικός: ' + code); }
 }
 
@@ -1241,6 +1243,6 @@ export async function shareReferral() {
   if (navigator.share) {
     try { await navigator.share({title:'iPear Loyalty', text, url: appUrl}); } catch(e) {}
   } else {
-    try { await navigator.clipboard.writeText(text); showToast('✅ Το μήνυμα αντιγράφηκε!','green'); } catch(e) { showToast('Κωδικός: ' + code); }
+    try { await navigator.clipboard.writeText(text); showToast('✅ Αντιγράφηκε','green'); } catch(e) { showToast('Κωδικός: ' + code); }
   }
 }

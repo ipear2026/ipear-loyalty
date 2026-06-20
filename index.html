@@ -515,7 +515,17 @@
           </div>
         </div>
 
-        <div class="prof-section">
+        <!-- Anchor nav — jump to section without endless scrolling. Sticky just
+             below the app header. Active state is driven by IntersectionObserver
+             in main.js (_initProfileChipNav). -->
+        <nav class="prof-chips" id="prof-chips" role="tablist" aria-label="Ενότητες προφίλ">
+          <button class="prof-chip is-active" data-chip-target="pr-sec-referral" role="tab" aria-controls="pr-sec-referral">🤝 Φίλος</button>
+          <button class="prof-chip" data-chip-target="pr-sec-tier" role="tab" aria-controls="pr-sec-tier">🏆 Tier</button>
+          <button class="prof-chip" data-chip-target="pr-sec-lb" role="tab" aria-controls="pr-sec-lb">📊 Top</button>
+          <button class="prof-chip" data-chip-target="pr-sec-history" role="tab" aria-controls="pr-sec-history">📋 Ιστορικό</button>
+        </nav>
+
+        <div class="prof-section" id="pr-sec-referral">
           <div class="prof-sec-title">🤝 Φέρε Φίλο</div>
           <div class="ref-desc">Μοιράσου τον κωδικό σου και κερδίσετε και οι δύο <strong>100 πόντους</strong> όταν εγγραφεί στο iPear Loyalty!</div>
           <div class="ref-code-box">
@@ -535,7 +545,7 @@
           <div class="ref-reward-note">Ισχύει για νέες εγγραφές στο κατάστημα iPear</div>
         </div>
 
-        <div class="prof-section">
+        <div class="prof-section" id="pr-sec-tier">
           <div class="prof-sec-title">🏆 Κατάταξη</div>
           <div class="tier-prog-card">
             <div class="tpc-row">
@@ -555,19 +565,30 @@
           </div>
         </div>
 
-        <div class="prof-section">
+        <div class="prof-section" id="pr-sec-lb">
           <div class="prof-sec-title" style="display:flex;justify-content:space-between;align-items:center">
             <span>🏆 Κορυφαίοι Πελάτες</span>
             <span style="font-size:.62rem;color:var(--grl);font-weight:600;letter-spacing:.5px;display:flex;align-items:center;gap:4px"><span style="width:6px;height:6px;border-radius:50%;background:#8ae900;animation:pulse 1.5s infinite"></span>LIVE</span>
           </div>
           <div id="lb-container">
-            <div style="text-align:center;color:var(--grl);padding:14px;font-size:.82rem">Φόρτωση...</div>
+            <div class="lb-skeleton" aria-busy="true" aria-label="Φόρτωση leaderboard">
+              <div class="sk-lb-row"><span class="sk sk-rank"></span><span class="sk sk-name"></span><span class="sk sk-pts"></span></div>
+              <div class="sk-lb-row"><span class="sk sk-rank"></span><span class="sk sk-name"></span><span class="sk sk-pts"></span></div>
+              <div class="sk-lb-row"><span class="sk sk-rank"></span><span class="sk sk-name"></span><span class="sk sk-pts"></span></div>
+              <div class="sk-lb-row"><span class="sk sk-rank"></span><span class="sk sk-name"></span><span class="sk sk-pts"></span></div>
+            </div>
           </div>
         </div>
 
-        <div class="prof-section">
+        <div class="prof-section" id="pr-sec-history">
           <div class="prof-sec-title">📋 Ιστορικό Συναλλαγών</div>
-          <div id="pr-history"><div style="text-align:center;color:var(--grl);padding:16px;font-size:.85rem">Φόρτωση...</div></div>
+          <div id="pr-history">
+            <div class="hist-skeleton" aria-busy="true" aria-label="Φόρτωση ιστορικού">
+              <div class="sk-hist-row"><span class="sk sk-ico"></span><span class="sk-hist-body"><span class="sk sk-line-1"></span><span class="sk sk-line-2"></span></span><span class="sk sk-amt"></span></div>
+              <div class="sk-hist-row"><span class="sk sk-ico"></span><span class="sk-hist-body"><span class="sk sk-line-1"></span><span class="sk sk-line-2"></span></span><span class="sk sk-amt"></span></div>
+              <div class="sk-hist-row"><span class="sk sk-ico"></span><span class="sk-hist-body"><span class="sk sk-line-1"></span><span class="sk sk-line-2"></span></span><span class="sk sk-amt"></span></div>
+            </div>
+          </div>
         </div>
 
         <div class="prof-section" id="push-section" style="display:none">

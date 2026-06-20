@@ -10,7 +10,8 @@ import { state } from './state.js';
 import {
   esc, showToast, _trackEvent, _trapFocus, _releaseFocus,
   _WORKER_URL, tier, _applyTierColors, _fireConfetti, _fireTierUpConfetti,
-  _parseExpiryMs, _isPendingAndActive
+  _parseExpiryMs, _isPendingAndActive,
+  _haptic, _animateNumber,
 } from './utils.js';
 import { _t } from './i18n.js';
 import { _setPushUI, _syncPushState, _dismissPushOnboard, _acceptPushOnboard, registerServiceWorker } from './push-notifications.js';
@@ -140,7 +141,10 @@ function _watchRedemptionDoc(docId) {
         clearInterval(_redeemTimer);
         _activeRedemptionDocId = null;
         document.getElementById('redeem-overlay').style.display = 'none';
-        showToast('✅ Εξαργύρωση ολοκληρώθηκε!', 'green');
+        showToast('✅ Εξαργύρωση ολοκληρώθηκε', 'green');
+        // Reward staff-scanned the QR → triple-tap haptic pairs with the
+        // confetti burst for a multi-sensory success cue.
+        _haptic('success');
         setTimeout(() => _fireConfetti(), 200);
       }
     });
@@ -498,9 +502,11 @@ function _animateLivePointsChange(oldPts, newPts, newTot) {
   const t   = tier(newTot);
   const pct = t.next ? Math.min(100, Math.round(((newTot - t.floor) / (t.next - t.floor)) * 100)) : 100;
   const nName = t.next===1000?'🥈 Silver':t.next===3000?'🥇 Gold':t.next===6000?'💎 Diamond':'👑 Platinum';
-  const ptsStr = newPts.toLocaleString('el-GR');
   const totStr = newTot.toLocaleString('el-GR');
   const pctStr = pct + '%';
+  // Keep the baseline in sync so the next _refreshPointsUI call doesn't
+  // re-tween from the stale pre-change value.
+  _lastDisplayedPts = newPts;
 
   _applyTierColors(t.cls);
   _checkTierChange(t.cls);
@@ -508,15 +514,19 @@ function _animateLivePointsChange(oldPts, newPts, newTot) {
   switchTab('home');
 
   const hdrPts = document.getElementById('hdr-pts');
-  if (hdrPts) hdrPts.textContent = ptsStr;
+  if (hdrPts) _animateNumber(hdrPts, oldPts, newPts, { duration: 650 });
 
   const hPts = document.getElementById('h-pts');
   if (hPts) {
+    // Keep the scale-pulse + color flash for the hero number — it telegraphs
+    // "something changed" before the eye registers the count-up. The
+    // textContent swap is now driven by _animateNumber so the digits tween
+    // visibly during the pulse instead of snapping at the 200 ms mark.
     hPts.style.transition = 'transform .25s,color .25s';
     hPts.style.transform  = 'scale(1.4)';
     hPts.style.color      = diff > 0 ? '#8ae900' : '#ff3b30';
+    _animateNumber(hPts, oldPts, newPts, { duration: 850 });
     setTimeout(() => {
-      hPts.textContent     = ptsStr;
       hPts.style.transform = 'scale(1)';
       setTimeout(() => { hPts.style.color = ''; hPts.style.transition = ''; }, 400);
     }, 200);
@@ -532,12 +542,12 @@ function _animateLivePointsChange(oldPts, newPts, newTot) {
     : '👑 Platinum — Ανώτατη κατάταξη!';
   renderHomeRewards(newPts);
 
-  if (el('lc-pts'))          el('lc-pts').textContent          = ptsStr;
+  if (el('lc-pts'))          _animateNumber(el('lc-pts'), oldPts, newPts, { duration: 700 });
   if (el('lc-tier-icon'))    el('lc-tier-icon').textContent    = t.icon;
   if (el('lc-tier-name'))    el('lc-tier-name').textContent    = t.name;
   if (el('lc-tier-icon-big'))el('lc-tier-icon-big').textContent= t.icon;
 
-  if (el('rw-pts'))      el('rw-pts').textContent      = ptsStr;
+  if (el('rw-pts'))      _animateNumber(el('rw-pts'), oldPts, newPts, { duration: 700 });
   if (el('rw-tier-icon'))el('rw-tier-icon').textContent = t.icon;
   renderRewardsList(newPts);
 
@@ -607,6 +617,9 @@ function _checkTierChange(newTierCls) {
     const newIdx = tierOrder.indexOf(newTierCls);
     if (newIdx > oldIdx) {
       setTimeout(_fireTierUpConfetti, 300);
+      // Tier-up is the strongest reward moment — pair confetti with success
+      // haptic so it lands even when the phone is face-down on the counter.
+      _haptic('success');
       const names = { silver:'Silver 🥈', gold:'Gold 🥇', diamond:'Diamond 💎', platinum:'Platinum 👑' };
       showToast('🎉 Ανέβηκες στο ' + (names[newTierCls] || newTierCls) + '!', 'green');
       _syncTierToWoo(newTierCls, state.foundCustomer?.totalPoints || 0);
@@ -664,8 +677,83 @@ export function switchTab(name) {
     // the updated balance. Without this, users see new points but an empty
     // "Ιστορικό Συναλλαγών" until they fully relaunch the app.
     loadHistory();
+    // Wire chip nav once per session; cheap if already wired.
+    _initProfileChipNav();
   }
   _bindHeaderScroll(pane);
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  PROFILE CHIP NAV
+//  Smooth-scrolls the profile pane to anchored sections on chip tap and
+//  highlights the chip whose section is currently most-visible. Cheap
+//  to call multiple times — the IntersectionObserver is set up once and
+//  click handlers use event delegation on the chip row.
+// ════════════════════════════════════════════════════════════════════
+let _profileChipNavWired = false;
+let _profileChipObserver = null;
+function _initProfileChipNav() {
+  if (_profileChipNavWired) return;
+  const chipBar = document.getElementById('prof-chips');
+  if (!chipBar) return;
+  const pane = document.getElementById('t-profile');
+  if (!pane) return;
+  _profileChipNavWired = true;
+
+  // Click handler — delegated on the chip bar.
+  chipBar.addEventListener('click', (ev) => {
+    const chip = ev.target.closest('.prof-chip');
+    if (!chip) return;
+    const targetId = chip.getAttribute('data-chip-target');
+    const targetEl = document.getElementById(targetId);
+    if (!targetEl) return;
+    // Soft haptic + smooth scroll. scroll-margin-top on the section
+    // accounts for the sticky chip bar height (set in customer.css).
+    _haptic('pop');
+    targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Optimistically set active so the chip flips immediately even if
+    // the observer hasn't fired yet during the smooth scroll.
+    _setActiveChip(chipBar, targetId);
+  });
+
+  // Scroll-tracked active state via IntersectionObserver. The root is the
+  // profile pane (which is the scroll container), and rootMargin biases the
+  // detection window so a section becomes "active" when its top crosses the
+  // line just below the chip bar.
+  try {
+    _profileChipObserver = new IntersectionObserver((entries) => {
+      // Pick the entry with the largest visible ratio that is currently
+      // intersecting — robust to two adjacent sections both crossing.
+      let best = null;
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        if (!best || e.intersectionRatio > best.intersectionRatio) best = e;
+      }
+      if (best) _setActiveChip(chipBar, best.target.id);
+    }, {
+      root: pane,
+      // -55% bottom so a section becomes "active" only once its top has
+      // crossed the upper third of the viewport — feels right when
+      // smooth-scrolling through long sections.
+      rootMargin: '-72px 0px -55% 0px',
+      threshold: [0, 0.25, 0.5, 0.75],
+    });
+    ['pr-sec-referral','pr-sec-tier','pr-sec-lb','pr-sec-history'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) _profileChipObserver.observe(el);
+    });
+  } catch (e) {
+    // No-op on browsers without IntersectionObserver — chips still work
+    // as scroll-to anchors, just without scroll-driven highlighting.
+    logger.warn('[chip-nav] IntersectionObserver init failed:', e?.message || e);
+  }
+}
+function _setActiveChip(chipBar, targetId) {
+  chipBar.querySelectorAll('.prof-chip').forEach(c => {
+    const isActive = c.getAttribute('data-chip-target') === targetId;
+    c.classList.toggle('is-active', isActive);
+    c.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
 }
 
 function _bindHeaderScroll(pane) {
@@ -786,7 +874,7 @@ function _setMaintenanceMode(active) {
     else btn.style.opacity = '';
   });
   if (active) {
-    showToast('Το σύστημα αναβαθμίζεται. Παρακαλούμε δοκιμάστε σε λίγο!', 'warn');
+    showToast('🔧 Αναβάθμιση σε εξέλιξη. Δοκίμασε σε λίγο', 'warn');
   }
 }
 
@@ -881,19 +969,28 @@ async function _awardBirthdayBonus(c) {
 }
 
 // ════════════════════════════════════════
-//  REFRESH POINTS UI
+//  REFRESH POINTS UI  (count-up on initial sync + tab return)
 // ════════════════════════════════════════
+// Tracks the last value we drew to ANY points display so subsequent calls
+// (live snapshot, tab switch, manual refresh) tween from the previous
+// number instead of snapping. First call after login counts up from 0
+// — a tiny "reveal" delight moment without blocking other UI.
+let _lastDisplayedPts = null;
 export function _refreshPointsUI() {
   if (!state.foundCustomer) return;
   const pts = state.foundCustomer.points || 0;
-  const ptsStr = pts.toLocaleString('el-GR');
+  const from = _lastDisplayedPts == null ? 0 : _lastDisplayedPts;
+  const duration = _lastDisplayedPts == null ? 1100 : 600;
   const el = id => document.getElementById(id);
-  if (el('hdr-pts')) el('hdr-pts').textContent = ptsStr;
-  if (el('h-pts'))   el('h-pts').textContent = ptsStr;
-  if (el('lc-pts'))  el('lc-pts').textContent = ptsStr;
-  if (el('rw-pts'))  el('rw-pts').textContent = ptsStr;
+  // Animate every visible points label in parallel. _animateNumber is
+  // idempotent per-element (cancels any in-flight tween on the same node).
+  ['hdr-pts','h-pts','lc-pts','rw-pts'].forEach(id => {
+    const node = el(id);
+    if (node) _animateNumber(node, from, pts, { duration });
+  });
   renderHomeRewards(pts);
   renderRewardsList(pts);
+  _lastDisplayedPts = pts;
 }
 
 // ════════════════════════════════════════
@@ -904,19 +1001,23 @@ let _redeemLastAt = 0;
 const _REDEEM_COOLDOWN = 2000;
 
 export async function startRedemption(points, label) {
-  if (state._maintenanceMode) { showToast('Το σύστημα αναβαθμίζεται. Παρακαλούμε δοκιμάστε σε λίγο!', 'warn'); return; }
+  if (state._maintenanceMode) { showToast('🔧 Αναβάθμιση σε εξέλιξη. Δοκίμασε σε λίγο', 'warn'); return; }
   if (_redeemInProgress) return;
   const now = Date.now();
-  if (now - _redeemLastAt < _REDEEM_COOLDOWN) { showToast('⏳ Περίμενε λίγο...'); return; }
+  if (now - _redeemLastAt < _REDEEM_COOLDOWN) { showToast('⏳ Περίμενε λίγο…'); return; }
   _redeemLastAt = now;
   _redeemInProgress = true;
+  // Soft "pop" the moment the reward card is pressed — confirms the tap
+  // registered before the QR overlay paints (Firestore round-trip can take
+  // 300–800 ms on weak signal at the till).
+  _haptic('pop');
   try { await _startRedemptionInner(points, label); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
 }
 
 async function _startRedemptionInner(points, label) {
   const pts = state.foundCustomer?.points || 0;
-  if (!Number.isInteger(points) || points <= 0) { showToast('⚠️ Μη έγκυρο πακέτο εξαργύρωσης.'); return; }
-  if (pts < points) { showToast('⚠️ Ανεπαρκείς πόντοι.'); return; }
+  if (!Number.isInteger(points) || points <= 0) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
+  if (pts < points) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
 
   await _cancelActiveRedemption('replaced-by-new-code');
 
@@ -924,7 +1025,7 @@ async function _startRedemptionInner(points, label) {
   if (uid) {
     let existing = null;
     try { existing = await _findExistingActivePendingByUser(uid); }
-    catch(e) { showToast('❌ Σφάλμα σύνδεσης: ' + e.message); return; }
+    catch(e) { showToast('❌ Δεν συνδέθηκε. Δοκίμασε ξανά'); return; }
     if (existing) {
       _activeRedemptionDocId = existing.id;
       _watchRedemptionDoc(existing.id);
@@ -943,11 +1044,11 @@ async function _startRedemptionInner(points, label) {
   }
 
   const code = await _generateUniquePendingCode();
-  if (!code) { showToast('❌ Προσωρινό σφάλμα δημιουργίας κωδικού. Δοκίμασε ξανά.'); return; }
+  if (!code) { showToast('❌ Δεν δημιουργήθηκε κωδικός. Δοκίμασε ξανά'); return; }
 
   const _DISC_MAP = {1000:5, 2500:15, 4000:30};
   const discount = _DISC_MAP[points];
-  if (!discount) { showToast('⚠️ Μη έγκυρο πακέτο εξαργύρωσης.'); return; }
+  if (!discount) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
   const now = new Date();
   const expires = new Date(now.getTime() + 5*60*1000);
   document.getElementById('ro-reward').textContent = label;
@@ -1082,7 +1183,7 @@ document.addEventListener('keydown', (e) => {
 export async function startApp() {
   if (!state.foundCustomer) {
     logger.error('[startApp] ABORT — foundCustomer is null');
-    showToast('⚠️ Δεν φόρτωσε ο λογαριασμός. Κλείσε και ξαναάνοιξε.', 'red');
+    showToast('⚠️ Ο λογαριασμός δεν φόρτωσε. Κλείσε και ξανάνοιξε', 'red');
     return;
   }
   const authUid = window._auth?.currentUser?.uid;

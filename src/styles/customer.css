@@ -1038,6 +1038,53 @@ html[data-theme="dark"]{
 .prof-section{background:#fff;border:1px solid var(--bd);border-radius:10px;padding:18px;margin-bottom:14px}
 .prof-sec-title{font-size:18px;font-weight:800;text-transform:none;letter-spacing:0;color:var(--bk);margin-bottom:14px}
 
+/* ─── Profile chip nav ──────────────────────────────────────────────────────
+ * Horizontal jump-to chips sticky under the app header. Replaces the
+ * "scroll-down-to-find-it" UX with one-tap section access. Active chip is
+ * driven by IntersectionObserver in main.js → _initProfileChipNav.
+ *
+ * Scroll-snap on the chip row keeps the active chip in view on narrow
+ * screens. -webkit-overflow-scrolling preserves momentum on iOS. */
+.prof-chips{
+  display:flex;gap:8px;
+  position:sticky;top:0;z-index:30;
+  margin:0 -16px 14px;padding:10px 16px;
+  background:rgba(246,246,246,.92);
+  backdrop-filter:saturate(180%) blur(8px);
+  -webkit-backdrop-filter:saturate(180%) blur(8px);
+  overflow-x:auto;
+  scroll-snap-type:x proximity;
+  scrollbar-width:none;
+  -webkit-overflow-scrolling:touch;
+}
+.prof-chips::-webkit-scrollbar{display:none}
+.prof-chip{
+  flex:0 0 auto;scroll-snap-align:start;
+  appearance:none;-webkit-appearance:none;
+  background:#fff;border:1.5px solid var(--bd);
+  border-radius:999px;padding:8px 14px;
+  font-family:var(--font);font-size:.78rem;font-weight:700;
+  color:var(--gr);
+  cursor:pointer;
+  transition:background-color .18s,border-color .18s,color .18s,transform .12s;
+}
+.prof-chip:hover{border-color:var(--g);color:var(--bk)}
+.prof-chip:active{transform:scale(.96)}
+.prof-chip:focus-visible{outline:3px solid rgba(138,233,0,.5);outline-offset:2px}
+.prof-chip.is-active{
+  background:var(--bk);color:var(--g);
+  border-color:var(--bk);
+}
+.prof-chip.is-active:hover{color:var(--g)}
+@media (prefers-reduced-motion: reduce){
+  .prof-chip{transition:none}
+}
+/* Anchored sections need a scroll-margin so the sticky chip bar
+ * doesn't hide the section title when JS scrolls them into view. */
+#pr-sec-referral,#pr-sec-tier,#pr-sec-lb,#pr-sec-history{
+  scroll-margin-top:62px;
+}
+
 /* Referral */
 .ref-desc{font-size:.84rem;color:var(--gr);line-height:1.5;margin-bottom:14px}
 .ref-code-box{background:#f5f5f5;border:1.5px dashed var(--bd);border-radius:8px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
@@ -1109,6 +1156,49 @@ html[data-theme="dark"]{
 .hist-pts{font-size:.95rem;font-weight:900;flex-shrink:0;font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
 .hist-pts.add{color:var(--gd)}
 .hist-pts.redeem{color:var(--red)}
+
+/* ─── Skeleton loaders ──────────────────────────────────────────────────────
+ * Used as placeholders for leaderboard + history rows during the initial
+ * fetch. A separate keyframe (sk-shimmer) avoids stomping on the existing
+ * `shimmer` keyframe used by .rw-card.unlocked. Honours
+ * prefers-reduced-motion by falling back to a flat tint. */
+@keyframes sk-shimmer {
+  0%   { background-position:  200% 0; }
+  100% { background-position: -200% 0; }
+}
+.sk {
+  display:inline-block;
+  background:linear-gradient(90deg,#ececec 0%,#f6f6f6 50%,#ececec 100%);
+  background-size:200% 100%;
+  animation:sk-shimmer 1.4s ease-in-out infinite;
+  border-radius:6px;
+  vertical-align:middle;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk { animation:none; background:#ececec; }
+}
+/* Leaderboard skeleton rows */
+.lb-skeleton { padding:6px 4px; }
+.sk-lb-row {
+  display:flex;align-items:center;gap:12px;
+  padding:9px 6px;border-bottom:1px solid var(--bd);
+}
+.sk-lb-row:last-child { border-bottom:none; }
+.sk-rank { width:22px;height:14px; }
+.sk-name { flex:1;height:14px; }
+.sk-pts  { width:54px;height:14px; }
+/* History skeleton rows — match real .hist-item shape */
+.hist-skeleton { padding-top:2px; }
+.sk-hist-row {
+  display:flex;align-items:center;gap:12px;
+  padding:12px 0;border-bottom:1px solid var(--bd);
+}
+.sk-hist-row:last-child { border-bottom:none; }
+.sk-ico       { width:38px;height:38px;border-radius:8px;flex-shrink:0; }
+.sk-hist-body { flex:1;display:flex;flex-direction:column;gap:6px;min-width:0; }
+.sk-line-1    { height:12px;width:65%; }
+.sk-line-2    { height:10px;width:42%; }
+.sk-amt       { width:58px;height:14px;flex-shrink:0; }
 
 /* History pagination — collapse/reveal + load-more */
 .hist-more-btn{
