@@ -2,7 +2,9 @@
 <html lang="el">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover">
+<!-- WCAG 1.4.4: allow user zoom (no maximum-scale / user-scalable=no).
+     Inputs are sized at 1rem (≥16px) so iOS doesn't auto-zoom on focus. -->
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <title>iPear Loyalty</title>
 
 <!-- PWA manifest -->
@@ -214,9 +216,9 @@
       <h2>Είσοδος</h2>
       <p>Εισάγετε το email και τον κωδικό σας.</p>
       <input class="field" type="email" id="phone-in" placeholder="Email" inputmode="email" autocomplete="email" aria-label="Email" onkeydown="if(event.key==='Enter')document.getElementById('auth-pass').focus()">
-      <div style="position:relative;margin-bottom:12px">
+      <div class="field-wrap">
         <input class="field" type="password" id="auth-pass" placeholder="Κωδικός" autocomplete="current-password" aria-label="Κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" onkeydown="if(event.key==='Enter')submitPhone()">
-        <button type="button" id="pass-eye" onclick="togglePassVis()" aria-label="Εμφάνιση/Απόκρυψη κωδικού" style="position:absolute;right:14px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;padding:4px;color:#aaa">
+        <button type="button" id="pass-eye" onclick="togglePassVis()" aria-label="Εμφάνιση/Απόκρυψη κωδικού" class="field-eye-btn">
           <svg id="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
       </div>
@@ -231,7 +233,7 @@
       </label>
       <button class="btn-main" id="phone-btn" onclick="submitPhone()">Είσοδος →</button>
       <div class="err-msg" id="phone-err"></div>
-      <button type="button" onclick="openForgotPass()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">Ξέχασα τον κωδικό μου</button>
+      <button type="button" onclick="openForgotPass()" class="link-btn-secondary">Ξέχασα τον κωδικό μου</button>
       <div style="border-top:1px solid var(--bd);margin-top:14px;padding-top:14px;text-align:center">
         <span style="font-size:.82rem;color:var(--grl);font-weight:600">Νέος χρήστης;</span>
         <button type="button" onclick="openRegister()" style="background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;padding:4px 8px;text-decoration:underline">Δημιουργία λογαριασμού →</button>
@@ -242,15 +244,15 @@
     <div id="auth-step2" style="display:none">
       <h2>Δημιούργησε Κωδικό</h2>
       <p id="auth-step2-sub">Πρώτη σύνδεση; Ορίσε τον κωδικό σου.</p>
-      <div style="position:relative;margin-bottom:12px">
+      <div class="field-wrap">
         <input class="field" type="password" id="auth-newpass1" placeholder="Νέος κωδικός (min 6 χαρακτήρες)" aria-label="Νέος κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" onkeydown="if(event.key==='Enter')document.getElementById('auth-newpass2').focus()">
       </div>
-      <div style="position:relative;margin-bottom:12px">
-        <input class="field" type="password" id="auth-newpass2" placeholder="Επιβεβαίωση κωδικού" aria-label="Επιβεβαίωση νέου κωδικού" style="margin-bottom:0;width:100%" onkeydown="if(event.key==='Enter')submitCreatePass()">
+      <div class="field-wrap">
+        <input class="field field--flush" type="password" id="auth-newpass2" placeholder="Επιβεβαίωση κωδικού" aria-label="Επιβεβαίωση νέου κωδικού" onkeydown="if(event.key==='Enter')submitCreatePass()">
       </div>
       <div class="err-msg" id="auth-step2-err"></div>
       <button class="btn-main" onclick="submitCreatePass()">Δημιουργία →</button>
-      <button type="button" onclick="backToLogin()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">← Πίσω</button>
+      <button type="button" onclick="backToLogin()" class="link-btn-secondary">← Πίσω</button>
     </div>
   </div>
 </div>
@@ -275,7 +277,7 @@
       επέστρεψε στη σύνδεση και απλά πάτα <strong>Είσοδος →</strong><br>
       — το σύστημα θα σε καθοδηγήσει να δημιουργήσεις κωδικό.
     </div>
-    <button type="button" onclick="showScreen('s-phone');backToLogin()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:12px;width:100%;text-align:center;padding:6px">← Επιστροφή στη σύνδεση</button>
+    <button type="button" onclick="showScreen('s-phone');backToLogin()" class="link-btn-secondary" style="margin-top:12px">← Επιστροφή στη σύνδεση</button>
   </div>
 </div>
 
@@ -289,11 +291,11 @@
     <input class="field" type="text" id="reg-name" placeholder="Ονοματεπώνυμο *" autocomplete="name" aria-label="Ονοματεπώνυμο" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-phone').focus()">
     <input class="field" type="tel" id="reg-phone" placeholder="Κινητό (π.χ. 6912345678) *" inputmode="numeric" pattern="[0-9]*" maxlength="10" autocomplete="tel" aria-label="Αριθμός κινητού" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-email').focus()">
     <input class="field" type="email" id="reg-email" placeholder="Email *" inputmode="email" autocomplete="email" aria-label="Διεύθυνση email" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-pass1').focus()">
-    <div style="position:relative;margin-bottom:12px">
-      <input class="field" type="password" id="reg-pass1" placeholder="Κωδικός (min 6 χαρακτήρες) *" autocomplete="new-password" aria-label="Κωδικός πρόσβασης" aria-required="true" style="margin-bottom:0;width:100%" onkeydown="if(event.key==='Enter')document.getElementById('reg-pass2').focus()">
+    <div class="field-wrap">
+      <input class="field field--flush" type="password" id="reg-pass1" placeholder="Κωδικός (min 6 χαρακτήρες) *" autocomplete="new-password" aria-label="Κωδικός πρόσβασης" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-pass2').focus()">
     </div>
-    <div style="position:relative;margin-bottom:12px">
-      <input class="field" type="password" id="reg-pass2" placeholder="Επιβεβαίωση κωδικού *" autocomplete="new-password" aria-label="Επιβεβαίωση κωδικού" aria-required="true" style="margin-bottom:0;width:100%" onkeydown="if(event.key==='Enter')submitRegister()">
+    <div class="field-wrap">
+      <input class="field field--flush" type="password" id="reg-pass2" placeholder="Επιβεβαίωση κωδικού *" autocomplete="new-password" aria-label="Επιβεβαίωση κωδικού" aria-required="true" onkeydown="if(event.key==='Enter')submitRegister()">
     </div>
     <div style="margin-bottom:12px">
       <div style="font-size:.78rem;font-weight:700;color:var(--grl);margin-bottom:6px;padding-left:2px">Ημερομηνία Γέννησης (προαιρετικό)</div>
@@ -330,7 +332,7 @@
     </div>
     <div class="err-msg" id="reg-err"></div>
     <button class="btn-main" id="reg-btn" onclick="submitRegister()">Εγγραφή →</button>
-    <button type="button" onclick="showScreen('s-phone')" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">← Πίσω στη σύνδεση</button>
+    <button type="button" onclick="showScreen('s-phone')" class="link-btn-secondary">← Πίσω στη σύνδεση</button>
   </div>
 </div>
 
@@ -351,7 +353,7 @@
       <span id="otp-resend-timer" style="font-size:.82rem;color:var(--grl);font-weight:600"></span>
       <button id="otp-resend-btn" onclick="resendOTP()" style="display:none;background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;text-decoration:underline;padding:0">🔄 Επανάληψη SMS</button>
     </div>
-    <button type="button" onclick="cancelOTP()" style="background:none;border:none;color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px">← Πίσω στην εγγραφή / Αλλαγή αριθμού</button>
+    <button type="button" onclick="cancelOTP()" class="link-btn-secondary">← Πίσω στην εγγραφή / Αλλαγή αριθμού</button>
   </div>
 </div>
 
@@ -622,8 +624,8 @@
   </div><!-- /app-body -->
 
   <!-- BOTTOM NAV -->
-  <nav class="bottom-nav">
-    <button class="bn active" id="nav-home" onclick="switchTab('home')">
+  <nav class="bottom-nav" aria-label="Κύρια πλοήγηση">
+    <button class="bn active" id="nav-home" onclick="switchTab('home')" aria-current="page">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
       <span>Αρχική</span>
     </button>

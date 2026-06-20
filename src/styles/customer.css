@@ -251,6 +251,29 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
 .btn-main:hover{background:#6bb800;transform:translateY(-2px);box-shadow:0 4px 14px rgba(107,184,0,.25)}
 .btn-main:active{transform:scale(.98) translateY(0);box-shadow:0 1px 4px rgba(107,184,0,.15)}
 .btn-main:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+/* Semantic auth-form helpers extracted from index.html inline styles.
+ * Keeping these as classes lets every login/register/forgot/OTP screen
+ * pick up consistent typography + spacing without 60-char inline strings. */
+.field-wrap{position:relative;margin-bottom:12px}
+.field--flush{margin-bottom:0;width:100%}
+.field-eye-btn{
+  position:absolute;right:14px;top:50%;
+  transform:translateY(-50%);
+  background:none;border:none;cursor:pointer;padding:4px;color:#aaa;
+}
+.field-eye-btn:focus-visible{
+  outline:2px solid var(--g);outline-offset:2px;border-radius:4px;
+}
+.link-btn-secondary{
+  background:none;border:none;
+  color:var(--grl);font-family:var(--font);font-size:.82rem;font-weight:600;
+  cursor:pointer;margin-top:10px;width:100%;text-align:center;padding:6px;
+  transition:color .15s;
+}
+.link-btn-secondary:hover{color:var(--bk)}
+.link-btn-secondary:focus-visible{
+  outline:2px solid var(--g);outline-offset:2px;border-radius:6px;
+}
 .err-msg{color:var(--red);font-size:.82rem;font-weight:600;margin-top:10px;min-height:18px;text-align:center;line-height:1.5}
 .err-msg:empty{display:none}
 .err-msg:not(:empty){
@@ -358,53 +381,64 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
 .bn svg{width:22px;height:22px;fill:currentColor;transition:fill .2s;flex-shrink:0;display:block}
 .bn.active{color:var(--bk);font-weight:600}
 .bn.active svg{fill:var(--bk)}
+/* A11y: visible focus ring for keyboard navigation. focus-visible only
+ * triggers on keyboard focus (Tab), not on mouse clicks, so the visual
+ * ring doesn't clutter the UI during normal touch/mouse use. */
+.bn:focus-visible{
+  outline:3px solid rgba(138,233,0,.6);
+  outline-offset:-3px;
+  border-radius:6px;
+}
 
-/* ── PWA STANDALONE ── */
+/* ── PWA STANDALONE ──
+ * Defined AFTER the base .bottom-nav / .bn so cascade order wins without
+ * !important. Class-on-html selectors (.pwa-standalone) raise specificity
+ * by one class, so they also win against any equal-cascade base. */
 @media all and (display-mode: standalone), all and (display-mode: fullscreen) {
   html, body {
-    background: #fff !important;
+    background: #fff;
   }
   #s-app {
     height: 100vh; height: 100dvh;
     position: relative;
-    overflow: visible !important;
+    overflow: visible;
   }
   .bottom-nav {
-    position: fixed !important;
-    bottom: -34px !important;
-    left: 0 !important; right: 0 !important;
-    padding-bottom: 34px !important;
-    height: auto !important;
-    transform: none !important;
-    will-change: auto !important;
-    background: #fff !important;
-    box-shadow: none !important;
-    border-bottom: none !important;
+    position: fixed;
+    bottom: -34px;
+    left: 0; right: 0;
+    padding-bottom: 34px;
+    height: auto;
+    transform: none;
+    will-change: auto;
+    background: #fff;
+    box-shadow: none;
+    border-bottom: none;
   }
   .bn {
-    height: 50px !important;
+    height: 50px;
   }
 }
 html.pwa-standalone,
 html.pwa-standalone body {
-  background: #fff !important;
+  background: #fff;
 }
 html.pwa-standalone #s-app {
   height: 100vh; height: 100dvh;
   position: relative;
-  overflow: visible !important;
+  overflow: visible;
 }
 html.pwa-standalone .bottom-nav {
-  position: fixed !important;
-  bottom: -34px !important;
-  left: 0 !important; right: 0 !important;
-  padding-bottom: 34px !important;
-  height: auto !important;
-  transform: none !important;
-  will-change: auto !important;
-  background: #fff !important;
-  box-shadow: none !important;
-  border-bottom: none !important;
+  position: fixed;
+  bottom: -34px;
+  left: 0; right: 0;
+  padding-bottom: 34px;
+  height: auto;
+  transform: none;
+  will-change: auto;
+  background: #fff;
+  box-shadow: none;
+  border-bottom: none;
 }
 /* ── IN-APP BROWSERS (Instagram / Facebook / Messenger / TikTok) ──
  * The WebView ends just above the host app's own toolbar, so `bottom: 0`
@@ -412,20 +446,20 @@ html.pwa-standalone .bottom-nav {
  * needed. The earlier 24px offset created a visible black gap between
  * the iPear tabs and Instagram's bottom icons. Keep it flush. */
 html.inapp-browser .bottom-nav {
-  bottom: 0 !important;
-  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+  bottom: 0;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 html.inapp-browser .bn {
-  height: 52px !important;
+  height: 52px;
 }
 /* Bottom padding on tab content so the last item isn't hidden under the
  * fixed nav once the user scrolls to the end. */
 html.inapp-browser .tab-pane {
-  padding-bottom: calc(var(--nav-h, 56px) + 16px) !important;
+  padding-bottom: calc(var(--nav-h, 56px) + 16px);
 }
 
 html.pwa-standalone .bn {
-  height: 50px !important;
+  height: 50px;
 }
 
 /* ════════════════════════════════
@@ -900,71 +934,83 @@ html[data-theme="dark"]{
   --accent-deep:#8ae900;
 }
 
-/* ── 1. Bottom-nav unification (Woodmart soft elevation + premium active) ─── */
+/* ── 1. Bottom-nav unification (Woodmart soft elevation + premium active) ───
+ * !important removed across this block. Cascade order alone makes these
+ * win over the base block (lines 338-360). The PWA standalone block above
+ * uses html.pwa-standalone .bottom-nav (specificity 0,2,0) which now also
+ * wins against this block when standalone mode is active — that was the
+ * point of the de-importanting sweep. */
 .bottom-nav{
-  box-shadow:var(--sh-md)!important;
-  border-top:1px solid var(--border-soft)!important;
-  background:var(--bg-card,#fff)!important;
+  box-shadow:var(--sh-md);
+  border-top:1px solid var(--border-soft);
+  background:var(--bg-card,#fff);
 }
 .bn{
-  display:flex!important;
-  flex-direction:column!important;
-  align-items:center!important;
-  justify-content:flex-end!important;
-  gap:3px!important;
-  padding-bottom:4px!important;
-  color:var(--text-muted)!important;
-  transition:color var(--t-fast),transform 120ms cubic-bezier(.4,0,.2,1)!important;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:flex-end;
+  gap:3px;
+  padding-bottom:4px;
+  color:var(--text-muted);
+  transition:color var(--t-fast),transform 120ms cubic-bezier(.4,0,.2,1);
 }
-.bn.active{color:var(--text-primary)!important;font-weight:600!important}
-.bn.active svg{fill:var(--text-primary)!important;transform:scale(1.06)}
+.bn.active{color:var(--text-primary);font-weight:600}
+.bn.active svg{fill:var(--text-primary);transform:scale(1.06)}
 
-/* ── 2. Premium tier pills (preserve tier-specific bg colors, polish typography) ─── */
+/* ── 2. Premium tier pills (preserve tier-specific bg colors, polish typography) ───
+ * !important removed. The base hero-tier rule (none defined directly with
+ * these properties) makes this block win by default; tier-specific
+ * compounds (.tier-pill.tier-silver, [data-tier="Silver"]) have higher
+ * specificity than the generic .tier-pill so they win without !important. */
 .hero-tier,.ph-tier,.lc-tier-badge{
-  border-radius:var(--r-pill)!important;
-  letter-spacing:.7px!important;
-  text-transform:uppercase!important;
-  font-weight:700!important;
-  padding:4px 12px!important;
-  border:1px solid rgba(255,255,255,.18)!important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 1px 2px rgba(0,0,0,.06)!important;
+  border-radius:var(--r-pill);
+  letter-spacing:.7px;
+  text-transform:uppercase;
+  font-weight:700;
+  padding:4px 12px;
+  border:1px solid rgba(255,255,255,.18);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 1px 2px rgba(0,0,0,.06);
 }
 .rw-pts-badge{
-  border-radius:var(--r-pill)!important;
-  letter-spacing:.4px!important;
+  border-radius:var(--r-pill);
+  letter-spacing:.4px;
 }
 
 /* Generic tier pill (when used outside the tinted hero — admin tables etc.) */
 .tier-pill,[data-tier],.badge-tier{
-  border-radius:var(--r-pill)!important;
-  letter-spacing:.5px!important;
-  font-weight:700!important;
-  padding:3px 10px!important;
-  font-size:.7rem!important;
-  text-transform:uppercase!important;
-  border:1px solid var(--border-medium)!important;
+  border-radius:var(--r-pill);
+  letter-spacing:.5px;
+  font-weight:700;
+  padding:3px 10px;
+  font-size:.7rem;
+  text-transform:uppercase;
+  border:1px solid var(--border-medium);
 }
-.tier-pill.tier-bronze,[data-tier="Bronze"]{background:var(--tier-bronze-tint)!important;border-color:var(--tier-bronze-border)!important;color:#8a5520!important}
-.tier-pill.tier-silver,[data-tier="Silver"]{background:var(--tier-silver-tint)!important;border-color:var(--tier-silver-border)!important;color:#5a6478!important}
-.tier-pill.tier-gold,[data-tier="Gold"]{background:var(--tier-gold-tint)!important;border-color:var(--tier-gold-border)!important;color:#8a6608!important}
-.tier-pill.tier-diamond,[data-tier="Diamond"]{background:var(--tier-diamond-tint)!important;border-color:var(--tier-diamond-border)!important;color:#3a6a93!important}
-.tier-pill.tier-platinum,[data-tier="Platinum"]{background:var(--tier-platinum-tint)!important;border-color:var(--tier-platinum-border)!important;color:#7a6018!important}
+.tier-pill.tier-bronze,[data-tier="Bronze"]{background:var(--tier-bronze-tint);border-color:var(--tier-bronze-border);color:#8a5520}
+.tier-pill.tier-silver,[data-tier="Silver"]{background:var(--tier-silver-tint);border-color:var(--tier-silver-border);color:#5a6478}
+.tier-pill.tier-gold,[data-tier="Gold"]{background:var(--tier-gold-tint);border-color:var(--tier-gold-border);color:#8a6608}
+.tier-pill.tier-diamond,[data-tier="Diamond"]{background:var(--tier-diamond-tint);border-color:var(--tier-diamond-border);color:#3a6a93}
+.tier-pill.tier-platinum,[data-tier="Platinum"]{background:var(--tier-platinum-tint);border-color:var(--tier-platinum-border);color:#7a6018}
 
-/* ── 3. Empty states standardization ─── */
+/* ── 3. Empty states standardization ───
+ * !important removed. Base .empty-state styling is centered/padded already;
+ * this block is purely a typography/color refinement and cascade order
+ * (later in file) is sufficient. */
 .empty,.empty-state{
-  text-align:center!important;
-  padding:44px 24px!important;
-  color:var(--text-muted)!important;
-  font-weight:500!important;
-  font-size:.9rem!important;
-  line-height:1.55!important;
+  text-align:center;
+  padding:44px 24px;
+  color:var(--text-muted);
+  font-weight:500;
+  font-size:.9rem;
+  line-height:1.55;
 }
 .empty .e,.empty-state .ico,.empty-state .e{
-  display:block!important;
-  margin:0 auto 12px!important;
-  font-size:2.4rem!important;
-  opacity:.55!important;
-  line-height:1!important;
+  display:block;
+  margin:0 auto 12px;
+  font-size:2.4rem;
+  opacity:.55;
+  line-height:1;
 }
 .empty strong,.empty-state strong{
   display:block;

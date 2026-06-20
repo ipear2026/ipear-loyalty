@@ -639,13 +639,20 @@ const _HDR_DEAD_ZONE = 8;
 export function switchTab(name) {
   if (_hdrRef) _hdrRef.classList.remove('hdr-hidden');
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.bn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.bn').forEach(b => {
+    b.classList.remove('active');
+    b.removeAttribute('aria-current');
+  });
   const pane = document.getElementById('t-'+name);
   pane.style.animation = 'none';
   pane.offsetHeight;
   pane.style.animation = '';
   pane.classList.add('active');
-  document.getElementById('nav-'+name).classList.add('active');
+  const navBtn = document.getElementById('nav-'+name);
+  navBtn.classList.add('active');
+  // A11y: aria-current="page" announces the active tab to assistive tech.
+  // Matches the visual `active` class — toggled together to stay in sync.
+  navBtn.setAttribute('aria-current', 'page');
   pane.scrollTop = 0;
   if (name==='card')    generateQR();
   if (name==='profile') {
