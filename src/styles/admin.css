@@ -700,3 +700,95 @@ html[data-theme="dark"]{
 @media(max-width:600px){ #fin-kpi-grid{ grid-template-columns:repeat(2,1fr) !important } }
 #ks-toggle::after{width:22px;height:22px;top:3px;left:3px}
 #ks-toggle.on::after{transform:translateX(24px)}
+
+/* ═════════════════════════════════════════════════
+   Worker & KV Health dashboard (System tab)
+═════════════════════════════════════════════════ */
+.wh-loading{padding:24px;text-align:center;color:var(--gray);font-size:.9rem}
+.wh-loading--error{color:var(--red)}
+
+.wh-grid{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;
+}
+@media(max-width:768px){ .wh-grid{ grid-template-columns:1fr } }
+.wh-stat{
+  background:var(--green-pale);border:1px solid var(--green);border-radius:12px;
+  padding:14px 16px;
+}
+.wh-stat-lbl{
+  font-size:.72rem;font-weight:700;color:#3a6e00;
+  text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;
+}
+.wh-stat-val{
+  font-size:1.85rem;font-weight:900;color:var(--black);line-height:1.1;
+}
+.wh-stat-sub{font-size:.74rem;color:var(--gray);margin-top:4px}
+.wh-num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+
+.wh-alert{
+  border-radius:12px;padding:14px 16px;margin-bottom:16px;
+  display:flex;flex-direction:column;gap:6px;border:1px solid transparent;
+}
+.wh-alert--ok  { background:#edffc5;border-color:#8ae900;color:#2d5500 }
+.wh-alert--warn{ background:#fff8e1;border-color:#ffc107;color:#7a5b00 }
+.wh-alert--high{ background:#fff0d9;border-color:#ff9500;color:#7a4400 }
+.wh-alert--crit{ background:#ffe9e8;border-color:#ff3b30;color:#7a1a16 }
+.wh-alert-tag{font-weight:900;font-size:.95rem}
+.wh-alert-msg{font-size:.85rem;line-height:1.5}
+.wh-alert-link{
+  display:inline-block;margin-top:2px;font-weight:800;font-size:.82rem;
+  color:inherit;text-decoration:underline;text-underline-offset:3px;
+}
+.wh-alert-link:hover{opacity:.8}
+
+.wh-section{margin-top:14px}
+.wh-section-title{
+  font-size:.78rem;font-weight:800;color:var(--gray);
+  text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;
+}
+
+.wh-spark{
+  display:block;width:100%;height:64px;
+  background:#fafafa;border:1px solid var(--border);border-radius:8px;
+  padding:4px;margin-bottom:10px;
+}
+
+.wh-trend{display:flex;flex-direction:column;gap:4px}
+.wh-trend-row{
+  display:grid;grid-template-columns:130px 1fr 72px;align-items:center;gap:10px;
+  font-size:.82rem;color:var(--black);padding:4px 0;
+}
+.wh-trend-row--today{font-weight:800}
+.wh-trend-row--today .wh-trend-day::before{content:'• ';color:var(--green-dark)}
+.wh-trend-day{color:var(--gray);font-weight:600}
+.wh-trend-row--today .wh-trend-day{color:var(--green-dark)}
+.wh-trend-bar{
+  height:8px;background:var(--border);border-radius:4px;overflow:hidden;
+}
+.wh-trend-bar-fill{
+  display:block;height:100%;background:var(--green-dark);border-radius:4px;
+  transition:width .25s ease-out;
+}
+.wh-trend-val{text-align:right;font-weight:700;font-size:.85rem}
+
+.wh-breakdown{display:flex;flex-direction:column;gap:6px}
+.wh-bd-row{
+  display:grid;grid-template-columns:28px 1fr 72px;align-items:center;gap:10px;
+  font-size:.86rem;padding:6px 8px;background:#fafafa;border-radius:6px;
+}
+.wh-bd-ico{font-size:1rem;text-align:center}
+.wh-bd-lbl{color:var(--black);font-weight:600}
+.wh-bd-val{text-align:right;font-weight:800}
+.wh-empty{
+  padding:14px;text-align:center;color:var(--gray);font-size:.84rem;
+  background:#fafafa;border-radius:8px;
+}
+
+.wh-footnote{
+  margin-top:14px;font-size:.74rem;color:var(--gray);line-height:1.55;
+  border-top:1px dashed var(--border);padding-top:10px;
+}
+.wh-footnote code{
+  background:#f0f0f0;padding:1px 6px;border-radius:4px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.7rem;
+}

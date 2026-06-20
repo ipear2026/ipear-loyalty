@@ -800,6 +800,21 @@
       </div>
     </div>
 
+    <!-- ── WORKER & KV HEALTH ── -->
+    <div class="card" style="margin-bottom:18px">
+      <h2 style="display:flex;align-items:center;justify-content:space-between">
+        <span><span class="ico">📊</span> Worker &amp; KV Health</span>
+        <button class="btn btn-sm btn-outline" data-action="loadWorkerHealth">🔄 Ανανέωση</button>
+      </h2>
+      <p style="color:var(--gray);font-size:.84rem;line-height:1.6;margin-bottom:14px">
+        Παρακολούθηση της κίνησης μέσω <code>/log-event</code> και πρόβλεψη 24ώρου.
+        Όταν η πρόβλεψη πλησιάζει τα δωρεάν KV/Firestore όρια, εμφανίζεται οπτικό alert.
+      </p>
+      <div id="wh-body">
+        <div class="wh-loading">⏳ Φόρτωση…</div>
+      </div>
+    </div>
+
     <!-- ── BACKUP (inside System) ── -->
     <div style="display:flex;align-items:center;gap:12px;margin:18px 0">
       <div style="flex:1;height:1px;background:var(--border)"></div>

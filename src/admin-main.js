@@ -73,6 +73,7 @@ import {
   runSystemHealthCheck,
   configureSystemHealth,
 } from './admin/system-health.js';
+import { loadWorkerHealth } from './admin/worker-health.js';
 import {
   previewExpirePoints,
   executeExpirePoints,
@@ -441,6 +442,7 @@ function showTab(n) {
   if (n==='customers') loadAll();
   if (n==='offers') loadOffers();
   if (n==='gdpr') loadDeletionRequests();
+  if (n==='system') loadWorkerHealth();
 }
 
 async function loadDeletionRequests() {
@@ -1754,6 +1756,7 @@ async function loadKpiOverview() {
 window.unlock = unlock;
 window.adminLogout = adminLogout;
 window.showTab = showTab;
+window.loadWorkerHealth = loadWorkerHealth;
 window.search = search;
 window.quickSel = quickSel;
 window.openAdd = openAdd;

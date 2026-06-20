@@ -378,7 +378,7 @@ service cloud.firestore {
         request.resource.data.code.matches('^[0-9]{6}$') &&
         request.resource.data.bonusPoints is number &&
         request.resource.data.bonusPoints >= 0 &&
-        request.resource.data.bonusPoints <= 500 &&
+        request.resource.data.bonusPoints <= 2500 &&
         request.resource.data.status == 'pending' &&
         request.resource.data.used   == false &&
         request.resource.data.createdAt   is string &&
@@ -484,6 +484,18 @@ service cloud.firestore {
     match /settings/{docId} {
       allow read:  if isAuth();
       allow write: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_analytics — daily event-counter docs written by the worker
+    //  via service-account REST (admin SDK bypasses these rules). Client
+    //  needs read access for the admin System Health dashboard. Writes
+    //  blocked at the client tier so a logged-in admin can't accidentally
+    //  poison the funnel counters from DevTools.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_analytics/{day} {
+      allow read:  if isAdmin();
+      allow write: if false;
     }
 
     // ═════════════════════════════════════════════════════════════════════
