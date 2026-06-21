@@ -83,7 +83,7 @@ export function renderRewardsList(pts) {
         <div class="rw-full-pts">${r.pts} ${_t('points')}${ok?'':' · '+_t('rw_need')+' '+(r.pts-pts)+' '+_t('rw_more')}</div>
         <div class="rw-full-prog"><div class="rw-full-prog-fill" style="width:${pct}%"></div></div>
       </div>
-      <button class="rw-full-action" ${ok?'':'disabled'} aria-hidden="true" tabindex="-1">${ok?_t('rw_code'):'🔒'}</button>
+      <button class="rw-full-action" ${ok?'':'disabled'} aria-hidden="true" tabindex="-1">${ok?'✓':'🔒'}</button>
     </div>`;
   }).join('');
 }
