@@ -3399,11 +3399,38 @@ async function handleHealthDeep(request, env, CORS) {
   const alerts = [];
 
   // ── Check Brevo: GET /v3/account (lightest call, returns account info) ──
-  try {
-    const brevoResp = await fetch('https://api.brevo.com/v3/account', {
+  // 12 s timeout + single retry on transient failure. The cron runs every
+  // 30 min on a fresh worker isolate — cold DNS + TLS handshake to
+  // api.brevo.com can eat 3–5 s before the first byte even leaves the
+  // edge during EU peak hours (07:30 / 18:30 UTC). Without the retry a
+  // single congestion blip fires a full "DEGRADED" email to ops.
+  // Worst-case latency on real outage: 12 s + 2 s wait + 12 s retry = 26 s,
+  // acceptable for a 30-min cron and for the admin `/health-deep` route.
+  async function probeBrevo(timeoutMs) {
+    const resp = await fetch('https://api.brevo.com/v3/account', {
       headers: { 'api-key': env.BREVO_API_KEY },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
+    return resp;
+  }
+  try {
+    let brevoResp;
+    try {
+      brevoResp = await probeBrevo(12000);
+    } catch (firstErr) {
+      // Retry once on any network / timeout error. Real outages still
+      // alert (second probe fails too) but transient cold-start blips
+      // get filtered out.
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        brevoResp = await probeBrevo(12000);
+      } catch (secondErr) {
+        // Re-throw the SECOND error so the alert reflects the latest
+        // state. First-attempt errors are log-only.
+        console.warn('[health-deep] Brevo first attempt failed:', firstErr.message);
+        throw secondErr;
+      }
+    }
     if (brevoResp.ok) {
       results.brevo = 'ok';
     } else {
@@ -3412,17 +3439,20 @@ async function handleHealthDeep(request, env, CORS) {
     }
   } catch (e) {
     results.brevo = `down:${e.message}`;
-    alerts.push(`Brevo API unreachable: ${e.message}`);
+    alerts.push(`Brevo API unreachable (after 1 retry): ${e.message}`);
   }
 
   // ── Check Firestore: read maintenance flag (1 tiny doc read) ──
+  // 12 s timeout, no retry — Firestore is on the same Google edge as our
+  // workers (much lower variance than Brevo) and the SDK already retries
+  // internally; a top-level retry here would just delay legitimate alerts.
   try {
     const projectId = env.FCM_PROJECT_ID;
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
     const fsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_config/maintenance`;
     const fsResp = await fetch(fsUrl, {
       headers: { 'Authorization': 'Bearer ' + accessToken },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(12000),
     });
     if (fsResp.ok || fsResp.status === 404) {
       results.firestore = 'ok';  // 404 = doc doesn't exist, but Firestore responded
