@@ -717,10 +717,17 @@ function _initProfileChipNav() {
   });
 
   // Scroll-tracked active state via IntersectionObserver. The root is the
-  // profile pane (which is the scroll container), and rootMargin biases the
-  // detection window so a section becomes "active" when its top crosses the
-  // line just below the chip bar.
+  // profile pane (which is the scroll container). The chip row is no longer
+  // sticky, so the only thing covering the top of the pane visually is the
+  // FIXED .app-header — and that's exactly the band we want to exclude from
+  // the intersection zone. Read --hdr-h off the document so this stays in
+  // sync with the header height token if it ever changes.
   try {
+    const hdrPx = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue('--hdr-h'),
+      10
+    ) || 75;
+    const topMargin = (hdrPx + 12) + 'px';
     _profileChipObserver = new IntersectionObserver((entries) => {
       // Pick the entry with the largest visible ratio that is currently
       // intersecting — robust to two adjacent sections both crossing.
@@ -732,10 +739,11 @@ function _initProfileChipNav() {
       if (best) _setActiveChip(chipBar, best.target.id);
     }, {
       root: pane,
-      // -55% bottom so a section becomes "active" only once its top has
-      // crossed the upper third of the viewport — feels right when
-      // smooth-scrolling through long sections.
-      rootMargin: '-72px 0px -55% 0px',
+      // Top margin = app-header height + 12 px breathing room (matches the
+      // section scroll-margin-top). Bottom -55 % so a section becomes
+      // "active" only once its top has crossed the upper third of the
+      // viewport — feels right when smooth-scrolling through long sections.
+      rootMargin: `-${topMargin} 0px -55% 0px`,
       threshold: [0, 0.25, 0.5, 0.75],
     });
     ['pr-sec-referral','pr-sec-tier','pr-sec-lb','pr-sec-history'].forEach(id => {

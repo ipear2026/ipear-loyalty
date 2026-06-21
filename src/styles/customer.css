@@ -1039,19 +1039,18 @@ html[data-theme="dark"]{
 .prof-sec-title{font-size:18px;font-weight:800;text-transform:none;letter-spacing:0;color:var(--bk);margin-bottom:14px}
 
 /* ─── Profile chip nav ──────────────────────────────────────────────────────
- * Horizontal jump-to chips sticky under the app header. Replaces the
- * "scroll-down-to-find-it" UX with one-tap section access. Active chip is
- * driven by IntersectionObserver in main.js → _initProfileChipNav.
+ * Horizontal jump-to chip row near the top of the profile pane. Used to be
+ * sticky-pinned under the app header — that collided visually with the
+ * existing fixed .app-header on mobile (double-bar + backdrop bleed). Now
+ * it scrolls with the page like any other row; clicking still jumps to the
+ * target section via smooth scrollIntoView (see _initProfileChipNav).
  *
  * Scroll-snap on the chip row keeps the active chip in view on narrow
  * screens. -webkit-overflow-scrolling preserves momentum on iOS. */
 .prof-chips{
   display:flex;gap:8px;
-  position:sticky;top:0;z-index:30;
-  margin:0 -16px 14px;padding:10px 16px;
-  background:rgba(246,246,246,.92);
-  backdrop-filter:saturate(180%) blur(8px);
-  -webkit-backdrop-filter:saturate(180%) blur(8px);
+  position:relative;
+  margin:0 -16px 14px;padding:6px 16px 10px;
   overflow-x:auto;
   scroll-snap-type:x proximity;
   scrollbar-width:none;
@@ -1079,10 +1078,14 @@ html[data-theme="dark"]{
 @media (prefers-reduced-motion: reduce){
   .prof-chip{transition:none}
 }
-/* Anchored sections need a scroll-margin so the sticky chip bar
- * doesn't hide the section title when JS scrolls them into view. */
+/* Anchored sections need a scroll-margin so the FIXED .app-header (the
+ * chip bar is now in-flow, so it's not a factor any more) doesn't hide
+ * the section title when JS scrolls them into view. 12 px of breathing
+ * room reads as "intentional whitespace" instead of a clipped edge.
+ * --hdr-h is the same token .app-header / .tab-pane use, so they all
+ * track each other if it changes. */
 #pr-sec-referral,#pr-sec-tier,#pr-sec-lb,#pr-sec-history{
-  scroll-margin-top:62px;
+  scroll-margin-top:calc(var(--hdr-h) + env(safe-area-inset-top,0px) + 12px);
 }
 
 /* Referral */
