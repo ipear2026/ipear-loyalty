@@ -532,10 +532,10 @@
             <div class="ref-code-val" id="ref-code">—</div>
             <button class="ref-copy-btn" onclick="copyReferral()">📋 Αντιγραφή</button>
           </div>
-          <div id="ref-counter" style="display:flex;align-items:center;justify-content:space-between;background:linear-gradient(90deg,rgba(138,233,0,.10),rgba(107,184,0,.06));border:1.5px solid rgba(138,233,0,.25);border-radius:10px;padding:10px 14px;margin-bottom:12px">
-            <div style="font-size:.78rem;font-weight:700;color:var(--gr)">Επιτυχημένες Συστάσεις</div>
-            <div style="display:flex;align-items:center;gap:6px">
-              <span id="ref-count-val" style="font-size:1rem;font-weight:900;color:var(--gd)">0</span><span style="font-size:.82rem;font-weight:700;color:var(--grl)">/5</span>
+          <div id="ref-counter" class="ref-counter">
+            <div class="ref-counter__lbl">Επιτυχημένες Συστάσεις</div>
+            <div class="ref-counter__val-row">
+              <span id="ref-count-val" class="ref-counter__val">0</span><span class="ref-counter__cap">/5</span>
             </div>
           </div>
           <button class="ref-share-btn" onclick="shareReferral()">

@@ -245,7 +245,7 @@ function _renderOffersSnap(snap) {
 
   const previewEl = document.getElementById('h-offers-preview');
   if (previewEl) previewEl.innerHTML = preview ||
-    '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🎁</div><div class="empty-state__title">Καμία ενεργή προσφορά</div><div class="empty-state__sub">Έλεγξε ξανά σύντομα για νέες προσφορές</div></div>';
+    '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🎁</div><div class="empty-state__title">Καμία ενεργή προσφορά</div><div class="empty-state__sub">Έλεγξε ξανά σύντομα για νέες προσφορές</div></div>';
 
   const full = active.map((o, idx) => {
     const expDate  = o.endDate && typeof o.endDate !== 'object'
@@ -276,7 +276,7 @@ function _renderOffersSnap(snap) {
 
   const fullEl = document.getElementById('offers-list');
   if (fullEl) fullEl.innerHTML = full ||
-    '<div class="empty-state"><div class="empty-state__icon">🎁</div><div class="empty-state__title">Δεν υπάρχουν ενεργές προσφορές</div><div class="empty-state__sub">Νέες προσφορές προστίθενται τακτικά — έλεγξε ξανά αύριο</div></div>';
+    '<div class="empty-state"><div class="empty-state__icon" aria-hidden="true">🎁</div><div class="empty-state__title">Δεν υπάρχουν ενεργές προσφορές</div><div class="empty-state__sub">Νέες προσφορές προστίθενται τακτικά — έλεγξε ξανά αύριο</div></div>';
 }
 
 export function loadOffersData() { startOffersListener(); }
@@ -836,7 +836,7 @@ function _renderLeaderboardData(lb) {
   const top = lb.top || [];
   const totalCount = lb.total || top.length;
   if (!top.length) {
-    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Δεν υπάρχουν δεδομένα ακόμα</div></div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Δεν υπάρχουν δεδομένα ακόμα</div></div>';
     return;
   }
 
@@ -928,21 +928,21 @@ export function loadLeaderboard() {
   if (_lbUnsub) return;
 
   if (window.DEMO) {
-    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Leaderboard διαθέσιμο σύντομα</div><div class="empty-state__sub">Θα φανεί όταν συγκεντρωθούν αρκετά δεδομένα</div></div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Leaderboard διαθέσιμο σύντομα</div><div class="empty-state__sub">Θα φανεί όταν συγκεντρωθούν αρκετά δεδομένα</div></div>';
     return;
   }
   if (!window._db || !window._onSnapshot) {
-    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">📡</div><div class="empty-state__title">Δεν υπάρχει σύνδεση</div></div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">📡</div><div class="empty-state__title">Δεν υπάρχει σύνδεση</div></div>';
     return;
   }
 
-  el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">⏳</div><div class="empty-state__title">Φόρτωση...</div></div>';
+  el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">⏳</div><div class="empty-state__title">Φόρτωση…</div></div>';
 
   try {
     const ref = window._doc(window._db, 'ipear_leaderboard', 'latest');
     _lbUnsub = window._onSnapshot(ref, (snap) => {
       if (!snap.exists()) {
-        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Το leaderboard ετοιμάζεται...</div></div>';
+        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Το leaderboard ετοιμάζεται…</div></div>';
         return;
       }
       _renderLeaderboardData(snap.data());
@@ -957,12 +957,12 @@ export function loadLeaderboard() {
           <div style="font-size:.82rem;color:var(--grl)">Επίπεδο ${pct}% — ${t.next ? 'Επόμενο: '+(t.next - (state.foundCustomer.totalPoints||0))+' πόντοι' : 'Ανώτατη κατάταξη!'}</div>
         </div>`;
       } else {
-        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
+        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
       }
     });
   } catch(e) {
     logger.warn('[leaderboard] listener setup failed:', e.message);
-    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
   }
 }
 
@@ -1050,7 +1050,7 @@ async function _loadHistoryInternal(append) {
     const btn = document.getElementById('hist-more-btn');
     if (btn) {
       btn.disabled = true;
-      btn.textContent = '⏳ Φόρτωση...';
+      btn.textContent = '⏳ Φόρτωση…';
     }
   }
 
@@ -1134,7 +1134,7 @@ async function _loadHistoryInternal(append) {
       const icon = offline ? '📡' : '🧾';
       const title = offline ? 'Δεν υπάρχει σύνδεση' : 'Δεν ήταν δυνατή η φόρτωση';
       const sub = offline ? 'Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά' : 'Δοκίμασε ξανά σε λίγο';
-      el.innerHTML = `<div class="empty-state empty-state--compact"><div class="empty-state__icon">${icon}</div><div class="empty-state__title">${title}</div><div class="empty-state__sub">${sub}</div></div>`;
+      el.innerHTML = `<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">${icon}</div><div class="empty-state__title">${title}</div><div class="empty-state__sub">${sub}</div></div>`;
     } else {
       _renderHistory(el); // restore visible state, button error-recovers below
       const btn = document.getElementById('hist-more-btn');

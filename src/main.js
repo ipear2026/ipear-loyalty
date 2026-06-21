@@ -535,7 +535,14 @@ function _animateLivePointsChange(oldPts, newPts, newTot) {
   if (el('h-tier-icon')) el('h-tier-icon').textContent = t.icon;
   if (el('h-tier-name')) el('h-tier-name').textContent = t.name;
   const fill = el('h-prog-fill');
-  if (fill) { fill.style.transition = 'width .6s ease'; fill.style.width = pctStr; }
+  const wrap = el('h-prog-wrap');
+  if (fill) {
+    fill.style.transition = 'width .6s ease';
+    // Force a 2% sliver at pct=0 so the track doesn't read as "broken"
+    // for brand-new customers. .hero-prog-wrap--zero fades that sliver.
+    fill.style.width = (pct > 0 ? pct : 2) + '%';
+  }
+  if (wrap) wrap.classList.toggle('hero-prog-wrap--zero', pct === 0);
   if (el('h-prog-pct')) el('h-prog-pct').textContent = pctStr;
   if (el('h-prog-lbl')) el('h-prog-lbl').textContent = t.next
     ? `${totStr} / ${t.next.toLocaleString('el-GR')} → ${nName}`
@@ -1226,12 +1233,18 @@ export async function startApp() {
     document.getElementById('h-prog-pct').textContent = '100%';
   }
   const _progFill = document.getElementById('h-prog-fill');
+  const _progWrap = document.getElementById('h-prog-wrap');
+  // Force a 2% sliver at pct=0 (brand-new customer) so the track stays
+  // visible — see .hero-prog-wrap--zero in customer.css for the faded
+  // fill colour applied in that state.
+  const _targetPct = pct > 0 ? pct : 2;
   _progFill.style.transition = 'none';
   _progFill.style.width = '0%';
   requestAnimationFrame(() => requestAnimationFrame(() => {
     _progFill.style.transition = '';
-    _progFill.style.width = pct + '%';
+    _progFill.style.width = _targetPct + '%';
   }));
+  if (_progWrap) _progWrap.classList.toggle('hero-prog-wrap--zero', pct === 0);
   renderHomeRewards(pts);
 
   document.getElementById('lc-tier-icon').textContent     = t.icon;
