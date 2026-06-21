@@ -61,6 +61,21 @@ test.describe('Golden path', () => {
   test('customer redeems 5€ reward + sees it land live in history', async ({ page }) => {
     const db = getFirestore();
 
+    // ── 0. App Check debug-token shim (optional) ────────────────────────
+    // If the Firebase project enforces App Check, reCAPTCHA v3 must
+    // produce a valid token for every Firestore / Auth call. Headless
+    // chromium can't pass the reCAPTCHA bot heuristics, so we set the
+    // standard debug-token global BEFORE any page script runs. The
+    // token must be registered in Firebase Console → App Check →
+    // Manage debug tokens; only the registered string passes.
+    // If APPCHECK_DEBUG_TOKEN is unset, this is a no-op and the test
+    // relies on App Check being fail-open or disabled.
+    if (process.env.APPCHECK_DEBUG_TOKEN) {
+      await page.addInitScript((token) => {
+        self.FIREBASE_APPCHECK_DEBUG_TOKEN = token;
+      }, process.env.APPCHECK_DEBUG_TOKEN);
+    }
+
     // ── 1. Login ─────────────────────────────────────────────────────────
     await page.goto('/');
     await page.locator('#phone-in').fill(process.env.TEST_EMAIL);

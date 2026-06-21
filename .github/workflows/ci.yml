@@ -102,6 +102,9 @@ jobs:
         # needs the bundle pointed at REAL Firebase to actually log in and
         # see live snapshots. Build is rerun in the next step against this
         # production-shaped .env.
+        # VITE_APP_CHECK_KEY is optional — only needed if the project has
+        # App Check enforcement on. If unset, the build silently skips
+        # App Check init (see firebase-init.js).
         run: |
           cat <<'EOF' > .env
           VITE_FB_API_KEY=${{ secrets.VITE_FB_API_KEY }}
@@ -111,6 +114,7 @@ jobs:
           VITE_FB_MSG_SENDER_ID=${{ secrets.VITE_FB_MSG_SENDER_ID }}
           VITE_FB_APP_ID=${{ secrets.VITE_FB_APP_ID }}
           VITE_WORKER_URL=${{ secrets.VITE_WORKER_URL }}
+          VITE_APP_CHECK_KEY=${{ secrets.VITE_APP_CHECK_KEY }}
           EOF
 
       - name: Install Playwright browsers (chromium only)
@@ -125,6 +129,12 @@ jobs:
           TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
           TEST_PASS: ${{ secrets.E2E_TEST_PASS }}
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # Optional. If the Firebase project has App Check enforcement on,
+          # register a debug token (Firebase Console → App Check → Manage
+          # debug tokens) and store it as this secret. The spec injects it
+          # via page.addInitScript() before the app loads. If unset, the
+          # spec runs without it and assumes App Check is fail-open / off.
+          APPCHECK_DEBUG_TOKEN: ${{ secrets.APPCHECK_DEBUG_TOKEN }}
           CI: 'true'
         run: npm run e2e
 
