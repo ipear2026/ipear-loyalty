@@ -74,3 +74,67 @@ jobs:
 
       - name: Audit
         run: npm audit --audit-level=high
+
+  # Golden-path E2E (Playwright). Runs ONLY after lint + unit tests pass —
+  # there is no point spinning up a chromium browser if the bundle won't even
+  # build. Skipped on forks (PRs from outside collaborators) because we can't
+  # expose the test secrets to untrusted code; for those we rely on the
+  # customer + functions jobs as the safety net.
+  e2e:
+    name: E2E (Golden Path)
+    needs: customer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Write real .env from secrets
+        # The `customer` job builds in DEMO mode (cp .env.example .env). E2E
+        # needs the bundle pointed at REAL Firebase to actually log in and
+        # see live snapshots. Build is rerun in the next step against this
+        # production-shaped .env.
+        run: |
+          cat <<'EOF' > .env
+          VITE_FB_API_KEY=${{ secrets.VITE_FB_API_KEY }}
+          VITE_FB_AUTH_DOMAIN=${{ secrets.VITE_FB_AUTH_DOMAIN }}
+          VITE_FB_PROJECT_ID=${{ secrets.VITE_FB_PROJECT_ID }}
+          VITE_FB_STORAGE_BUCKET=${{ secrets.VITE_FB_STORAGE_BUCKET }}
+          VITE_FB_MSG_SENDER_ID=${{ secrets.VITE_FB_MSG_SENDER_ID }}
+          VITE_FB_APP_ID=${{ secrets.VITE_FB_APP_ID }}
+          VITE_WORKER_URL=${{ secrets.VITE_WORKER_URL }}
+          EOF
+
+      - name: Install Playwright browsers (chromium only)
+        # --with-deps installs the OS-level packages chromium needs on Ubuntu.
+        # Cache hit is automatic via setup-node's npm cache for the browsers
+        # symlink; the actual chromium tarball is small enough to not warrant
+        # a separate cache step.
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Golden Path
+        env:
+          TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          TEST_PASS: ${{ secrets.E2E_TEST_PASS }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          CI: 'true'
+        run: npm run e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
