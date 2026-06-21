@@ -3367,15 +3367,14 @@ async function handleClientError(request, env, CORS) {
     // The previous version trusted entry.page / entry.build / entry.type /
     // entry.message / entry.source — all caller-supplied. A malformed
     // /client-error POST could inject arbitrary HTML into the alert email.
-    const _esc = (s) => String(s ?? '')
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    // Plain text — sendSecurityAlert escapes + line-breaks. Field
+    // values can contain anything, so no manual escaping needed any more.
     await sendSecurityAlert(env,
-      `🖥️ Critical client-side error on <b>${_esc(entry.page)}</b> (build: ${_esc(entry.build)}):<br><br>`
-      + `<b>Type:</b> ${_esc(entry.type)}<br>`
-      + `<b>Message:</b> ${_esc(entry.message)}<br>`
-      + `<b>Source:</b> ${_esc(entry.source)}<br>`
-      + `<pre style="font-size:12px;max-height:200px;overflow:auto">${_esc(entry.stack)}</pre>`
+      `🖥️ Critical client-side error on ${entry.page} (build: ${entry.build})\n\n`
+      + `Type: ${entry.type}\n`
+      + `Message: ${entry.message}\n`
+      + `Source: ${entry.source}\n\n`
+      + `Stack:\n${entry.stack}`
     );
   }
 
@@ -3439,10 +3438,13 @@ async function handleHealthDeep(request, env, CORS) {
   // ── If any dependency is down, alert admin ──
   if (alerts.length > 0) {
     results.status = 'degraded';
+    // Plain text with \n line separators — sendSecurityAlert escapes
+    // angle brackets and renders \n as <br> server-side, so no markup
+    // here.
     await sendSecurityAlert(env,
-      `⚠️ <b>Deep Health Check — DEGRADED</b><br><br>`
-      + alerts.map(a => `• ${a}`).join('<br>')
-      + `<br><br>Worker: ${results.worker} | Brevo: ${results.brevo} | Firestore: ${results.firestore}`
+      `⚠️ Deep Health Check — DEGRADED\n\n`
+      + alerts.map(a => `• ${a}`).join('\n')
+      + `\n\nWorker: ${results.worker} | Brevo: ${results.brevo} | Firestore: ${results.firestore}`
     );
   } else {
     results.status = 'ok';
@@ -3451,9 +3453,24 @@ async function handleHealthDeep(request, env, CORS) {
   return resp(results, alerts.length > 0 ? 503 : 200, { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
 }
 
+// Caller contract: `detail` is PLAIN TEXT. Use `\n` for line breaks. Do NOT
+// pass HTML tags — they used to render in some clients (where the template
+// injected `detail` verbatim) and show up as raw "<b>" / "<br>" in others.
+// This function now ESCAPES the angle brackets and converts newlines to
+// <br> server-side, so the email renders the same in every client.
+//
+// Also strip a "text/plain" fallback alongside the HTML body so Gmail's
+// plain-text view (and screen readers) get readable copy too.
 async function sendSecurityAlert(env, detail) {
   if (!env.BREVO_API_KEY || !env.SENDER_EMAIL) return;
   const adminEmail = env.ADMIN_ALERT_EMAIL || env.SENDER_EMAIL;
+  const safeText = String(detail ?? '');
+  const escaped = safeText
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+  const timeIso = new Date().toISOString();
   try {
     await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
@@ -3468,11 +3485,12 @@ async function sendSecurityAlert(env, detail) {
           </div>
           <div style="background:#fff3f3;border:2px solid #ff3b30;border-radius:12px;padding:20px">
             <h2 style="color:#c62828;margin:0 0 12px">\u{1F6A8} Suspicious Activity Alert</h2>
-            <p style="color:#333;line-height:1.7;margin:0 0 12px">${detail.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</p>
-            <p style="color:#888;font-size:13px;margin:0">Time: ${new Date().toISOString()}</p>
+            <p style="color:#333;line-height:1.7;margin:0 0 12px;white-space:pre-wrap">${escaped}</p>
+            <p style="color:#888;font-size:13px;margin:0">Time: ${timeIso}</p>
           </div>
           <p style="color:#aaa;font-size:12px;text-align:center;margin-top:20px">iPear Loyalty — Automated Security Alert</p>
         </div>`,
+        textContent: `[iPear Security] Suspicious Activity Alert\n\n${safeText}\n\nTime: ${timeIso}\n\n— iPear Loyalty Automated Security Alert`,
       }),
     });
     console.log('[security-alert] sent to', adminEmail);
