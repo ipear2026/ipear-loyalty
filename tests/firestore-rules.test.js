@@ -33,7 +33,7 @@ import {
   assertFails,
 } from '@firebase/rules-unit-testing';
 import {
-  doc, setDoc, getDoc, getDocs, addDoc,
+  doc, setDoc, getDoc, getDocs, addDoc, deleteDoc,
   collection, query, where, Timestamp,
 } from 'firebase/firestore';
 import { readFileSync } from 'node:fs';
@@ -207,7 +207,6 @@ describe('ipear_rewards: WRITE access', () => {
   it('NON-ADMIN user cannot delete a reward', async () => {
     await seedReward('reward-a', { cost: 1000, discount: 5, isActive: true });
     const user = testEnv.authenticatedContext('alice', { email_verified: true });
-    const { deleteDoc } = await import('firebase/firestore');
     await assertFails(deleteDoc(doc(user.firestore(), 'ipear_rewards', 'reward-a')));
   });
 
@@ -239,7 +238,6 @@ describe('ipear_rewards: WRITE access', () => {
       doc(admin.firestore(), 'ipear_rewards', 'reward-a'),
       { ...validRewardPayload, isActive: false } // toggle off
     ));
-    const { deleteDoc } = await import('firebase/firestore');
     await assertSucceeds(deleteDoc(doc(admin.firestore(), 'ipear_rewards', 'reward-a')));
   });
 });
