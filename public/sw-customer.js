@@ -1,5 +1,5 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
-const CACHE_VER = 'ipear-loyalty-20260615-v55';
+const CACHE_VER = 'ipear-loyalty-20260619-v69';
 
 // ═══ KILL SWITCH: Nuclear self-destruct for zombie PWA recovery ═════════════
 // If the Worker returns { nuke: true }, this SW wipes all caches and unregisters itself.

@@ -182,6 +182,16 @@ export async function saveOffer() {
     return;
   }
 
+  // Firestore rules cap bonusPoints at 2500 on offer-redemption create —
+  // if the offer is saved with a higher value, the customer hits
+  // "permission denied" when they tap "Θέλω την προσφορά". Guard here
+  // so the admin gets a clear error instead of debugging from logs.
+  const _bp = parseInt(document.getElementById('of-points').value) || 0;
+  if (_bp > 2500) {
+    toast('⚠️ Μέγιστο +2500 πόντοι ανά προσφορά (security cap). Μείωσε την τιμή.', 'error');
+    return;
+  }
+
   const btn = document.querySelector('#m-offer .btn-green');
   btn.disabled = true;
   btn.textContent = '⏳ Αποθήκευση...';

@@ -12,15 +12,29 @@ export function configureSystemHealth({ onDataChanged } = {}) {
   if (typeof onDataChanged === 'function') _onDataChanged = onDataChanged;
 }
 
+// Collections that store per-customer state outside ipear_transactions.
+// Hard-deleting a customer leaves rows here that the GDPR "right to erasure"
+// flow needs to sweep up. The scanner walks each collection, groups orphan
+// docs by customerId (matching against both `customerId` and `customerUid`
+// since both shapes exist), and surfaces a bulk-delete button per collection.
+const SECONDARY_ORPHAN_COLLECTIONS = [
+  { col: 'ipear_redemptions',       fields: ['customerId', 'customerUid'], label: '🎟️ Pending εκπτώσεις' },
+  { col: 'ipear_referral_queue',    fields: ['newCustomerId', 'newCustomerUid'], label: '🤝 Referral queue' },
+  { col: 'ipear_offer_redemptions', fields: ['customerId', 'customerDocId'], label: '🎁 Offer redemptions' },
+  { col: 'ipear_notifications',     fields: ['customerUid'], label: '🔔 Notifications' },
+  { col: 'ipear_birthday_claims',   fields: ['customerUid', 'customerId'], label: '🎂 Birthday claims' },
+];
+
 // ── Orphan Cleanup Scanner ──
 export async function scanOrphans() {
   const el = document.getElementById('orphan-results');
   el.innerHTML = '<div style="text-align:center;padding:14px;color:var(--gray)">⏳ Σάρωση βάσης...</div>';
   try {
     const db = getDb();
-    const [csnap, tsnap] = await Promise.all([
+    const [csnap, tsnap, ...secondarySnaps] = await Promise.all([
       getDocs(collection(db, 'ipear_customers')),
       getDocs(collection(db, 'ipear_transactions')),
+      ...SECONDARY_ORPHAN_COLLECTIONS.map(c => getDocs(collection(db, c.col))),
     ]);
     const customerIds = new Set();
     csnap.forEach(d => customerIds.add(d.id));
@@ -34,6 +48,19 @@ export async function scanOrphans() {
         orphanTxs.push({ id: d.id, customerId: tx.customerId, name: tx.customerName || '—', type: tx.type, date: tx.date });
       }
     });
+
+    // Secondary collections — count orphans per collection.
+    const secondaryOrphans = SECONDARY_ORPHAN_COLLECTIONS.map((cfg, i) => {
+      const snap = secondarySnaps[i];
+      const orphanIds = [];
+      snap.forEach(d => {
+        const data = d.data();
+        const linkedId = cfg.fields.map(f => data[f]).find(Boolean);
+        if (linkedId && !customerIds.has(linkedId)) orphanIds.push(d.id);
+      });
+      return { ...cfg, orphanIds };
+    });
+    const secondaryTotal = secondaryOrphans.reduce((s, o) => s + o.orphanIds.length, 0);
 
     const ghostCustomers = [];
     csnap.forEach(d => {
@@ -50,7 +77,7 @@ export async function scanOrphans() {
     });
 
     let html = '';
-    if (Object.keys(orphanGroups).length === 0 && ghostCustomers.length === 0) {
+    if (Object.keys(orphanGroups).length === 0 && ghostCustomers.length === 0 && secondaryTotal === 0) {
       html = '<div style="text-align:center;padding:18px;color:var(--green);font-weight:700;font-size:1rem">✅ Η βάση είναι καθαρή — δεν βρέθηκαν ορφανά!</div>';
     } else {
       if (Object.keys(orphanGroups).length > 0) {
@@ -64,6 +91,23 @@ export async function scanOrphans() {
           html += '<td style="padding:8px 10px"><strong>' + escHtml(grp.name) + '</strong><div style="font-size:.72rem;color:var(--gray)">ID: ' + escHtml(cid.substring(0, 12)) + '...</div></td>';
           html += '<td style="text-align:right;padding:8px 10px">' + grp.txs.length + '</td>';
           html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#e53935;color:#fff;font-size:.72rem" data-action="_deleteOrphanTxs" data-arg="' + escHtml(cid) + '">🗑️ Διαγραφή</button></td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table></div>';
+      }
+
+      if (secondaryTotal > 0) {
+        html += '<div style="margin-bottom:14px"><div style="font-weight:700;color:#f57c00;margin-bottom:8px">🧹 ' + secondaryTotal + ' ορφανές εγγραφές σε δευτερεύοντα collections</div>';
+        html += '<table style="width:100%;border-collapse:collapse;font-size:.82rem"><thead><tr style="border-bottom:2px solid var(--border)">';
+        html += '<th style="text-align:left;padding:6px 10px;color:var(--gray)">Collection</th>';
+        html += '<th style="text-align:right;padding:6px 10px;color:var(--gray)">Ορφανά</th>';
+        html += '<th style="text-align:center;padding:6px 10px;color:var(--gray)">Ενέργεια</th></tr></thead><tbody>';
+        for (const o of secondaryOrphans) {
+          if (!o.orphanIds.length) continue;
+          html += '<tr style="border-bottom:1px solid var(--border)">';
+          html += '<td style="padding:8px 10px"><strong>' + escHtml(o.label) + '</strong><div style="font-size:.72rem;color:var(--gray)">' + escHtml(o.col) + '</div></td>';
+          html += '<td style="text-align:right;padding:8px 10px">' + o.orphanIds.length + '</td>';
+          html += '<td style="text-align:center;padding:8px 10px"><button class="btn btn-sm" style="background:#f57c00;color:#fff;font-size:.72rem" data-action="_deleteSecondaryOrphans" data-arg="' + escHtml(o.col) + '">🗑️ Διαγραφή</button></td>';
           html += '</tr>';
         }
         html += '</tbody></table></div>';
@@ -120,6 +164,40 @@ export async function deleteGhostCustomer(id, name) {
     const db = getDb();
     await deleteDoc(doc(db, 'ipear_customers', id));
     toast('✅ Διαγράφηκε: ' + name, 'success');
+    scanOrphans();
+    _onDataChanged();
+  } catch (e) {
+    toast('❌ ' + e.message, 'error');
+  }
+}
+
+// Bulk-delete orphan docs in a secondary collection. Re-scans the customer
+// set fresh inside the handler (not via cached scanOrphans state) so a stale
+// admin tab can't accidentally delete docs whose owner was recreated between
+// scan and click.
+export async function deleteSecondaryOrphans(collectionName) {
+  const cfg = SECONDARY_ORPHAN_COLLECTIONS.find(c => c.col === collectionName);
+  if (!cfg) { toast('❌ Άγνωστο collection: ' + collectionName, 'error'); return; }
+  if (!confirm('Θα διαγραφούν όλες οι ορφανές εγγραφές του ' + cfg.label + '. Συνέχεια;')) return;
+  try {
+    const db = getDb();
+    const [csnap, ssnap] = await Promise.all([
+      getDocs(collection(db, 'ipear_customers')),
+      getDocs(collection(db, collectionName)),
+    ]);
+    const customerIds = new Set();
+    csnap.forEach(d => customerIds.add(d.id));
+
+    const toDelete = [];
+    ssnap.forEach(d => {
+      const data = d.data();
+      const linkedId = cfg.fields.map(f => data[f]).find(Boolean);
+      if (linkedId && !customerIds.has(linkedId)) toDelete.push(d.id);
+    });
+
+    let count = 0;
+    for (const id of toDelete) { await deleteDoc(doc(db, collectionName, id)); count++; }
+    toast('✅ Διαγράφηκαν ' + count + ' ορφανές εγγραφές από ' + collectionName, 'success');
     scanOrphans();
     _onDataChanged();
   } catch (e) {
