@@ -44,12 +44,55 @@ jobs:
         run: npm test
 
       - name: Build (uses placeholder env → DEMO mode)
+        # IPEAR_ALLOW_PLACEHOLDER_ENV=1 tells scripts/validate-env.js (the
+        # `prebuild` hook) that placeholder Firebase config is acceptable
+        # here — this job's only purpose is to confirm the bundle compiles,
+        # not that it'd run in prod. The deploy:pages flow never sets this
+        # var, so a real `cp .env.example .env` → deploy slip is now a
+        # hard build-time failure (not a runtime DEMO regression).
+        env:
+          IPEAR_ALLOW_PLACEHOLDER_ENV: '1'
         run: |
           cp .env.example .env
           npm run build
 
       - name: Audit (production deps only)
         run: npm audit --omit=dev --audit-level=high
+
+  # Firestore Security Rules — emulator-backed regression tests. Runs in
+  # parallel to the customer + functions jobs. The emulator is JVM-based
+  # so we need a Java runtime; setup-java pins openjdk-17 for determinism
+  # (the firebase emulator dropped Java 11 support in 2024).
+  rules:
+    name: Firestore Rules (emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install
+        run: npm ci
+
+      - name: Cache Firebase emulator binaries
+        # firebase emulators:exec downloads the firestore JAR (~70 MB) on
+        # first run; caching ~/.cache/firebase saves ~20s per CI run.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-firestore-v1
+
+      - name: Run rules tests
+        run: npm run test:rules
 
   functions:
     name: Cloud Functions (install + audit)
