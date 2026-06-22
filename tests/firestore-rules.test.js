@@ -230,14 +230,25 @@ describe('ipear_rewards: WRITE access', () => {
     ));
   });
 
-  it('ADMIN CAN update + delete rewards', async () => {
+  // NB: setDoc + deleteDoc in the same test body crashes rules-unit-testing
+  // v3 with "Firestore has already been started and its settings can no
+  // longer be changed" — the second mutation on the same context triggers
+  // a re-init. Split into two cases (one mutation per test) to keep each
+  // assertion's call graph clean.
+  it('ADMIN CAN update an existing reward (toggle isActive)', async () => {
     await seedReward('reward-a', { cost: 1000, discount: 5, isActive: true });
     await seedAdminWhitelist('admin-uid');
     const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
     await assertSucceeds(setDoc(
       doc(admin.firestore(), 'ipear_rewards', 'reward-a'),
-      { ...validRewardPayload, isActive: false } // toggle off
+      { ...validRewardPayload, isActive: false }
     ));
+  });
+
+  it('ADMIN CAN delete a reward', async () => {
+    await seedReward('reward-a', { cost: 1000, discount: 5, isActive: true });
+    await seedAdminWhitelist('admin-uid');
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
     await assertSucceeds(deleteDoc(doc(admin.firestore(), 'ipear_rewards', 'reward-a')));
   });
 });
