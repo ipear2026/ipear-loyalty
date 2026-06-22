@@ -18,6 +18,7 @@ import { _setPushUI, _syncPushState, _dismissPushOnboard, _acceptPushOnboard, re
 import './firebase-init.js';
 import {
   renderHomeRewards, renderRewardsList,
+  startRewardsListener, stopRewardsListener, getActiveRewards,
   startOffersListener, stopOffersListener, loadOffersData,
   loadLeaderboard, stopLbListener,
   loadHistory, loadHistoryMore,
@@ -280,6 +281,7 @@ export function _forceCleanup() {
   stopLiveListener();
   _stopExistencePoll();
   stopOffersListener();
+  stopRewardsListener();
   stopLbListener();
   if (state._maintenanceUnsub) { try { state._maintenanceUnsub(); } catch(_) {} state._maintenanceUnsub = null; }
   clearInterval(_redeemTimer); _redeemTimer = null;
@@ -833,6 +835,7 @@ function _customerKeepAlive() {
     _updateGreeting();
     startLiveListener();
     startOffersListener();
+    startRewardsListener();
     try { loadLeaderboard(); } catch(_) {}
     try { _syncPushState(); } catch(_) {}
   } catch(e) { logger.warn('[keepalive] error:', e); }
@@ -1015,24 +1018,65 @@ let _redeemInProgress = false;
 let _redeemLastAt = 0;
 const _REDEEM_COOLDOWN = 2000;
 
-export async function startRedemption(points, label) {
+// startRedemption(rewardIdOrPoints, label)
+//   - new path: first arg is a string reward id, label optional (server doc wins)
+//   - legacy:   first arg is a number (= points cost), label required — kept
+//               so cached HTML or in-flight overlays don't break mid-deploy
+export async function startRedemption(rewardIdOrPoints, label) {
   if (state._maintenanceMode) { showToast('🔧 Αναβάθμιση σε εξέλιξη. Δοκίμασε σε λίγο', 'warn'); return; }
   if (_redeemInProgress) return;
   const now = Date.now();
   if (now - _redeemLastAt < _REDEEM_COOLDOWN) { showToast('⏳ Περίμενε λίγο…'); return; }
   _redeemLastAt = now;
   _redeemInProgress = true;
-  // Soft "pop" the moment the reward card is pressed — confirms the tap
-  // registered before the QR overlay paints (Firestore round-trip can take
-  // 300–800 ms on weak signal at the till).
   _haptic('pop');
-  try { await _startRedemptionInner(points, label); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
+  try { await _startRedemptionInner(rewardIdOrPoints, label); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
 }
 
-async function _startRedemptionInner(points, label) {
+// Resolve `arg` → { rewardId, cost, discount, label }. Cost+discount must
+// come from the catalog (or the legacy ladder) so the customer can't mint
+// arbitrary point/discount pairs; the Firestore rules enforce this anyway,
+// but checking client-side gives a clean error before the round-trip.
+function _resolveRewardSpec(arg, fallbackLabel) {
+  const _LEGACY = { 1000: { discount:  5, label: '5€ Έκπτωση'  },
+                    2500: { discount: 15, label: '15€ Έκπτωση' },
+                    4000: { discount: 30, label: '30€ Έκπτωση' } };
+
+  if (typeof arg === 'string' && arg) {
+    const list = (typeof getActiveRewards === 'function') ? getActiveRewards() : [];
+    const hit = list.find((r) => String(r.id) === arg);
+    if (hit) {
+      return {
+        rewardId: String(hit.id),
+        cost: Number(hit.cost) || 0,
+        discount: Number(hit.discount) || 0,
+        label: fallbackLabel || hit.title || '',
+      };
+    }
+    // Fallback ids like `fallback-1000` from the seeded fallback list — map
+    // by trailing cost back onto the legacy ladder so the rule still passes.
+    const trail = arg.match(/(\d+)$/)?.[1];
+    const ladder = trail && _LEGACY[Number(trail)];
+    if (ladder) {
+      return { rewardId: null, cost: Number(trail), discount: ladder.discount, label: fallbackLabel || ladder.label };
+    }
+    return null;
+  }
+
+  if (Number.isInteger(arg) && _LEGACY[arg]) {
+    return { rewardId: null, cost: arg, discount: _LEGACY[arg].discount, label: fallbackLabel || _LEGACY[arg].label };
+  }
+  return null;
+}
+
+async function _startRedemptionInner(rewardIdOrPoints, label) {
+  const spec = _resolveRewardSpec(rewardIdOrPoints, label);
+  if (!spec) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
+  const { rewardId, cost, discount, label: resolvedLabel } = spec;
+
   const pts = state.foundCustomer?.points || 0;
-  if (!Number.isInteger(points) || points <= 0) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
-  if (pts < points) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
+  if (!Number.isInteger(cost) || cost <= 0) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
+  if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
 
   await _cancelActiveRedemption('replaced-by-new-code');
 
@@ -1046,8 +1090,8 @@ async function _startRedemptionInner(points, label) {
       _watchRedemptionDoc(existing.id);
       const expMs = _parseExpiryMs(existing);
       if (expMs) _startCountdown(new Date(expMs));
-      document.getElementById('ro-reward').textContent = existing.label || label;
-      document.getElementById('ro-pts').textContent    = (existing.points || points) + ' πόντοι';
+      document.getElementById('ro-reward').textContent = existing.label || resolvedLabel;
+      document.getElementById('ro-pts').textContent    = (existing.points || cost) + ' πόντοι';
       const exCode = String(existing.code || '');
       document.getElementById('ro-code').textContent   = exCode.length === 6 ? exCode.slice(0,3) + ' ' + exCode.slice(3) : exCode;
       const _exOverlay = document.getElementById('redeem-overlay');
@@ -1061,13 +1105,10 @@ async function _startRedemptionInner(points, label) {
   const code = await _generateUniquePendingCode();
   if (!code) { showToast('❌ Δεν δημιουργήθηκε κωδικός. Δοκίμασε ξανά'); return; }
 
-  const _DISC_MAP = {1000:5, 2500:15, 4000:30};
-  const discount = _DISC_MAP[points];
-  if (!discount) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
   const now = new Date();
   const expires = new Date(now.getTime() + 5*60*1000);
-  document.getElementById('ro-reward').textContent = label;
-  document.getElementById('ro-pts').textContent    = points + ' πόντοι';
+  document.getElementById('ro-reward').textContent = resolvedLabel;
+  document.getElementById('ro-pts').textContent    = cost + ' πόντοι';
   document.getElementById('ro-code').textContent   = code.slice(0,3) + ' ' + code.slice(3);
   const _rdOverlay = document.getElementById('redeem-overlay');
   _rdOverlay.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; l.offsetHeight; l.style.animation = ''; });
@@ -1096,15 +1137,22 @@ async function _startRedemptionInner(points, label) {
 
   const custId = state.foundCustomer.id;
   try {
-    const docRef = await window._addDoc(window._col(window._db,'ipear_redemptions'), {
+    const payload = {
       code, customerId:custId, customerUid:authUid||state.foundCustomer.uid||'',
       customerName:state.foundCustomer.name, card:state.foundCustomer.card,
-      points, discount, label,
+      points: cost, discount, label: resolvedLabel,
       status: 'pending',
       createdAt:now.toISOString(), expiresAt:expires.toISOString(), used:false,
       createdAtTs: now,
       expiresAtTs: expires
-    });
+    };
+    // Dynamic-catalog path: include rewardId so the Firestore rule reads the
+    // canonical cost/discount from ipear_rewards and the admin verify path
+    // can re-validate against the source-of-truth. Omitted for legacy ladder
+    // calls (fallback ids / numeric arg) so those still match the static
+    // ladder branch in the rule.
+    if (rewardId) payload.rewardId = rewardId;
+    const docRef = await window._addDoc(window._col(window._db,'ipear_redemptions'), payload);
     _activeRedemptionDocId = docRef.id;
     _watchRedemptionDoc(docRef.id);
   } catch(e) {
@@ -1287,6 +1335,7 @@ export async function startApp() {
   loadOffersData();
   loadHistory();
   startLiveListener();
+  startRewardsListener();
   _startMaintenanceListener();
   _startEmailVerifyFlow();
 

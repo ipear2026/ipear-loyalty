@@ -37,6 +37,20 @@ import { getFirestore } from 'firebase-admin/firestore';
 
 const REQUIRED_ENV = ['TEST_EMAIL', 'TEST_PASS', 'FIREBASE_SERVICE_ACCOUNT_JSON'];
 const REWARD_COST = 1000; // 5€ tier — smallest, fastest to reset
+// Stable id for the dummy reward we upsert so the customer app has at least
+// one active reward to render even on a project where the admin hasn't
+// seeded ipear_rewards yet. Picked the legacy 1000-pt tier so the points/
+// discount pair also passes the ladder branch of the Firestore rule.
+const E2E_REWARD_DOC_ID = 'e2e_dummy_5eur';
+const E2E_REWARD_PAYLOAD = {
+  title: '5€ Έκπτωση (E2E)',
+  cost: REWARD_COST,
+  discount: 5,
+  icon: '🧪',
+  description: 'Auto-seeded by the golden-path E2E spec.',
+  isActive: true,
+  order: 1,
+};
 
 function ensureAdminApp() {
   if (getApps().length) return;
@@ -46,7 +60,7 @@ function ensureAdminApp() {
 }
 
 test.describe('Golden path', () => {
-  test.beforeAll(() => {
+  test.beforeAll(async () => {
     const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
     if (missing.length) {
       throw new Error(
@@ -56,6 +70,32 @@ test.describe('Golden path', () => {
       );
     }
     ensureAdminApp();
+
+    // Seed the catalog reward this spec exercises. Idempotent (merge: true)
+    // so re-running the suite doesn't churn createdAt; setting isActive:true
+    // unblocks the customer-app rewards listener from getting an empty
+    // snapshot when a fresh project has no ipear_rewards docs yet.
+    const db = getFirestore();
+    await db.collection('ipear_rewards').doc(E2E_REWARD_DOC_ID).set(
+      { ...E2E_REWARD_PAYLOAD, updatedAt: new Date().toISOString() },
+      { merge: true }
+    );
+  });
+
+  test.afterAll(async () => {
+    // Best-effort cleanup. Leaving the doc in place between runs is fine
+    // (it's clearly labelled "E2E"), but flipping isActive:false hides it
+    // from real customers if the project ever gets pointed at a non-test
+    // dataset. Keep the doc so re-runs don't recreate it from scratch.
+    try {
+      const db = getFirestore();
+      await db.collection('ipear_rewards').doc(E2E_REWARD_DOC_ID).set(
+        { isActive: false, updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn('[golden-path] reward cleanup failed:', e?.message || e);
+    }
   });
 
   test('customer redeems 5€ reward + sees it land live in history', async ({ page }) => {

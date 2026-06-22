@@ -266,6 +266,20 @@ service cloud.firestore {
     }
 
     // ═════════════════════════════════════════════════════════════════════
+    //  ipear_rewards — point-redeemable reward tiers (admin-managed catalog)
+    //  Source-of-truth for cost/label that startRedemption + confirmVerify
+    //  validate against. Decoupling these from the client lets the catalog
+    //  evolve (new tiers, seasonal rewards) without a frontend deploy.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_rewards/{rewardId} {
+      // READ ── admin sees everything; customers see active rewards only.
+      allow read:  if isAdmin() || (isAuth() && resource.data.isActive == true);
+
+      // WRITE ── admin only.
+      allow write: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
     //  ipear_redemptions — pending reward QR codes
     //  Hardened to prevent: point injection, discount manipulation, replay.
     // ═════════════════════════════════════════════════════════════════════
@@ -278,17 +292,27 @@ service cloud.firestore {
         return get(/databases/$(database)/documents/ipear_customers/$(request.resource.data.customerId));
       }
 
+      // Helper: reward doc referenced by this redemption (dynamic-catalog path).
+      function rewardFromRedemption() {
+        return get(/databases/$(database)/documents/ipear_rewards/$(request.resource.data.rewardId));
+      }
+
       // CREATE ── customer mints a pending reward code. Guards:
-      //   • Field whitelist locks shape
+      //   • Field whitelist locks shape (rewardId optional for legacy callers)
       //   • customerUid == auth.uid (no impersonation)
       //   • Customer doc verifies ownership AND has enough points AND not blocked
-      //   • discount/points pairs MUST match the fixed ladder (1000→5, 2500→15, 4000→30)
+      //   • points/discount must match EITHER:
+      //       (a) dynamic catalog: rewardId points at an isActive reward and
+      //           points == reward.cost AND discount == reward.discount
+      //       (b) legacy ladder: 1000→5, 2500→15, 4000→30 (for clients that
+      //           haven't shipped the rewardId field yet — drop this branch
+      //           once telemetry shows zero legacy traffic)
       //   • Timestamps server-validated against `request.time` ±5min (no replay)
       //   • expires within 11 minutes (no long-lived codes)
       allow create: if isAuth() &&
         request.resource.data.keys().hasOnly([
           'code','customerId','customerUid','customerName','card',
-          'points','discount','label','status',
+          'points','discount','label','status','rewardId',
           'createdAt','expiresAt','used','createdAtTs','expiresAtTs'
         ]) &&
         request.resource.data.customerUid == request.auth.uid &&
@@ -320,6 +344,16 @@ service cloud.firestore {
         isPositiveInt(request.resource.data.points) &&
         request.resource.data.discount is number &&
         (
+          // (a) Dynamic-catalog path — points/discount sourced from server doc
+          ('rewardId' in request.resource.data &&
+           request.resource.data.rewardId is string &&
+           request.resource.data.rewardId.size() > 0 &&
+           exists(/databases/$(database)/documents/ipear_rewards/$(request.resource.data.rewardId)) &&
+           rewardFromRedemption().data.isActive == true &&
+           rewardFromRedemption().data.cost == request.resource.data.points &&
+           rewardFromRedemption().data.discount == request.resource.data.discount)
+          ||
+          // (b) Legacy ladder — fixed pairs, no rewardId
           (request.resource.data.points == 1000 && request.resource.data.discount ==  5) ||
           (request.resource.data.points == 2500 && request.resource.data.discount == 15) ||
           (request.resource.data.points == 4000 && request.resource.data.discount == 30)

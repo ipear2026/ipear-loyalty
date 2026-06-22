@@ -45,6 +45,14 @@ import {
   deleteOffer,
 } from './admin/offers.js';
 import {
+  loadRewards,
+  openRewardModal,
+  openRewardEdit,
+  saveReward,
+  toggleReward,
+  deleteReward,
+} from './admin/rewards-admin.js';
+import {
   initRedemptionVerify,
   verifyCode,
   confirmVerify,
@@ -372,7 +380,7 @@ function adminLogout() {
 let cid = null, cdata = null, msgCh = '';
 let _storeId = null, _storeName = '—';
 const DB = () => window._db;
-const TABS = ['search','register','customers','transactions','approvals','offers','marketing','stats','system','gdpr'];
+const TABS = ['search','register','customers','transactions','approvals','offers','rewards','marketing','stats','system','gdpr'];
 
 // ══════════════════════════════════════
 //  ONLINE
@@ -441,6 +449,7 @@ function showTab(n) {
   if (n==='transactions') loadTx();
   if (n==='customers') loadAll();
   if (n==='offers') loadOffers();
+  if (n==='rewards') loadRewards();
   if (n==='gdpr') loadDeletionRequests();
   if (n==='system') loadWorkerHealth();
 }
@@ -1811,6 +1820,11 @@ window.saveOffer = saveOffer;
 window.deleteOffer = deleteOffer;
 window.toggleOffer = toggleOffer;
 window.openOfferEdit = openOfferEdit;
+window.openRewardModal = openRewardModal;
+window.openRewardEdit = openRewardEdit;
+window.saveReward = saveReward;
+window.toggleReward = toggleReward;
+window.deleteReward = deleteReward;
 window.sendOfferPush = sendOfferPush;
 window.previewOfferImage = previewOfferImage;
 window.removeOfferImage = removeOfferImage;

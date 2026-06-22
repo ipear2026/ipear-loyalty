@@ -99,6 +99,31 @@ async function main() {
   console.log(`  card:        ${card}`);
   console.log(`  points:      ${SEED_POINTS}`);
   console.log(`  totalPoints: ${payload.totalPoints}`);
+
+  // 4. Upsert a dummy rewards-catalog doc so the customer app has at least
+  //    one active reward to render. Uses the legacy 1000-pt ladder (cost
+  //    1000 → discount 5) so the rule's ladder branch also accepts the
+  //    eventual redemption — independent of whether the customer app sends
+  //    rewardId or not.
+  const rewardId = 'e2e_dummy_5eur';
+  const rewardRef = db.collection('ipear_rewards').doc(rewardId);
+  const rewardExists = (await rewardRef.get()).exists;
+  await rewardRef.set(
+    {
+      title: '5€ Έκπτωση (E2E)',
+      cost: 1000,
+      discount: 5,
+      icon: '🧪',
+      description: 'Auto-seeded by scripts/seed-e2e-customer.js',
+      isActive: true,
+      order: 1,
+      updatedAt: new Date().toISOString(),
+      ...(rewardExists ? {} : { createdAt: new Date().toISOString() }),
+    },
+    { merge: true }
+  );
+  console.log(`✓ ${rewardExists ? 'Updated' : 'Created'} ipear_rewards/${rewardId}`);
+
   console.log(`\nReady. Run:  npm run e2e`);
 }
 

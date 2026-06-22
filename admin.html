@@ -74,6 +74,7 @@
   <button class="tab" data-action="showTab" data-arg="transactions"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg> Συναλλαγές</button>
   <button class="tab" data-action="showTab" data-arg="approvals" id="tab-btn-approvals" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Εγκρίσεις <span id="approvals-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
   <button class="tab" data-action="showTab" data-arg="offers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg> Προσφορές</button>
+  <button class="tab" data-action="showTab" data-arg="rewards"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.5 13.5L17 22l-5-3-5 3 1.5-8.5"/></svg> Ανταμοιβές</button>
   <button class="tab" data-action="showTab" data-arg="marketing"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg> Μάρκετινγκ</button>
   <button class="tab" data-action="showTab" data-arg="stats"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Στατιστικά</button>
   <button class="tab" data-action="showTab" data-arg="system"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Σύστημα</button>
@@ -737,6 +738,18 @@
     </div>
   </div>
 
+  <!-- ── REWARDS TAB ── -->
+  <div id="tab-rewards" class="tc">
+    <div class="card">
+      <h2>
+        <span class="ico">🎟️</span> Ανταμοιβές
+        <button class="btn btn-green btn-sm" style="margin-left:auto" data-action="openRewardModal">➕ Νέα Ανταμοιβή</button>
+      </h2>
+      <p style="color:var(--gray);font-size:0.84rem;margin-bottom:16px;line-height:1.5">Οι ενεργές ανταμοιβές εμφανίζονται στο customer app (Αρχική + tab "Ανταμοιβές") ταξινομημένες με βάση το πεδίο <strong>Σειρά</strong>. Το κόστος + έκπτωση επικυρώνονται server-side από το Firestore όταν εξαργυρώνεται ο κωδικός.</p>
+      <div id="rewards-list"><div class="empty"><span class="e">⏳</span>Φόρτωση...</div></div>
+    </div>
+  </div>
+
   <!-- ══ SYSTEM TAB (Συντήρηση + Backup) ══ -->
   <div id="tab-system" class="tc">
     <!-- KILL SWITCH -->
@@ -1003,6 +1016,34 @@
 </div>
 
 <!-- OFFER MODAL -->
+<!-- REWARD MODAL -->
+<div class="modal-bg" id="m-reward" role="dialog" aria-modal="true" aria-label="Διαχείριση ανταμοιβής">
+  <div class="modal">
+    <h3 id="reward-modal-title">🎟️ Νέα Ανταμοιβή</h3>
+    <input type="hidden" id="reward-edit-id">
+    <div class="form-row">
+      <div class="fg"><label>Εικονίδιο</label><input type="text" id="rw-icon" placeholder="🎟️" maxlength="2" style="font-size:1.4rem;text-align:center"></div>
+      <div class="fg"><label>Τίτλος *</label><input type="text" id="rw-title" placeholder="π.χ. 5€ Έκπτωση"></div>
+    </div>
+    <div class="fg"><label>Περιγραφή</label><textarea id="rw-desc" rows="2" placeholder="π.χ. Εξαργύρωσε πόντους για άμεση έκπτωση"></textarea></div>
+    <div class="form-row">
+      <div class="fg"><label>Κόστος (πόντοι) *</label><input type="number" id="rw-cost" min="1" step="100" value="1000"></div>
+      <div class="fg"><label>Έκπτωση (€) *</label><input type="number" id="rw-discount" min="0" step="1" value="5"></div>
+    </div>
+    <div class="form-row">
+      <div class="fg"><label>Σειρά εμφάνισης</label><input type="number" id="rw-order" min="0" step="1" value="0"></div>
+      <div class="fg" style="display:flex;align-items:flex-end;padding-bottom:6px">
+        <div class="chk" style="margin:0"><input type="checkbox" id="rw-active" checked><label for="rw-active">Ενεργή</label></div>
+      </div>
+    </div>
+    <p style="font-size:.72rem;color:var(--gray);margin-top:4px;line-height:1.5">⚠️ Τα ζευγάρια <strong>κόστος ↔ έκπτωση</strong> πρέπει να συμφωνούν με τους Firestore rules: 1000→5, 2500→15, 4000→30 (legacy ladder) ή χρησιμοποίησε το dynamic-catalog path με rewardId (αυτόματα).</p>
+    <div class="modal-act">
+      <button class="btn btn-green" data-action="saveReward">✅ Αποθήκευση</button>
+      <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-bg" id="m-offer" role="dialog" aria-modal="true" aria-label="Διαχείριση προσφοράς">
   <div class="modal">
     <h3 id="offer-modal-title">🎁 Νέα Προσφορά</h3>

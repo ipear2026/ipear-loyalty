@@ -113,6 +113,38 @@ let _maintenanceMode = false;
 let _maintenanceUnsub = null;
 _startMaintenanceListener();
 
+// ── Reward catalog (admin-managed via ipear_rewards) ────────────────────
+// The tablet reads the catalog once on bootstrap + on each customer
+// lookup refresh; full live snapshot isn't worth the listener cost for a
+// kiosk that's only used in-store. Fallback ladder mirrors the customer-app
+// fallback so a brand-new install (empty collection) still works.
+const _TABLET_REWARDS_FALLBACK = [
+  { id: 'fallback-1000', cost: 1000, discount: 5,  title: '5€ Έκπτωση'  },
+  { id: 'fallback-2500', cost: 2500, discount: 15, title: '15€ Έκπτωση' },
+  { id: 'fallback-4000', cost: 4000, discount: 30, title: '30€ Έκπτωση' },
+];
+let _tabletRewards = _TABLET_REWARDS_FALLBACK.slice();
+
+async function _loadTabletRewards() {
+  if (window.DEMO) { _tabletRewards = _TABLET_REWARDS_FALLBACK.slice(); return; }
+  try {
+    const snap = await window._getDocs(
+      window._query(window._col(window._db, 'ipear_rewards'), window._where('isActive', '==', true))
+    );
+    const rows = [];
+    snap.forEach((d) => {
+      const data = d.data ? d.data() : d;
+      rows.push({ id: d.id || data.id, ...data });
+    });
+    rows.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
+    _tabletRewards = rows.length ? rows : _TABLET_REWARDS_FALLBACK.slice();
+  } catch (e) {
+    logger.warn('[tablet rewards] load failed:', e?.message || e);
+    _tabletRewards = _TABLET_REWARDS_FALLBACK.slice();
+  }
+}
+_loadTabletRewards();
+
 // ── Brute-force protection ─────────────────────────────────────────────────
 let _tlAttempts = 0, _tlLockedUntil = 0;
 const _TL_MAX = 5, _TL_LOCK = 60; // 5 tries → 60 s lockout
@@ -556,17 +588,17 @@ function renderCustomer(d) {
     document.getElementById('r-prog').style.width = '100%';
   }
 
-  // Rewards
-  const rewards = [
-    { pts: 1000, label: '5€ Έκπτωση' },
-    { pts: 2500, label: '15€ Έκπτωση' },
-    { pts: 4000, label: '30€ Έκπτωση' },
-  ];
-  document.getElementById('r-rewards').innerHTML = rewards.map(r => {
-    const ok = pts >= r.pts;
+  // Rewards — source from the admin-managed ipear_rewards catalog (cached
+  // at bootstrap by _loadTabletRewards; falls back to the static ladder on
+  // empty/error). Display-only summary; the actionable redeem panel uses
+  // the same list with the same cost values.
+  document.getElementById('r-rewards').innerHTML = _tabletRewards.map(r => {
+    const cost = Number(r.cost) || 0;
+    const ok = pts >= cost;
+    const label = r.title || '';
     return `<div class="reward-box ${ok ? 'available' : ''}">
-      <div class="r-pts">${escHtml(String(r.pts))} pts</div>
-      <div class="r-lbl">${ok ? '✅ ' : '🔒 '}${escHtml(r.label)}</div>
+      <div class="r-pts">${escHtml(String(cost))} pts</div>
+      <div class="r-lbl">${ok ? '✅ ' : '🔒 '}${escHtml(label)}</div>
     </div>`;
   }).join('');
 }
@@ -598,17 +630,21 @@ function openRedeemPanel() {
   if (_maintenanceMode) { _showToast('Το σύστημα αναβαθμίζεται. Παρακαλούμε δοκιμάστε σε λίγο!'); return; }
   const c = window._foundCustomer;
   if (!c) return;
+  // Refresh catalog in the background so freshly-added rewards become
+  // available without a tablet reload. Best-effort: if it fails the cached
+  // list paints anyway.
+  _loadTabletRewards().catch(() => {});
   const pts = c.points || 0;
   document.getElementById('rp-name').textContent = c.name;
   document.getElementById('rp-pts').textContent = pts;
-  const opts = [
-    {cost:1000,disc:5},{cost:2500,disc:15},{cost:4000,disc:30}
-  ];
-  document.getElementById('rp-options').innerHTML = opts.map(o => {
-    const ok = pts >= o.cost;
-    return `<div class="rp-opt ${ok ? 'ok' : 'no'}" ${ok ? `role="button" tabindex="0" onclick="confirmTabletRedeem(${Number(o.cost)},${Number(o.disc)})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();confirmTabletRedeem(${Number(o.cost)},${Number(o.disc)})}" aria-label="${o.cost} πόντοι για ${o.disc} ευρώ έκπτωση"` : 'aria-disabled="true"'}>
-      <span style="font-weight:700">${escHtml(String(o.cost))} πόντοι</span>
-      <span style="font-size:1.2rem;font-weight:900;color:${ok ? '#5a9600' : '#767676'}">${escHtml(String(o.disc))}€ έκπτωση</span>
+  document.getElementById('rp-options').innerHTML = _tabletRewards.map((r) => {
+    const cost = Number(r.cost) || 0;
+    const disc = Number(r.discount) || 0;
+    const label = r.title || '';
+    const ok = pts >= cost;
+    return `<div class="rp-opt ${ok ? 'ok' : 'no'}" ${ok ? `role="button" tabindex="0" onclick="confirmTabletRedeem(${Number(cost)},${Number(disc)})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();confirmTabletRedeem(${Number(cost)},${Number(disc)})}" aria-label="${escHtml(String(cost))} πόντοι για ${escHtml(String(disc))} ευρώ έκπτωση — ${escHtml(label)}"` : 'aria-disabled="true"'}>
+      <span style="font-weight:700">${escHtml(String(cost))} πόντοι</span>
+      <span style="font-size:1.2rem;font-weight:900;color:${ok ? '#5a9600' : '#767676'}">${escHtml(String(disc))}€ έκπτωση</span>
     </div>`;
   }).join('');
   const rpEl = document.getElementById('redeem-panel');

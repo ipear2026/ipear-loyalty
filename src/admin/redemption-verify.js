@@ -134,6 +134,7 @@ export async function confirmVerify(redemptionId, code) {
     const { storeId, storeName } = _ctx.getStoreContext();
 
     await window._runTransaction(db, async (txn) => {
+      // ── ALL READS FIRST (Firestore txn ordering rule) ──
       const redemRef = window._doc(db, 'ipear_redemptions', redemptionId);
       const redemSnap = await txn.get(redemRef);
       if (!redemSnap.exists()) throw new Error('⚠️ Άκυρος κωδικός ή έχει λήξει.');
@@ -146,6 +147,31 @@ export async function confirmVerify(redemptionId, code) {
       }
       if (new Date() > new Date(found.expiresAt)) {
         throw new Error('⚠️ Άκυρος κωδικός ή έχει λήξει.');
+      }
+
+      // SECURITY — when the redemption references a catalog reward, re-read
+      // ipear_rewards/{rewardId} HERE and use its cost/discount instead of
+      // the values copied into the redemption doc. Without this, an
+      // attacker who slipped a hand-crafted redemption past the rule (e.g.
+      // a future rule-bypass) could still mint a 30€ discount for 100 pts;
+      // sourcing the cost from the admin-managed catalog means the worst
+      // case is a stale price, not a free discount.
+      let trustedCost = Number(found.points) || 0;
+      let trustedDiscount = Number(found.discount) || 0;
+      let trustedLabel = found.label || '';
+      if (found.rewardId) {
+        const rewRef = window._doc(db, 'ipear_rewards', found.rewardId);
+        const rewSnap = await txn.get(rewRef);
+        if (!rewSnap.exists()) {
+          throw new Error('Η ανταμοιβή δεν υπάρχει πλέον. Ακύρωσε τον κωδικό.');
+        }
+        const rew = rewSnap.data();
+        if (rew.isActive === false) {
+          throw new Error('Η ανταμοιβή απενεργοποιήθηκε. Δεν μπορεί να εξαργυρωθεί.');
+        }
+        trustedCost = Number(rew.cost) || trustedCost;
+        trustedDiscount = Number(rew.discount) || trustedDiscount;
+        trustedLabel = rew.title || trustedLabel;
       }
 
       let custRef = null;
@@ -169,21 +195,18 @@ export async function confirmVerify(redemptionId, code) {
       if (!custId || !custData) throw new Error('Πελάτης δεν βρέθηκε.');
 
       const currentPts = custData.points || 0;
-      if (currentPts < found.points) {
-        throw new Error(`Ανεπαρκείς πόντοι (${currentPts} < ${found.points})`);
+      if (currentPts < trustedCost) {
+        throw new Error(`Ανεπαρκείς πόντοι (${currentPts} < ${trustedCost})`);
       }
-      newPts = currentPts - found.points;
+      newPts = currentPts - trustedCost;
 
+      // ── ALL WRITES AFTER ──
       txn.update(redemRef, { used: true, usedAt: verifyNowIso, status: 'used' });
       txn.update(custRef, { points: newPts });
 
       // Customer-facing ledger entry — same commit.
-      // customerUid + customerEmail BOTH populated so the customer's
-      // loadHistory matches via either branch of the Firestore read rule
-      // (resource.data.customerUid == auth.uid OR customerEmail == auth.email).
-      // Fallbacks are intentional: the redemption doc doesn't store email,
-      // and customerUid can be empty if startRedemption ran before
-      // auth.currentUser was populated.
+      // Cost/discount/label come from the catalog-trusted values (see
+      // SECURITY note above), not the redemption doc.
       txn.set(window._doc(db, 'ipear_transactions', verifyLedgerId), {
         customerId: custId,
         customerUid: found.customerUid || custData.uid || '',
@@ -191,15 +214,19 @@ export async function confirmVerify(redemptionId, code) {
         customerName: found.customerName || custData.name || '',
         card: found.card || custData.card || '',
         type: 'redeem',
-        points: -found.points,
-        discount: found.discount,
-        label: found.label,
+        points: -trustedCost,
+        discount: trustedDiscount,
+        label: trustedLabel,
         redemptionCode: code,
         method: 'admin-verify',
         storeId: storeId || null,
         storeName,
         date: verifyNowIso,
       });
+      // Keep the legacy hook expectation (`found.points` used in the toast
+      // below) lined up with what was actually debited.
+      found.points = trustedCost;
+      found.label = trustedLabel;
     });
 
     _ctx.onRedemptionApproved({ customerId: custId, newPoints: newPts });
