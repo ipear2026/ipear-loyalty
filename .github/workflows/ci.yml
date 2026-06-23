@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, 'refactor/**', 'feat/**', 'fix/**']
+    branches: [main, 'refactor/**', 'feat/**', 'fix/**', 'chore/**']
   pull_request:
-    branches: [main]
+    branches: [main, 'refactor/**']
 
 # Cancel superseded runs on the same branch — saves CI minutes when
 # you push multiple commits in quick succession.
