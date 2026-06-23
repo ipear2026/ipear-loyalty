@@ -254,6 +254,14 @@ if (IS_DEMO) {
   }
 
   // ── Push notifications with state machine + timeout ──
+  // FIXME (next sprint): the four window._*Push handlers below still couple
+  // to state.foundCustomer (customer-state). They belong in main.js next to
+  // the rest of the customer flow. Until then, each handler short-circuits
+  // on cashier surfaces (/tablet, /admin) so it cannot accidentally fire
+  // from a cashier session — defense-in-depth after the 2026-06-23 outage.
+  const _isCustomerSurface = typeof location === 'undefined' ||
+    !/^\/(tablet|admin)(\.html)?(\/|$)/.test(location.pathname);
+
   let _pushBusy = false;
 
   function _withTimeout(promise, ms) {
@@ -264,6 +272,7 @@ if (IS_DEMO) {
   }
 
   window._enablePush = async () => {
+    if (!_isCustomerSurface) return;  // no-op on tablet/admin
     if (_pushBusy) return;
     if (!_messaging) return showToast('❌ Messaging μη διαθέσιμο','red');
     if (!VAPID_KEY || VAPID_KEY === 'YOUR_FCM_VAPID_KEY') return showToast('⚠️ VAPID key δεν έχει οριστεί','red');
@@ -373,6 +382,7 @@ if (IS_DEMO) {
   };
 
   window._disablePush = async () => {
+    if (!_isCustomerSurface) return;  // no-op on tablet/admin
     if (_pushBusy) return;
     _pushBusy = true;
     const { _setPushUI } = await import('./push-notifications.js');
@@ -400,6 +410,7 @@ if (IS_DEMO) {
   };
 
   window._togglePush = () => {
+    if (!_isCustomerSurface) return;  // no-op on tablet/admin
     if (state.foundCustomer?.fcmToken) window._disablePush();
     else window._enablePush();
   };
@@ -439,48 +450,20 @@ if (IS_DEMO) {
   }
 
   // ═════════════════════════════════════════════════════════════════════════
-  //  CONTINUOUS AUTH STATE VALIDATOR
-  //  Detects orphan states where Firebase Auth has a user but Firestore has
-  //  no matching customer doc — the "Notis Bountouris" symptom (login fails,
-  //  register says "exists", password reset bypasses). The initial restore
-  //  listener above only runs once; this one stays subscribed for the app
-  //  lifetime. Triggers ONLY when the auth state genuinely changes (not on
-  //  every page load) and only when we're past the bootstrap window.
+  //  Auth-state subscription primitive — exposed so main.js (customer site)
+  //  can install its own validator without re-importing firebase/auth.
+  //
+  //  HISTORY (2026-06-23 outage class): the customer-orphan validator used
+  //  to live HERE. Because firebase-init.js is imported by main.js (customer),
+  //  admin-main.js (admin), AND tablet-main.js (kiosk), the validator was
+  //  signing out ANY user without a state.foundCustomer.id binding — which
+  //  on cashier surfaces (/admin, /tablet) is always the case. The result
+  //  was a 4.7s post-login auto-logout that surfaced as cryptic
+  //  "Missing or insufficient permissions" errors. The validator now lives
+  //  in main.js where it belongs, scoped to the customer site only.
+  //  See: tests/e2e/kiosk-survival.spec.js for the regression test.
   // ═════════════════════════════════════════════════════════════════════════
-  let _bootstrapDone = false;
-  // Give the autoLogin path 3.5s to do its thing before we start patrolling.
-  setTimeout(() => { _bootstrapDone = true; }, 3500);
-  onAuthStateChanged(auth, async (user) => {
-    if (!_bootstrapDone) return;
-    if (!user) return;  // signed out — nothing to validate
-    // CRITICAL: this validator was written for the CUSTOMER site (main.js
-    // mounts state.foundCustomer.id when a customer doc is bound to the
-    // session). On TABLET and ADMIN the logged-in user is the cashier /
-    // store owner — not a customer record — so state.foundCustomer.id is
-    // never set and the validator would (incorrectly) treat them as
-    // "orphan" and force a signOut() ~4.7s after every login. Skip both
-    // surfaces. This was the real root cause of the iPear hotfix loop —
-    // App Check / rules / persistence were red herrings caused by the
-    // resulting null auth state.
-    const _onCashierSurface = typeof location !== 'undefined' &&
-                              /^\/(tablet|admin)(\.html)?(\/|$)/.test(location.pathname);
-    if (_onCashierSurface) return;
-    // If app already mounted us against a customer doc, trust that.
-    if (state.foundCustomer?.id) return;
-    // We are signed in to Firebase Auth but no customer doc is bound to the
-    // session. Give the legitimate login path a beat to bind, then probe.
-    await new Promise(r => setTimeout(r, 1200));
-    if (state.foundCustomer?.id) return;
-    tagLog('AUTH-VALIDATOR', `⚠️ orphan auth detected — uid=${user.uid} email=${user.email}, no customer doc bound. Signing out to force clean re-login.`);
-    try { await signOut(auth); } catch(_) {}
-    try {
-      ['ipear_rem', 'ipear_customer_cache', 'ipear_offline_card'].forEach(k => localStorage.removeItem(k));
-    } catch(_) {}
-    // Don't hard-reload — let the natural login flow surface. If the user
-    // truly has no doc, they'll see "Δεν βρέθηκε λογαριασμός" and can
-    // register fresh. If a doc exists with a different uid binding, the
-    // login path's migration logic will repair it on the next sign-in.
-  });
+  window._onAuthStateChanged = onAuthStateChanged;
 
   window._firebaseReady = true;
   window.dispatchEvent(new Event('firebase-ready'));
