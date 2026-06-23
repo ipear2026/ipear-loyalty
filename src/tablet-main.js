@@ -127,6 +127,12 @@ let _tabletRewards = _TABLET_REWARDS_FALLBACK.slice();
 
 async function _loadTabletRewards() {
   if (window.DEMO) { _tabletRewards = _TABLET_REWARDS_FALLBACK.slice(); return; }
+  // Bail out if not authenticated yet. The Firestore rule for ipear_rewards
+  // requires isAuth(), so an unauthenticated call at bootstrap throws
+  // permission-denied. The catch below swallows it, but the unhandled
+  // rejection flashes in the console + can confuse downstream listeners
+  // that watch onAuthStateChanged. Re-invoked from _completeTabletAuth().
+  if (!window._auth?.currentUser) return;
   try {
     const snap = await window._getDocs(
       window._query(window._col(window._db, 'ipear_rewards'), window._where('isActive', '==', true))
@@ -143,7 +149,9 @@ async function _loadTabletRewards() {
     _tabletRewards = _TABLET_REWARDS_FALLBACK.slice();
   }
 }
-_loadTabletRewards();
+// Don't auto-fire on module load — defer until _completeTabletAuth runs so
+// the call has an authenticated session. Otherwise: permission-denied at
+// bootstrap.
 
 // ── Brute-force protection ─────────────────────────────────────────────────
 let _tlAttempts = 0, _tlLockedUntil = 0;
@@ -193,9 +201,39 @@ async function _completeTabletAuth(user) {
   _tabletActorEmail = user?.email || null;
   _tabletStoreId = null; _tabletStoreName = '—';
 
-  const adminSnap = await window._getDoc(window._doc(window._db, 'ipear_admins', user.uid));
-  if (!adminSnap.exists()) throw new Error('not-admin');
-  _tabletStoreId = adminSnap.data()?.storeid || null;
+  // Tri-path admin gate — mirrors isAdmin() in firestore.rules:
+  //   (a) custom claim admin == true (set by syncAdminClaim cloud func)
+  //   (b) ipear_admins/{uid} doc exists (legacy whitelist, transitional)
+  //   (c) email allow-list rescue (admin@ipear.gr / tablet@ipear.gr /
+  //       ipear2026@gmail.com) — requires verified email.
+  // Without this, if the ipear_admins doc gets lost (as documented in
+  // firestore.rules:74) the tablet login throws "not-admin" even though
+  // the rules engine WOULD accept the user via path (a) or (c) for every
+  // subsequent read. That mismatch is exactly the 2026-06-22 outage class.
+  const TABLET_EMAIL_ALLOWLIST = ['admin@ipear.gr', 'tablet@ipear.gr', 'ipear2026@gmail.com'];
+  let isAdmin = false;
+  let adminDoc = null;
+  try {
+    const adminSnap = await window._getDoc(window._doc(window._db, 'ipear_admins', user.uid));
+    if (adminSnap.exists()) { isAdmin = true; adminDoc = adminSnap.data(); }
+  } catch (e) {
+    logger.warn('[tablet] ipear_admins read failed:', e?.code || e?.message);
+  }
+  if (!isAdmin) {
+    try {
+      const tok = await user.getIdTokenResult(true);
+      if (tok?.claims?.admin === true) isAdmin = true;
+    } catch (e) {
+      logger.warn('[tablet] getIdTokenResult failed:', e?.message);
+    }
+  }
+  if (!isAdmin && user.emailVerified === true && TABLET_EMAIL_ALLOWLIST.includes((user.email || '').toLowerCase())) {
+    logger.warn('[tablet] admin via email allow-list rescue path — recreate ipear_admins/' + user.uid + ' ASAP');
+    isAdmin = true;
+  }
+  if (!isAdmin) throw new Error('not-admin');
+
+  _tabletStoreId = adminDoc?.storeid || null;
   if (_tabletStoreId) {
     try {
       const storeSnap = await window._getDoc(window._doc(window._db, 'ipear_stores', _tabletStoreId));
@@ -207,6 +245,10 @@ async function _completeTabletAuth(user) {
   const passEl = document.getElementById('tl-pass'); if (passEl) passEl.value = '';
   _startMaintenanceListener();
   _startPendingOfferListener();
+  // Now that we have an authenticated admin context, load the reward catalog.
+  // Was previously fired at module load and hit permission-denied because no
+  // session existed before login.
+  _loadTabletRewards().catch(() => {});
 }
 
 // Silent auto-restore: skip the tablet-login screen if Firebase Auth has a
