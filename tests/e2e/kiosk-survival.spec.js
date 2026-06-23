@@ -154,6 +154,25 @@ const SURFACES = [
   { name: '/admin', path: '/admin' },
 ];
 
+// ─────────────────────────────────────────────────────────────────────────
+//  The suite is split into two test stages per surface:
+//
+//   • PRIMARY (always-on): "auth survives the validator window"
+//       — the actual 2026-06-23 regression check. Runs for ANY signed-in
+//         user; doesn't need admin status. This is the hard guard against
+//         the phantom auto-signOut bug ever returning.
+//
+//   • SECONDARY (admin-only): "admin-scoped Firestore read still allowed"
+//       — catches subtler regressions where auth survives but the rules
+//         engine stops recognising the user as admin (claim drift, doc
+//         removal, allow-list bug). Opt-in via TEST_ADMIN_CLAIMS_EXPECTED=1
+//         because the dedicated test account TEST_ADMIN_EMAIL was removed
+//         from the production allow-list in commit a089a6f for security.
+//         Sprint 2 backlog: seed a custom-claim admin for this account so
+//         the secondary assertion can return to "always-on".
+// ─────────────────────────────────────────────────────────────────────────
+const RUN_ADMIN_READ = process.env.TEST_ADMIN_CLAIMS_EXPECTED === '1';
+
 test.describe('Kiosk survival — auth persists past validator window', () => {
   test.beforeAll(() => {
     checkEnv();
@@ -197,7 +216,8 @@ test.describe('Kiosk survival — auth persists past validator window', () => {
       // fails this test instead of silently regressing.
       await page.waitForTimeout(SURVIVAL_WAIT_MS);
 
-      // ── 4. Auth state MUST still be live ───────────────────────────────
+      // ── 4. PRIMARY ASSERTION: auth state MUST still be live ───────────
+      // This is the core regression check for the 2026-06-23 outage.
       const afterWait = await readAuthState(page);
       expect(
         afterWait.signedIn,
@@ -208,20 +228,31 @@ test.describe('Kiosk survival — auth persists past validator window', () => {
       ).toBe(true);
       expect(afterWait.uid).toBe(beforeWait.uid);
 
-      // ── 5. Firestore read that requires isAdmin() must succeed ─────────
-      // Even if the user is still "signed in" but lost admin status (claim
-      // refresh failure, ipear_admins doc drift, etc.), the read here flips
-      // to permission-denied. Catches subtler regressions than just checking
-      // currentUser.
-      const readResult = await tryAdminScopedRead(page);
-      expect(
-        readResult.ok,
-        `Firestore admin-scoped read denied after wait — auth survived but ` +
-          `the rules engine no longer recognises this user as admin. ` +
-          `Code: ${readResult.code}. Message: ${readResult.message}. ` +
-          `Check firestore.rules isAdmin() paths + the test account's ` +
-          `admin claim / ipear_admins doc / allow-list status.`,
-      ).toBe(true);
+      // ── 5. SECONDARY ASSERTION (opt-in): Firestore admin read works ────
+      // Gated behind TEST_ADMIN_CLAIMS_EXPECTED=1 because the default test
+      // account (TEST_ADMIN_EMAIL=e2e@ipear.gr today) is intentionally NOT
+      // a real admin after the a089a6f security patch. Set the env var
+      // only when running with a properly-claimed admin account.
+      if (RUN_ADMIN_READ) {
+        const readResult = await tryAdminScopedRead(page);
+        expect(
+          readResult.ok,
+          `Firestore admin-scoped read denied after wait — auth survived but ` +
+            `the rules engine no longer recognises this user as admin. ` +
+            `Code: ${readResult.code}. Message: ${readResult.message}. ` +
+            `Check firestore.rules isAdmin() paths + the test account's ` +
+            `admin claim / ipear_admins doc / allow-list status.`,
+        ).toBe(true);
+      } else {
+        // Document in the test trail that we deliberately skipped the
+        // admin-read assertion. Makes audit logs explicit.
+        test.info().annotations.push({
+          type: 'note',
+          description:
+            'Admin-scoped Firestore read assertion skipped — set ' +
+            'TEST_ADMIN_CLAIMS_EXPECTED=1 with a real admin account to enable.',
+        });
+      }
     });
   }
 });
