@@ -111,7 +111,11 @@ function _playError() {
 if (window.DEMO) document.getElementById('tl-demo').style.display = 'block';
 let _maintenanceMode = false;
 let _maintenanceUnsub = null;
-_startMaintenanceListener();
+// Don't auto-fire on module load — the rule for settings/system requires
+// isAuth() so a pre-auth call would silently permission-deny + retry-loop
+// in the SDK. _completeTabletAuth (line ~246) and tabletLogin success path
+// (line ~478) both invoke this after sign-in. Same defer pattern as the
+// _loadTabletRewards fix (2026-06-23 audit).
 
 // ── Reward catalog (admin-managed via ipear_rewards) ────────────────────
 // The tablet reads the catalog once on bootstrap + on each customer
@@ -1394,6 +1398,12 @@ function _handleIncomingOffer(code, docId) {
 function _startMaintenanceListener() {
   if (_maintenanceUnsub || window.DEMO) return;
   const db = window._db; if (!db) return;
+  // Bail out if not authenticated yet. The Firestore rule for settings/system
+  // requires isAuth(), so an unauthenticated snapshot subscription throws
+  // permission-denied + can re-trigger via the SDK's auto-retry. Same
+  // anti-pattern that caused the 2026-06-23 _loadTabletRewards outage.
+  // Re-invoked from _completeTabletAuth() once the cashier is signed in.
+  if (!window._auth?.currentUser) return;
   try {
     const ref = window._doc(db, 'settings', 'system');
     _maintenanceUnsub = window._onSnapshot(ref, snap => {

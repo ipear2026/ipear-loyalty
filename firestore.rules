@@ -66,18 +66,24 @@ service cloud.firestore {
       // Tri-path admin check:
       //   (a) custom claim admin==true (canonical path post-syncAdminClaim)
       //   (b) ipear_admins/{uid} doc exists (legacy whitelist, transitional)
-      //   (c) hardcoded email allow-list — rescue + E2E test admin path.
-      //       The kiosk-survival spec signs in as TEST_ADMIN_EMAIL (the
-      //       e2e@ipear.gr account today) and reads ipear_customers to
-      //       verify the auth survives the 4.7s validator window. That
-      //       account is NOT a real human admin, so we don't want it in
-      //       ipear_admins (would skew dashboards). The allow-list path
-      //       gates by email so the test passes without polluting prod
-      //       admin state.
+      //   (c) hardcoded email allow-list rescue path — REQUIRES
+      //       email_verified == true. Without this gate any attacker can
+      //       register a fresh Firebase Auth account using one of these
+      //       emails (Firebase Auth does not own the email until verified)
+      //       and instantly become admin. Mirrors the verification model in
+      //       isVerifiedAuth() / ownsCustomer() (line 88).
+      //
+      // SECURITY HISTORY:
+      //   • 2026-06-23 audit (P0): the email_verified gate had been dropped
+      //     when e2e@ipear.gr was added to the list to unblock a Playwright
+      //     test. Both regressions reverted here. E2E admin coverage should
+      //     instead use a custom claim seeded by the test harness (path (a))
+      //     so production allow-list stays minimal + verified-only.
       return isAuth() && (
         request.auth.token.admin == true ||
         exists(/databases/$(database)/documents/ipear_admins/$(request.auth.uid)) ||
-        request.auth.token.email in ['admin@ipear.gr', 'tablet@ipear.gr', 'ipear2026@gmail.com', 'e2e@ipear.gr']
+        (request.auth.token.email_verified == true &&
+         request.auth.token.email in ['admin@ipear.gr', 'tablet@ipear.gr', 'ipear2026@gmail.com'])
       );
     }
 
