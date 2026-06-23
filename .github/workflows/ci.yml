@@ -118,13 +118,19 @@ jobs:
       - name: Audit
         run: npm audit --audit-level=high
 
-  # Golden-path E2E (Playwright). Runs ONLY after lint + unit tests pass —
-  # there is no point spinning up a chromium browser if the bundle won't even
-  # build. Skipped on forks (PRs from outside collaborators) because we can't
-  # expose the test secrets to untrusted code; for those we rely on the
-  # customer + functions jobs as the safety net.
+  # E2E (Playwright). Runs ONLY after lint + unit tests pass — there is no
+  # point spinning up a chromium browser if the bundle won't even build.
+  # Skipped on forks (PRs from outside collaborators) because we can't expose
+  # the test secrets to untrusted code; for those we rely on the customer +
+  # functions jobs as the safety net.
+  #
+  # Specs that run here (any tests/e2e/**.spec.js gets picked up by playwright):
+  #   • golden-path.spec.js     — customer login → reward redeem → ledger row
+  #   • kiosk-survival.spec.js  — cashier session survives the 4.7s validator
+  #                               window on /tablet AND /admin (regression
+  #                               coverage for the 2026-06-23 outage)
   e2e:
-    name: E2E (Golden Path)
+    name: E2E (Playwright)
     needs: customer
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -167,11 +173,19 @@ jobs:
         # a separate cache step.
         run: npx playwright install --with-deps chromium
 
-      - name: Run Golden Path
+      - name: Run E2E specs
         env:
+          # Golden-path customer flow
           TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
           TEST_PASS: ${{ secrets.E2E_TEST_PASS }}
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # Kiosk-survival admin/tablet flow — separate account from the
+          # customer above. MUST be admin via custom claim, ipear_admins doc,
+          # OR email allow-list rescue (see firestore.rules → isAdmin()).
+          # Add via: gh secret set TEST_ADMIN_EMAIL --body "tablet@ipear.gr"
+          #          gh secret set TEST_ADMIN_PASS  --body "<password>"
+          TEST_ADMIN_EMAIL: ${{ secrets.TEST_ADMIN_EMAIL }}
+          TEST_ADMIN_PASS: ${{ secrets.TEST_ADMIN_PASS }}
           # Optional. If the Firebase project has App Check enforcement on,
           # register a debug token (Firebase Console → App Check → Manage
           # debug tokens) and store it as this secret. The spec injects it
