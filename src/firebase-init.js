@@ -194,11 +194,35 @@ if (IS_DEMO) {
   };
 
   // ── Firebase App Check (reCAPTCHA v3) ────────────────────────────────
-  const _AC_KEY = import.meta.env.VITE_APP_CHECK_KEY ?? '6LeOaQotAAAAAHG1IozCb3crewOVRS412uT7K9FL';
-  try {
-    initializeAppCheck(app, { provider: new ReCaptchaV3Provider(_AC_KEY), isTokenAutoRefreshEnabled: true });
-    logger.log('[app-check] ✅ initialized');
-  } catch(e) { logger.warn('[app-check] init failed:', e.message); }
+  // Emergency kill-switch: 2026-06-23 the reCAPTCHA endpoint started
+  // returning 400 for this project's site key (likely domain
+  // registration issue in the reCAPTCHA admin console — to verify, check
+  // https://www.google.com/recaptcha/admin and confirm ipear-loyalty.pages.dev
+  // is in the allow-list for site key 6LeOaQot...). When App Check init
+  // fails OR the reCAPTCHA fetch fails, Firebase Auth's
+  // _getAppCheckToken() throws on every token refresh, which manifests
+  // as red errors in the console even though App Check enforcement on
+  // Firestore is OFF.
+  //
+  // Until reCAPTCHA is healthy: skip init when VITE_APP_CHECK_KEY is
+  // unset, looks like a placeholder, OR VITE_APP_CHECK_DISABLED=1.
+  // Re-enable by setting VITE_APP_CHECK_KEY to a working key and
+  // VITE_APP_CHECK_DISABLED=0 (or unsetting it). Firestore reads/writes
+  // are not gated on App Check at the rules level — the only protection
+  // we lose is the "monitor mode" telemetry until this is resolved.
+  const _AC_KEY = import.meta.env.VITE_APP_CHECK_KEY ?? '';
+  const _AC_DISABLED = String(import.meta.env.VITE_APP_CHECK_DISABLED ?? '').trim() === '1';
+  const _AC_KEY_LOOKS_REAL = _AC_KEY && _AC_KEY.length > 30 && !/X{4,}/.test(_AC_KEY);
+  if (_AC_DISABLED) {
+    logger.log('[app-check] ⏭️ skipped (VITE_APP_CHECK_DISABLED=1)');
+  } else if (!_AC_KEY_LOOKS_REAL) {
+    logger.log('[app-check] ⏭️ skipped (VITE_APP_CHECK_KEY missing or placeholder)');
+  } else {
+    try {
+      initializeAppCheck(app, { provider: new ReCaptchaV3Provider(_AC_KEY), isTokenAutoRefreshEnabled: true });
+      logger.log('[app-check] ✅ initialized');
+    } catch(e) { logger.warn('[app-check] init failed:', e.message); }
+  }
 
   // ── FCM Push Notifications ────────────────────────────────────────────
   let _messaging = null;
