@@ -99,18 +99,20 @@ test.describe('Golden path', () => {
   });
 
   // Per-attempt isolation: Playwright retries the test up to 2 times when it
-  // fails, which used to drift the customer's points (each attempt drained
-  // 1000, the cleanup refund raced with the snapshot listener, net leak per
-  // retry). Without re-isolation: by retry #2 the customer is at e.g. 299
-  // points and every assertion fails for unrelated reasons.
+  // fails. Each attempt's runTransaction drained 1000 pts and the cleanup
+  // refunded 1000 — *usually* the balance returns to 1500. But under flaky
+  // network / listener races on the customer page, the cleanup occasionally
+  // wrote against a stale snapshot and left the balance below 1500. By
+  // retry #2 the customer was at e.g. 299 → every assertion failed for
+  // unrelated reasons.
   //
-  // beforeEach guarantees a clean slate for every attempt:
-  //   1. Find the customer by email → uid (same as the seed script)
-  //   2. Hard-reset points to the seeded baseline (1500)
-  //   3. Wipe any pending/cancelled ipear_redemptions from previous attempts
-  //   4. Wipe leftover ipear_transactions rows the test wrote
-  //
-  // Idempotent + bounded — only touches docs owned by this test customer.
+  // Earlier we also deleted leftover ipear_redemptions docs here, but that
+  // caused a worse race: the customer's offline Firestore cache still held
+  // the deleted "pending" redemption, so the UI's _findExistingActivePending
+  // path served a stale 6-digit code on tap; the test then queried Firestore
+  // for that code and got `empty=true` (the doc was gone). The redemption
+  // cleanup INSIDE the test's `finally` block already handles the per-test
+  // lifecycle correctly; we just need to reset points here.
   test.beforeEach(async () => {
     const db = getFirestore();
     const auth = (await import('firebase-admin/auth')).getAuth();
@@ -122,33 +124,10 @@ test.describe('Golden path', () => {
       // First-ever run on a fresh project — let the test fail on login.
       return;
     }
-
-    // 1. Reset customer balance to the baseline.
     await db.collection('ipear_customers').doc(uid).set(
       { points: 1500, totalPoints: 1500, blocked: false },
       { merge: true },
     );
-
-    // 2. Drop leftover pending redemptions for this customer (race-safe;
-    //    the test creates fresh ones per attempt).
-    const reds = await db
-      .collection('ipear_redemptions')
-      .where('customerUid', '==', uid)
-      .get();
-    for (const d of reds.docs) {
-      try { await d.ref.delete(); } catch (_) {}
-    }
-
-    // 3. Drop leftover transactions tied to this customer (the test
-    //    writes deterministic ids like `e2e_verify_*` — also catches
-    //    refund rows from prior runs).
-    const txs = await db
-      .collection('ipear_transactions')
-      .where('customerUid', '==', uid)
-      .get();
-    for (const d of txs.docs) {
-      try { await d.ref.delete(); } catch (_) {}
-    }
   });
 
   test('customer redeems 5€ reward + sees it land live in history', async ({ page }) => {
