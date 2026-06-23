@@ -16,6 +16,12 @@ import {
 import { _t } from './i18n.js';
 import { _setPushUI, _syncPushState, _dismissPushOnboard, _acceptPushOnboard, registerServiceWorker } from './push-notifications.js';
 import './firebase-init.js';
+// Customer-only push handlers (window._enablePush / _disablePush / etc).
+// MUST be imported AFTER firebase-init.js so that window._messaging is
+// already exposed when customer-push.js's handlers run. Side-effect import:
+// the file binds window._* globals at module load. Never imported by
+// admin-main.js or tablet-main.js — push is a customer-flow concern.
+import './customer/customer-push.js';
 import {
   renderHomeRewards, renderRewardsList,
   startRewardsListener, stopRewardsListener, getActiveRewards,
