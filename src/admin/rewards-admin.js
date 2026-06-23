@@ -21,6 +21,76 @@ import { toast, closeM } from './ui.js';
 
 const DB = () => window._db;
 
+// ── Image upload / compression ─────────────────────────────────────────────
+// Mirrors offers.js — same 900px / JPEG 0.78 compression so the result
+// stays under Firestore's 1 MB doc limit.
+let _rewardPendingFile = null;
+
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 900;
+        let w = img.width;
+        let h = img.height;
+        if (w > MAX) {
+          h = Math.round((h * MAX) / w);
+          w = MAX;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.78));
+      };
+      img.onerror = reject;
+      img.src = ev.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+export function previewRewardImage(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    toast('⚠️ Η εικόνα δεν πρέπει να ξεπερνά 10MB', 'error');
+    return;
+  }
+  _rewardPendingFile = file;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    document.getElementById('rw-img-thumb').src = ev.target.result;
+    document.getElementById('rw-img-placeholder').style.display = 'none';
+    document.getElementById('rw-img-preview').style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+export function removeRewardImage(e) {
+  if (e) e.stopPropagation();
+  _rewardPendingFile = null;
+  document.getElementById('rw-imageUrl').value = '';
+  document.getElementById('rw-image-file').value = '';
+  document.getElementById('rw-img-thumb').src = '';
+  document.getElementById('rw-img-placeholder').style.display = '';
+  document.getElementById('rw-img-preview').style.display = 'none';
+}
+
+function showExistingRewardImg(url) {
+  if (url) {
+    document.getElementById('rw-img-thumb').src = url;
+    document.getElementById('rw-img-placeholder').style.display = 'none';
+    document.getElementById('rw-img-preview').style.display = 'block';
+    document.getElementById('rw-imageUrl').value = url;
+  } else {
+    removeRewardImage(null);
+  }
+}
+
 // ── Render list ────────────────────────────────────────────────────────────
 export async function loadRewards() {
   const db = DB();
@@ -76,6 +146,8 @@ export function openRewardModal() {
   document.getElementById('rw-discount').value = '5';
   document.getElementById('rw-order').value = '0';
   document.getElementById('rw-active').checked = true;
+  _rewardPendingFile = null;
+  removeRewardImage(null);
   document.getElementById('m-reward').classList.add('show');
 }
 
@@ -92,6 +164,8 @@ export async function openRewardEdit(id) {
   document.getElementById('rw-discount').value = Number(data.discount) || 0;
   document.getElementById('rw-order').value = Number(data.order) || 0;
   document.getElementById('rw-active').checked = !!data.isActive;
+  _rewardPendingFile = null;
+  showExistingRewardImg(data.imageUrl || '');
   document.getElementById('m-reward').classList.add('show');
 }
 
@@ -128,8 +202,16 @@ export async function saveReward() {
   }
 
   try {
+    let imageUrl = document.getElementById('rw-imageUrl').value || '';
+    if (_rewardPendingFile) {
+      if (btn) btn.textContent = '⏳ Συμπίεση εικόνας...';
+      imageUrl = await compressImage(_rewardPendingFile);
+      _rewardPendingFile = null;
+    }
+    const safeUrl = imageUrl && (imageUrl.startsWith('https://') || imageUrl.startsWith('data:image/')) ? imageUrl : '';
     const data = {
       icon: document.getElementById('rw-icon').value.trim() || '🎟️',
+      imageUrl: safeUrl,
       title,
       description: document.getElementById('rw-desc').value.trim() || '',
       cost,

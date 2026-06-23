@@ -51,6 +51,8 @@ import {
   saveReward,
   toggleReward,
   deleteReward,
+  previewRewardImage,
+  removeRewardImage,
 } from './admin/rewards-admin.js';
 import {
   initRedemptionVerify,
@@ -1828,6 +1830,8 @@ window.deleteReward = deleteReward;
 window.sendOfferPush = sendOfferPush;
 window.previewOfferImage = previewOfferImage;
 window.removeOfferImage = removeOfferImage;
+window.previewRewardImage = previewRewardImage;
+window.removeRewardImage = removeRewardImage;
 window.approveOffer = approveOffer;
 window.rejectOffer = rejectOffer;
 window.openDrillDown = openDrillDown;
@@ -1931,6 +1935,7 @@ document.addEventListener('keydown', (e) => {
 // Helpers for the few callers that used non-mechanical inline expressions.
 function _refreshStats() { loadStats(); loadAnalytics(); }
 function _removeOfferImageEvt(_arg, ev) { removeOfferImage(ev); }
+function _removeRewardImageEvt(_arg, ev) { removeRewardImage(ev); }
 function _togglePasswordVisibility(btn) {
   const i = document.getElementById('lock-in');
   if (!i || !btn) return;
@@ -1951,6 +1956,7 @@ function _focusElement(id) {
 }
 window._refreshStats = _refreshStats;
 window._removeOfferImageEvt = _removeOfferImageEvt;
+window._removeRewardImageEvt = _removeRewardImageEvt;
 window._togglePasswordVisibility = _togglePasswordVisibility;
 window._focusElement = _focusElement;
 

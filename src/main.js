@@ -30,7 +30,8 @@ import {
   loadHistory, loadHistoryMore,
   generateQR,
   openOfferSheet, closeOfferSheet, offerRedeemStep1, closeOfferConfirm,
-  offerGenerateQR, cancelOfferQR, offerGenerateEshopCoupon, _copyEshopCoupon,
+  offerGenerateQR, cancelOfferQR, minimizeOfferQR, restoreOfferQR, navigateOfferQR,
+  offerGenerateEshopCoupon, _copyEshopCoupon,
   _offerTick, _stopOfferRedeemWatch,
   copyReferral, shareReferral,
   _expandLeaderboard, _collapseLb, _toggleHistory
@@ -1853,6 +1854,9 @@ window.offerRedeemStep1 = offerRedeemStep1;
 window.closeOfferConfirm = closeOfferConfirm;
 window.offerGenerateQR = offerGenerateQR;
 window.cancelOfferQR = cancelOfferQR;
+window.minimizeOfferQR = minimizeOfferQR;
+window.restoreOfferQR = restoreOfferQR;
+window.navigateOfferQR = navigateOfferQR;
 window.offerGenerateEshopCoupon = offerGenerateEshopCoupon;
 window._copyEshopCoupon = _copyEshopCoupon;
 window.copyReferral = copyReferral;

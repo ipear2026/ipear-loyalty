@@ -177,7 +177,7 @@
 <!-- ── OFFER QR OVERLAY ── -->
 <div id="offer-qr-overlay" role="dialog" aria-modal="true" aria-label="QR κωδικός προσφοράς">
   <div class="ro-wrap">
-    <button class="ro-close" onclick="cancelOfferQR()" aria-label="Κλείσιμο">×</button>
+    <button class="ro-close" onclick="minimizeOfferQR()" aria-label="Ελαχιστοποίηση">×</button>
     <div class="ro-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
     <div class="oq-title" id="oq-title">Προσφορά</div>
     <div class="oq-sub" id="oq-sub">Δείξε το QR στον υπάλληλο</div>
@@ -196,6 +196,12 @@
       <div class="ro-timer" id="oq-timer" role="timer" aria-live="polite" aria-atomic="true">Λήγει σε 10:00</div>
     </div>
     <div class="ro-instruction">📲 Δείξε το QR ή τον κωδικό στον υπάλληλο<br>του καταστήματος iPear</div>
+
+    <div class="oq-pagination" id="oq-pagination" style="display:none">
+      <button class="oq-pag-btn" onclick="navigateOfferQR(-1)" aria-label="Προηγούμενη προσφορά">‹</button>
+      <span class="oq-pag-label" id="oq-pag-label">1 / 2</span>
+      <button class="oq-pag-btn" onclick="navigateOfferQR(1)" aria-label="Επόμενη προσφορά">›</button>
+    </div>
 
     <button class="ro-cancel" onclick="cancelOfferQR()">Ακύρωση</button>
   </div>
@@ -643,6 +649,19 @@
     </div>
 
   </div><!-- /app-body -->
+
+  <!-- ACTIVE OFFER FLOATING BAR -->
+  <div id="active-offer-bar" class="active-offer-bar" style="display:none" role="button" tabindex="0" onclick="restoreOfferQR()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();restoreOfferQR()}" aria-label="Δείτε ενεργές προσφορές">
+    <div class="aob-left">
+      <span class="aob-dot"></span>
+      <span class="aob-text">Δείτε ενεργές προσφορές</span>
+      <span class="aob-badge" id="aob-badge" style="display:none">2</span>
+    </div>
+    <div class="aob-right">
+      <span class="aob-timer" id="aob-timer">05:00</span>
+      <span class="aob-chevron">›</span>
+    </div>
+  </div>
 
   <!-- BOTTOM NAV -->
   <nav class="bottom-nav" aria-label="Κύρια πλοήγηση">

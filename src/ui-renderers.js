@@ -148,8 +148,13 @@ export function renderHomeRewards(pts) {
     const label = _rewardLabel(r);
     const safeLabel = esc(label).replace(/'/g, '&#39;');
     const safeId = esc(String(r.id || '')).replace(/'/g, '&#39;');
+    const _riu = typeof r.imageUrl === 'string' ? r.imageUrl : '';
+    const rwSafeImg = (_riu && (_riu.startsWith('https://') || _riu.startsWith('data:image/'))) ? _riu : '';
+    const rwImgHtml = rwSafeImg
+      ? _safeImgTag('rw-img', rwSafeImg, r.icon || '🎟️')
+      : `<div class="rw-emoji-only">${esc(r.icon || '🎟️')}</div>`;
     return `<div class="rw-card ${ok ? 'unlocked' : 'locked'}" ${ok ? `role="button" tabindex="0" onclick="startRedemption('${safeId}','${safeLabel}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();startRedemption('${safeId}','${safeLabel}')}" aria-label="${esc(label)} — ${cost} ${_t('points')}"` : ' aria-disabled="true"'}>
-      <div class="rw-emoji-area">${esc(r.icon || '🎟️')}</div>
+      <div class="rw-emoji-area">${rwImgHtml}</div>
       <div class="rw-body">
         <div class="rw-pts-badge">${cost} ${_t('points')}</div>
         <div class="rw-label">${esc(label)}</div>
@@ -178,8 +183,13 @@ export function renderRewardsList(pts) {
     const safeId = esc(String(r.id || '')).replace(/'/g, '&#39;');
     const prev = Number(_activeRewards[i - 1]?.cost) || 0;
     const pct = ok ? 100 : Math.max(0, Math.min(100, Math.round(((pts - prev) / Math.max(1, cost - prev)) * 100)));
+    const _rfiu = typeof r.imageUrl === 'string' ? r.imageUrl : '';
+    const rwfSafeImg = (_rfiu && (_rfiu.startsWith('https://') || _rfiu.startsWith('data:image/'))) ? _rfiu : '';
+    const rwfIconHtml = rwfSafeImg
+      ? _safeImgTag('rw-full-img', rwfSafeImg, r.icon || '🎟️')
+      : esc(r.icon || '🎟️');
     return `<div class="rw-full-card ${ok ? 'ok' : ''}" ${ok ? `role="button" tabindex="0" onclick="startRedemption('${safeId}','${safeLabel}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();startRedemption('${safeId}','${safeLabel}')}" aria-label="${esc(label)} — ${cost} ${_t('points')}"` : ' aria-disabled="true"'}>
-      <div class="rw-full-icon">${esc(r.icon || '🎟️')}</div>
+      <div class="rw-full-icon">${rwfIconHtml}</div>
       <div class="rw-full-body">
         <div class="rw-full-label">${esc(label)}</div>
         <div class="rw-full-pts">${cost} ${_t('points')}${ok ? '' : ' · ' + _t('rw_need') + ' ' + (cost - pts) + ' ' + _t('rw_more')}</div>
@@ -659,8 +669,138 @@ export function closeOfferConfirm() {
   _offerToRedeem = null;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+//  Multi-offer queue
+//
+//  Each entry: { offer, code, expires (Date), docId, unsub }
+//  Customer can generate multiple concurrent offer QRs and toggle between
+//  them with the < 1/N > pagination at the bottom of the overlay. The
+//  floating bar shows the badge count + the soonest-expiring countdown.
+//
+//  Single shared interval ticks every 500 ms — iterates the queue, expires
+//  individual entries (with their watchers) and re-renders the modal +
+//  bar. When the queue empties, the interval stops.
+// ══════════════════════════════════════════════════════════════════════════
+let _offerQueue = [];
+let _currentOfferIdx = 0;
 let _offerQRBusy = false;
-let _activeOfferRedemptionId = null;
+let _offerBarMinimized = false;
+
+function _activeOfferEntry() { return _offerQueue[_currentOfferIdx] || null; }
+function _findOfferEntryByDocId(docId) { return _offerQueue.findIndex(e => e.docId === docId); }
+
+function _renderCurrentOfferQR() {
+  const entry = _activeOfferEntry();
+  if (!entry) return;
+  const o = entry.offer;
+  const bp = _offerBonus(o);
+
+  document.getElementById('oq-title').textContent = o.title || '';
+  document.getElementById('oq-sub').textContent = bp ? `+${bp} bonus πόντοι` : 'Προσφορά';
+  document.getElementById('oq-code').textContent = entry.code.slice(0,3) + ' ' + entry.code.slice(3);
+
+  const qrEl = document.getElementById('oq-qr');
+  qrEl.innerHTML = '';
+  try {
+    new QRCode(qrEl, {
+      text: 'IPEAR-OFFER:' + entry.code,
+      width: 180, height: 180,
+      colorDark: '#111111', colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  } catch(qe) { logger.warn('Offer QR gen error:', qe); }
+
+  const pag = document.getElementById('oq-pagination');
+  if (pag) {
+    if (_offerQueue.length > 1) {
+      pag.style.display = 'flex';
+      document.getElementById('oq-pag-label').textContent = `${_currentOfferIdx + 1} / ${_offerQueue.length}`;
+    } else {
+      pag.style.display = 'none';
+    }
+  }
+}
+
+export function navigateOfferQR(delta) {
+  if (_offerQueue.length < 2) return;
+  _currentOfferIdx = (_currentOfferIdx + delta + _offerQueue.length) % _offerQueue.length;
+  _renderCurrentOfferQR();
+  const overlay = document.getElementById('offer-qr-overlay');
+  if (overlay) overlay.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; l.offsetHeight; l.style.animation = ''; });
+}
+
+function _removeOfferEntry(idx, opts = {}) {
+  if (idx < 0 || idx >= _offerQueue.length) return;
+  const entry = _offerQueue[idx];
+  if (entry.unsub) { try { entry.unsub(); } catch(_) {} entry.unsub = null; }
+  _offerQueue.splice(idx, 1);
+  if (_currentOfferIdx >= _offerQueue.length) {
+    _currentOfferIdx = Math.max(0, _offerQueue.length - 1);
+  }
+  if (_offerQueue.length === 0) {
+    clearInterval(_offerQRTimer);
+    _offerQRTimer = null;
+    _offerBarMinimized = false;
+    _hideOfferBar();
+    const overlay = document.getElementById('offer-qr-overlay');
+    if (overlay && overlay.style.display !== 'none') {
+      overlay.style.display = 'none';
+      overlay.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; l.offsetHeight; l.style.animation = ''; });
+      _releaseFocus();
+    }
+  } else {
+    const overlayShown = document.getElementById('offer-qr-overlay')?.style.display !== 'none';
+    if (overlayShown) _renderCurrentOfferQR();
+    _updateOfferBar();
+  }
+  if (opts.deleteDoc && entry.docId && !window.DEMO) {
+    (async () => {
+      try {
+        await window._deleteDoc(window._doc(window._db, 'ipear_offer_redemptions', entry.docId));
+      } catch(e) {
+        try {
+          await window._updateDoc(window._doc(window._db, 'ipear_offer_redemptions', entry.docId), {
+            status: 'cancelled', cancelledAt: new Date().toISOString(), cancelReason: 'user-cancelled'
+          });
+        } catch(_) {}
+      }
+    })();
+  }
+}
+
+function _watchOfferRedemptionDoc(entry) {
+  if (!entry.docId || window.DEMO) return;
+  try {
+    const ref = window._doc(window._db, 'ipear_offer_redemptions', entry.docId);
+    entry.unsub = window._onSnapshot(ref, snap => {
+      const idx = _findOfferEntryByDocId(entry.docId);
+      if (idx < 0) return;
+      if (!snap.exists()) {
+        _removeOfferEntry(idx);
+        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα', 'red');
+        return;
+      }
+      const d = snap.data();
+      if (d.status === 'rejected' || d.status === 'cancelled') {
+        _removeOfferEntry(idx);
+        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα', 'red');
+        return;
+      }
+      if (d.used === true || d.status === 'approved' || d.status === 'used') {
+        _removeOfferEntry(idx);
+        const bp = d.bonusPoints || 0;
+        showToast('✅ Προσφορά εγκρίθηκε' + (bp > 0 ? ' · +' + bp + ' πόντοι' : ''), 'green');
+        _haptic('success');
+        setTimeout(() => _fireConfetti({ particleCount: 150, spread: 100 }), 200);
+      }
+    });
+  } catch(e) { logger.warn('[offer-redeem-watch]', e); }
+}
+
+// Kept as an exported no-op so main.js's imported reference still resolves
+// — the per-entry watcher unsub is now handled inside _removeOfferEntry.
+export function _stopOfferRedeemWatch() {}
+
 export async function offerGenerateQR() {
   if (_offerQRBusy) return;
   _offerQRBusy = true;
@@ -668,9 +808,15 @@ export async function offerGenerateQR() {
   const o = _offerToRedeem;
   if (!o || !state.foundCustomer) { showToast('⚠️ Κάτι πήγε στραβά. Δοκίμασε ξανά'); _offerQRBusy = false; return; }
 
+  if (_offerQueue.some(e => (e.offer.id || e.offer.title) === (o.id || o.title))) {
+    showToast('Ήδη έχεις ενεργό QR για αυτή την προσφορά', 'warn');
+    _offerQRBusy = false;
+    _offerToRedeem = null;
+    return;
+  }
+
   const now = new Date();
   const expires = new Date(now.getTime() + 5*60*1000);
-
   const _oRnd = new Uint32Array(1); crypto.getRandomValues(_oRnd);
   const code = String(100000 + (_oRnd[0] % 900000));
 
@@ -686,28 +832,23 @@ export async function offerGenerateQR() {
     catch (e) { logger.warn('[migrate-uid] failed:', e?.code || e?.message || e); }
   }
 
-  const bp = _offerBonus(o);
+  const entry = { offer: o, code, expires, docId: null, unsub: null };
+  _offerQueue.push(entry);
+  _currentOfferIdx = _offerQueue.length - 1;
 
-  document.getElementById('oq-title').textContent = o.title;
-  document.getElementById('oq-sub').textContent = bp ? `+${bp} bonus πόντοι` : 'Προσφορά';
-  document.getElementById('oq-code').textContent = code.slice(0,3) + ' ' + code.slice(3);
   const _oqOverlay = document.getElementById('offer-qr-overlay');
-  _oqOverlay.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; l.offsetHeight; l.style.animation = ''; });
   _oqOverlay.style.display = 'flex';
-  _trapFocus(document.getElementById('offer-qr-overlay'));
+  _renderCurrentOfferQR();
+  _oqOverlay.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; l.offsetHeight; l.style.animation = ''; });
+  _trapFocus(_oqOverlay);
 
-  const qrEl = document.getElementById('oq-qr');
-  qrEl.innerHTML = '';
-  try {
-    new QRCode(qrEl, {
-      text: 'IPEAR-OFFER:' + code,
-      width: 180, height: 180,
-      colorDark: '#111111', colorLight: '#ffffff',
-      correctLevel: QRCode.CorrectLevel.M
-    });
-  } catch(qe) { logger.warn('Offer QR gen error:', qe); }
+  _offerBarMinimized = false;
+  _hideOfferBar();
 
-  _startOfferCountdown(expires);
+  if (!_offerQRTimer) {
+    _offerTick();
+    _offerQRTimer = setInterval(_offerTick, 500);
+  }
 
   try {
     const offerDocRef = await window._addDoc(window._col(window._db, 'ipear_offer_redemptions'), {
@@ -727,12 +868,12 @@ export async function offerGenerateQR() {
       createdAtTs: now,
       expiresAtTs: expires
     });
-    _activeOfferRedemptionId = offerDocRef.id;
-    _watchOfferRedemptionDoc(offerDocRef.id);
+    entry.docId = offerDocRef.id;
+    _watchOfferRedemptionDoc(entry);
   } catch(e) {
     logger.error('[offer-save] ERROR:', e?.code, e?.message, 'foundCustomer.id:', state.foundCustomer?.id, 'authUid:', authUid);
-    clearInterval(_offerQRTimer);
-    document.getElementById('offer-qr-overlay').style.display = 'none';
+    const idx = _offerQueue.indexOf(entry);
+    if (idx >= 0) _removeOfferEntry(idx);
     showToast('⚠️ Κάτι πήγε στραβά. Δοκίμασε ξανά', 'error');
   } finally {
     _offerQRBusy = false;
@@ -740,111 +881,124 @@ export async function offerGenerateQR() {
   }
 }
 
-let _offerExpires = null;
-
 export function _offerTick() {
-  const dot = document.getElementById('oq-dot'), tmr = document.getElementById('oq-timer');
-  if (!_offerExpires || !tmr) return;
-  const rem = _offerExpires - Date.now();
-  if (rem <= 0) {
+  const now = Date.now();
+  let modalNeedsRerender = false;
+
+  for (let i = _offerQueue.length - 1; i >= 0; i--) {
+    const entry = _offerQueue[i];
+    if (entry.expires.getTime() - now <= 0) {
+      const wasCurrent = (i === _currentOfferIdx);
+      if (entry.unsub) { try { entry.unsub(); } catch(_) {} entry.unsub = null; }
+      _offerQueue.splice(i, 1);
+      if (_currentOfferIdx >= _offerQueue.length) _currentOfferIdx = Math.max(0, _offerQueue.length - 1);
+      if (wasCurrent) modalNeedsRerender = true;
+      showToast(`⏰ Κωδικός "${entry.offer.title || 'προσφοράς'}" έληξε`, 'warn');
+      if (entry.docId && !window.DEMO) {
+        window._deleteDoc(window._doc(window._db, 'ipear_offer_redemptions', entry.docId)).catch(() => {});
+      }
+    }
+  }
+
+  if (_offerQueue.length === 0) {
     clearInterval(_offerQRTimer);
-    _offerExpires = null;
-    _stopOfferRedeemWatch();
-    _offerQRBusy = false;
-    _activeOfferRedemptionId = null;
-    tmr.textContent = '⏰ Το QR έληξε';
-    tmr.className = 'ro-timer exp';
-    if (dot) dot.style.background = '#ff3b30';
-    tmr.setAttribute('aria-live', 'assertive');
-    setTimeout(() => {
-      document.getElementById('offer-qr-overlay').style.display = 'none';
-      showToast('⏰ Ο κωδικός έληξε. Δοκίμασε ξανά', 'warn');
-    }, 2000);
+    _offerQRTimer = null;
+    _offerBarMinimized = false;
+    _hideOfferBar();
+    const overlay = document.getElementById('offer-qr-overlay');
+    if (overlay && overlay.style.display !== 'none') {
+      overlay.style.display = 'none';
+      _releaseFocus();
+    }
     return;
   }
-  const m = Math.floor(rem / 60000), s = Math.floor((rem % 60000) / 1000);
-  tmr.textContent = `Λήγει σε ${m}:${String(s).padStart(2,'0')}`;
-  tmr.className = 'ro-timer' + (rem < 60000 ? ' warn' : '');
-  if (dot) dot.style.background = rem < 60000 ? '#ff9500' : 'var(--g)';
+
+  const current = _activeOfferEntry();
+  if (current) {
+    const rem = current.expires.getTime() - now;
+    const tmr = document.getElementById('oq-timer');
+    const dot = document.getElementById('oq-dot');
+    if (tmr) {
+      const m = Math.floor(rem / 60000), s = Math.floor((rem % 60000) / 1000);
+      tmr.textContent = `Λήγει σε ${m}:${String(s).padStart(2,'0')}`;
+      tmr.className = 'ro-timer' + (rem < 60000 ? ' warn' : '');
+    }
+    if (dot) dot.style.background = rem < 60000 ? '#ff9500' : 'var(--g)';
+  }
+
+  if (modalNeedsRerender && document.getElementById('offer-qr-overlay')?.style.display !== 'none') {
+    _renderCurrentOfferQR();
+  }
+
+  _updateOfferBar();
 }
 
-function _startOfferCountdown(expires) {
-  clearInterval(_offerQRTimer);
-  _offerExpires = expires;
-  _offerTick();
-  _offerQRTimer = setInterval(_offerTick, 500);
+export function minimizeOfferQR() {
+  if (_offerQueue.length === 0) return;
+  _offerBarMinimized = true;
+  const overlay = document.getElementById('offer-qr-overlay');
+  overlay.style.display = 'none';
+  overlay.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; });
+  _releaseFocus();
+  const bar = document.getElementById('active-offer-bar');
+  if (bar) {
+    bar.style.display = 'flex';
+    bar.classList.remove('hiding');
+    _updateOfferBar();
+  }
+  _trackEvent('offer_minimized');
 }
 
-let _offerRedeemUnsub = null;
-export function _stopOfferRedeemWatch() {
-  if (_offerRedeemUnsub) { try { _offerRedeemUnsub(); } catch(_){} _offerRedeemUnsub = null; }
+export function restoreOfferQR() {
+  if (_offerQueue.length === 0) return;
+  _offerBarMinimized = false;
+  _hideOfferBar();
+  _renderCurrentOfferQR();
+  const overlay = document.getElementById('offer-qr-overlay');
+  overlay.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; l.offsetHeight; l.style.animation = ''; });
+  overlay.style.display = 'flex';
+  _trapFocus(overlay);
+  _trackEvent('offer_restored');
 }
-function _watchOfferRedemptionDoc(docId) {
-  _stopOfferRedeemWatch();
-  if (!docId || window.DEMO) return;
-  try {
-    const ref = window._doc(window._db, 'ipear_offer_redemptions', docId);
-    _offerRedeemUnsub = window._onSnapshot(ref, snap => {
-      if (!snap.exists()) {
-        _stopOfferRedeemWatch();
-        clearInterval(_offerQRTimer);
-        _offerQRBusy = false;
-        _activeOfferRedemptionId = null;
-        document.getElementById('offer-qr-overlay').style.display = 'none';
-        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα', 'red');
-        return;
-      }
-      const d = snap.data();
-      if (d.status === 'rejected' || d.status === 'cancelled') {
-        _stopOfferRedeemWatch();
-        clearInterval(_offerQRTimer);
-        _offerQRBusy = false;
-        _activeOfferRedemptionId = null;
-        document.getElementById('offer-qr-overlay').style.display = 'none';
-        showToast('Η εξαργύρωση ακυρώθηκε από το κατάστημα', 'red');
-        return;
-      }
-      if (d.used === true || d.status === 'approved' || d.status === 'used') {
-        _stopOfferRedeemWatch();
-        clearInterval(_offerQRTimer);
-        _offerQRBusy = false;
-        _activeOfferRedemptionId = null;
-        document.getElementById('offer-qr-overlay').style.display = 'none';
-        const bp = d.bonusPoints || 0;
-        showToast('✅ Προσφορά εγκρίθηκε' + (bp > 0 ? ' · +' + bp + ' πόντοι' : ''), 'green');
-        _haptic('success');
-        setTimeout(() => _fireConfetti({ particleCount: 150, spread: 100 }), 200);
-      }
-    });
-  } catch(e) { logger.warn('[offer-redeem-watch]', e); }
+
+function _hideOfferBar() {
+  const bar = document.getElementById('active-offer-bar');
+  if (!bar || bar.style.display === 'none') return;
+  bar.classList.add('hiding');
+  setTimeout(() => { bar.style.display = 'none'; bar.classList.remove('hiding'); }, 260);
+}
+
+function _updateOfferBar() {
+  if (_offerQueue.length === 0) return;
+  // Show countdown for the soonest-expiring entry (most urgent)
+  const soonest = _offerQueue.reduce(
+    (best, e) => e.expires.getTime() < best.expires.getTime() ? e : best,
+    _offerQueue[0]
+  );
+  const rem = soonest.expires.getTime() - Date.now();
+  if (rem <= 0) return;
+  const tmrEl = document.getElementById('aob-timer');
+  if (tmrEl) {
+    const m = Math.floor(rem / 60000), s = Math.floor((rem % 60000) / 1000);
+    tmrEl.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    tmrEl.className = 'aob-timer' + (rem < 60000 ? ' warn' : '');
+  }
+  const badge = document.getElementById('aob-badge');
+  if (badge) {
+    if (_offerQueue.length > 1) {
+      badge.style.display = 'inline-flex';
+      badge.textContent = String(_offerQueue.length);
+    } else {
+      badge.style.display = 'none';
+    }
+  }
 }
 
 export async function cancelOfferQR() {
-  clearInterval(_offerQRTimer);
-  _stopOfferRedeemWatch();
-  _offerQRBusy = false;
-  _offerExpires = null;
-  const _oqr = document.getElementById('offer-qr-overlay');
-  _oqr.style.display = 'none';
-  _oqr.querySelectorAll('.ro-laser').forEach(l => { l.style.animation = 'none'; l.offsetHeight; l.style.animation = ''; });
-  _releaseFocus();
-  if (_activeOfferRedemptionId && !window.DEMO) {
-    const docId = _activeOfferRedemptionId;
-    _activeOfferRedemptionId = null;
-    try {
-      await window._deleteDoc(window._doc(window._db, 'ipear_offer_redemptions', docId));
-      logger.log('[offer-cancel] deleted offer redemption doc:', docId);
-    } catch(e) {
-      logger.warn('[offer-cancel] delete failed, falling back to status update:', e.message);
-      try {
-        await window._updateDoc(window._doc(window._db, 'ipear_offer_redemptions', docId), {
-          status: 'cancelled', cancelledAt: new Date().toISOString(), cancelReason: 'user-cancelled'
-        });
-      } catch(_) {}
-    }
-  } else {
-    _activeOfferRedemptionId = null;
-  }
+  const entry = _activeOfferEntry();
+  if (!entry) return;
+  _trackEvent('offer_cancelled_qr');
+  _removeOfferEntry(_currentOfferIdx, { deleteDoc: true });
 }
 
 // ════════════════════════════════════════

@@ -1026,6 +1026,19 @@
       <div class="fg"><label>Τίτλος *</label><input type="text" id="rw-title" placeholder="π.χ. 5€ Έκπτωση"></div>
     </div>
     <div class="fg"><label>Περιγραφή</label><textarea id="rw-desc" rows="2" placeholder="π.χ. Εξαργύρωσε πόντους για άμεση έκπτωση"></textarea></div>
+    <div class="fg">
+      <label>Φωτογραφία <span style="font-weight:400;color:var(--gray)">(προαιρετικό — αλλιώς εμφανίζεται το εικονίδιο)</span></label>
+      <input type="hidden" id="rw-imageUrl">
+      <input type="file" id="rw-image-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" data-on-change="call:previewRewardImage:event">
+      <div id="rw-img-area" data-click-target="rw-image-file" style="border:2px dashed var(--border);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:border-color .2s;position:relative" data-on-mouseover="hover-green" data-on-mouseout="hover-default">
+        <div id="rw-img-placeholder" style="color:var(--gray);font-size:.88rem">📷 Κλικ για επιλογή φωτογραφίας</div>
+        <div id="rw-img-preview" style="display:none">
+          <img id="rw-img-thumb" style="max-height:130px;max-width:100%;border-radius:9px;object-fit:cover;display:block;margin:0 auto">
+          <button data-action="_removeRewardImageEvt" data-pass-event="1" style="margin-top:8px;background:#fee2e2;color:#dc2626;border:none;border-radius:7px;padding:4px 12px;font-size:.78rem;font-weight:700;cursor:pointer;font-family:inherit">✕ Αφαίρεση</button>
+        </div>
+      </div>
+      <div style="font-size:.72rem;color:var(--gray);margin-top:5px">JPG / PNG / WebP · μέγιστο 10MB · αποθηκεύεται αυτόματα (συμπιεσμένο) στη βάση σου</div>
+    </div>
     <div class="form-row">
       <div class="fg"><label>Κόστος (πόντοι) *</label><input type="number" id="rw-cost" min="1" step="100" value="1000"></div>
       <div class="fg"><label>Έκπτωση (€) *</label><input type="number" id="rw-discount" min="0" step="1" value="5"></div>
