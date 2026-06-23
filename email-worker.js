@@ -57,9 +57,15 @@ const _rateBuckets = new Map();
 const REFERRAL_RATE_MAX = 3;
 const _referralBuckets = new Map();
 
-const REDEEM_FAIL_LIMIT = 5;
-const REDEEM_BLOCK_TTL_SECONDS = 15 * 60; // block for 15 minutes
-const REDEEM_FAIL_TTL_SECONDS = 15 * 60;  // keep the fail counter for 15 minutes
+// Tightened 2026-06-24 (Pen-Test Fix #2): 3 failed attempts → 30-min lockout.
+// Rationale: 6-digit codes have ~20 bits of entropy. The previous 5-fail /
+// 15-min window left a theoretical brute-force budget of ~20 attempts/hour
+// after rotation. 3 / 30-min cuts that to ~6/hour, well below the rate
+// needed to enumerate a meaningful slice of the 900K code space before
+// codes naturally expire (5-min TTL on each pending code).
+const REDEEM_FAIL_LIMIT = 3;
+const REDEEM_BLOCK_TTL_SECONDS = 30 * 60; // block for 30 minutes
+const REDEEM_FAIL_TTL_SECONDS = 30 * 60;  // keep the fail counter for 30 minutes
 // REDEEM_FAIL_KEY_PREFIX / REDEEM_BLOCK_KEY_PREFIX imported from worker/lib/redeem-keys.js
 
 function _isRateLimited(ip) {

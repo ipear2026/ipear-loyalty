@@ -284,20 +284,32 @@ export async function confirmOfferVerify(redemptionId) {
       if (!redSnap.exists()) throw new Error('Κωδικός δεν βρέθηκε.');
       found = redSnap.data();
       if (found.used) throw new Error('Ήδη χρησιμοποιημένος.');
+      if (found.status === 'cancelled' || found.status === 'rejected') {
+        throw new Error('⚠️ Άκυρος κωδικός ή έχει λήξει.');
+      }
+      if (found.expiresAt && new Date() > new Date(found.expiresAt)) {
+        throw new Error('⚠️ Ο κωδικός έληξε.');
+      }
 
-      // SECURITY: bonus read from OFFER DOC (trusted), not redemption doc.
+      // SECURITY (Pen-Test Fix #1): bonus read from OFFER DOC (trusted)
+      // INSIDE the txn — was previously a getDocs(query(active==true))
+      // OUTSIDE the txn, which left a race window where an admin could
+      // disable the offer between the lookup and the credit-write.
+      //
+      // txn.get on the offer doc serialises the read with the rest of the
+      // commit so a concurrent admin disable forces a txn retry that picks
+      // up the new active==false state and rejects the credit.
       const offerId = found.offerId;
       let offerBonus = 0;
       if (offerId) {
-        const offersSnap = await window._getDocs(
-          window._query(window._col(db, 'ipear_offers'), window._where('active', '==', true))
-        );
-        offersSnap.forEach((d) => {
-          if (d.id === offerId || d.data().title === offerId) {
-            offerBonus =
-              Number(d.data().bonusPoints) || Number(d.data().pointsCost) || 0;
-          }
-        });
+        const offerRef = window._doc(db, 'ipear_offers', offerId);
+        const offerSnap = await txn.get(offerRef);
+        if (offerSnap.exists() && offerSnap.data().active === true) {
+          const offerData = offerSnap.data();
+          offerBonus = Number(offerData.bonusPoints) || Number(offerData.pointsCost) || 0;
+        } else {
+          throw new Error('Η προσφορά δεν είναι πλέον ενεργή.');
+        }
       }
 
       // Try customerId (auth UID) first, fallback to customerDocId (legacy).
