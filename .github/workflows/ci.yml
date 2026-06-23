@@ -166,6 +166,19 @@ jobs:
           VITE_APP_CHECK_KEY=${{ secrets.VITE_APP_CHECK_KEY }}
           EOF
 
+      - name: Seed E2E test customer + reward
+        # Resets the e2e@ipear.gr customer doc to a known-good baseline
+        # (points=1500, balance/totalPoints in sync) so the golden-path
+        # debit-1000 → expect 500 assertion is stable across CI runs that
+        # share live Firestore state. Without this, a previous failed run
+        # leaves the customer at e.g. 299 points and every subsequent run
+        # hits "insufficient points". Also upserts the dummy reward the
+        # spec exercises. Idempotent.
+        env:
+          TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: npm run e2e:seed
+
       - name: Install Playwright browsers (chromium only)
         # --with-deps installs the OS-level packages chromium needs on Ubuntu.
         # Cache hit is automatic via setup-node's npm cache for the browsers
