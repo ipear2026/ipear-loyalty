@@ -1766,6 +1766,44 @@ if (window._firebaseReady) {
   _handleFirebaseReady();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  CUSTOMER-ORPHAN AUTH VALIDATOR (was: firebase-init.js)
+//
+//  Watches for the failure mode where Firebase Auth has a user but main.js
+//  has no state.foundCustomer.id bound to the session — typically a stale
+//  IndexedDB session after a uid migration / account anonymisation, or a
+//  signup that crashed mid-flow before the customer doc was created. Logs
+//  the user out so the next session starts clean (legitimate logins land in
+//  state.foundCustomer within the 1.2s grace window below).
+//
+//  ⚠ CRITICAL: this validator MUST stay in main.js, not firebase-init.js.
+//  firebase-init.js is shared by admin-main.js and tablet-main.js where
+//  state.foundCustomer is intentionally never bound — relocating this back
+//  to shared init re-introduces the 2026-06-23 outage (4.7s post-login
+//  auto-logout on cashier surfaces). Coverage: tests/e2e/kiosk-survival.spec.js.
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  let _bootstrapDone = false;
+  // Give the autoLogin path 3.5s to do its thing before we start patrolling.
+  setTimeout(() => { _bootstrapDone = true; }, 3500);
+  // window._onAuthStateChanged + window._auth are populated by firebase-init.js
+  // before main.js body runs (top-level await), so this subscription is safe.
+  if (window._onAuthStateChanged && window._auth) {
+    window._onAuthStateChanged(window._auth, async (user) => {
+      if (!_bootstrapDone) return;
+      if (!user) return;
+      if (state.foundCustomer?.id) return;
+      await new Promise((r) => setTimeout(r, 1200));
+      if (state.foundCustomer?.id) return;
+      tagLog('AUTH-VALIDATOR', `⚠️ orphan auth detected — uid=${user.uid} email=${user.email}, no customer doc bound. Signing out to force clean re-login.`);
+      try { await window._signOut(); } catch (_) {}
+      try {
+        ['ipear_rem', 'ipear_customer_cache', 'ipear_offline_card'].forEach((k) => localStorage.removeItem(k));
+      } catch (_) {}
+    });
+  }
+}
+
 // Fallback: if firebase-ready hasn't arrived after 4s (e.g. ad-blocker delays), show login
 setTimeout(() => { if (!_handleFirebaseReady._done) _showLogin(); }, 4000);
 window.addEventListener('pageshow', (e) => { if (e.persisted && !_handleFirebaseReady._done) _showLogin(); });

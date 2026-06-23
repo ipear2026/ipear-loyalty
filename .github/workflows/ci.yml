@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, 'refactor/**', 'feat/**', 'fix/**']
+    branches: [main, 'refactor/**', 'feat/**', 'fix/**', 'chore/**']
   pull_request:
-    branches: [main]
+    branches: [main, 'refactor/**']
 
 # Cancel superseded runs on the same branch — saves CI minutes when
 # you push multiple commits in quick succession.
@@ -118,13 +118,19 @@ jobs:
       - name: Audit
         run: npm audit --audit-level=high
 
-  # Golden-path E2E (Playwright). Runs ONLY after lint + unit tests pass —
-  # there is no point spinning up a chromium browser if the bundle won't even
-  # build. Skipped on forks (PRs from outside collaborators) because we can't
-  # expose the test secrets to untrusted code; for those we rely on the
-  # customer + functions jobs as the safety net.
+  # E2E (Playwright). Runs ONLY after lint + unit tests pass — there is no
+  # point spinning up a chromium browser if the bundle won't even build.
+  # Skipped on forks (PRs from outside collaborators) because we can't expose
+  # the test secrets to untrusted code; for those we rely on the customer +
+  # functions jobs as the safety net.
+  #
+  # Specs that run here (any tests/e2e/**.spec.js gets picked up by playwright):
+  #   • golden-path.spec.js     — customer login → reward redeem → ledger row
+  #   • kiosk-survival.spec.js  — cashier session survives the 4.7s validator
+  #                               window on /tablet AND /admin (regression
+  #                               coverage for the 2026-06-23 outage)
   e2e:
-    name: E2E (Golden Path)
+    name: E2E (Playwright)
     needs: customer
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -160,6 +166,19 @@ jobs:
           VITE_APP_CHECK_KEY=${{ secrets.VITE_APP_CHECK_KEY }}
           EOF
 
+      - name: Seed E2E test customer + reward
+        # Resets the e2e@ipear.gr customer doc to a known-good baseline
+        # (points=1500, balance/totalPoints in sync) so the golden-path
+        # debit-1000 → expect 500 assertion is stable across CI runs that
+        # share live Firestore state. Without this, a previous failed run
+        # leaves the customer at e.g. 299 points and every subsequent run
+        # hits "insufficient points". Also upserts the dummy reward the
+        # spec exercises. Idempotent.
+        env:
+          TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: npm run e2e:seed
+
       - name: Install Playwright browsers (chromium only)
         # --with-deps installs the OS-level packages chromium needs on Ubuntu.
         # Cache hit is automatic via setup-node's npm cache for the browsers
@@ -167,11 +186,19 @@ jobs:
         # a separate cache step.
         run: npx playwright install --with-deps chromium
 
-      - name: Run Golden Path
+      - name: Run E2E specs
         env:
+          # Golden-path customer flow
           TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
           TEST_PASS: ${{ secrets.E2E_TEST_PASS }}
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # Kiosk-survival admin/tablet flow — separate account from the
+          # customer above. MUST be admin via custom claim, ipear_admins doc,
+          # OR email allow-list rescue (see firestore.rules → isAdmin()).
+          # Add via: gh secret set TEST_ADMIN_EMAIL --body "tablet@ipear.gr"
+          #          gh secret set TEST_ADMIN_PASS  --body "<password>"
+          TEST_ADMIN_EMAIL: ${{ secrets.TEST_ADMIN_EMAIL }}
+          TEST_ADMIN_PASS: ${{ secrets.TEST_ADMIN_PASS }}
           # Optional. If the Firebase project has App Check enforcement on,
           # register a debug token (Firebase Console → App Check → Manage
           # debug tokens) and store it as this secret. The spec injects it
