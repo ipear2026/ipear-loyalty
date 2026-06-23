@@ -416,6 +416,28 @@ if (IS_DEMO) {
   });
   tagLog('AUTH-RESTORE', `auth.currentUser at firebase-ready: ${auth.currentUser ? `✅ ${auth.currentUser.email}` : '❌ NULL'}`);
 
+  // Permanent auth-state watcher: if the user ever becomes null AFTER we've
+  // shown the tablet idle screen (e.g. phantom session restoration where
+  // Firebase first fires with a stale cached user, then invalidates it on
+  // failed token refresh), force the login screen back on top so the cashier
+  // is forced to authenticate properly instead of clicking around a dead UI.
+  // This is the durable fix for the iPear hotfix loop documented in the
+  // refactor/p1-services-split branch — phantom session presented the idle
+  // screen while auth.currentUser was null, leading to every Firestore read
+  // returning "Missing or insufficient permissions" (rules-denial wording).
+  const _isTabletPath = typeof location !== 'undefined' && /^\/tablet(\.html)?(\/|$)/.test(location.pathname);
+  if (_isTabletPath) {
+    onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        const loginEl = document.getElementById('tablet-login');
+        if (loginEl && loginEl.style.display === 'none') {
+          loginEl.style.display = 'flex';
+          tagLog('AUTH-WATCH', '⚠️ user became null — re-showing tablet-login');
+        }
+      }
+    });
+  }
+
   // ═════════════════════════════════════════════════════════════════════════
   //  CONTINUOUS AUTH STATE VALIDATOR
   //  Detects orphan states where Firebase Auth has a user but Firestore has
