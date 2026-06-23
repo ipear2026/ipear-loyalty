@@ -167,10 +167,21 @@ if (IS_DEMO) {
   window._getAggregateFromServer = getAggregateFromServer;
   window._sum = sum; window._average = average;
   const auth = getAuth(app);
+  // Persistence policy:
+  //   • /tablet — kiosk device, MUST keep session across tab/browser restarts
+  //     and share across tabs. Forces LOCAL regardless of remember-me flag.
+  //   • everywhere else — customer/admin sites. LOCAL only if the user opted
+  //     into "remember me" (ipear_rem flag); else SESSION (per-tab) for
+  //     stronger logout-on-close semantics.
+  // Without this carve-out, opening /tablet in a new Chrome tab created a
+  // fresh empty sessionStorage → no auth user → every Firestore read failed
+  // with "Missing or insufficient permissions" (same wording as a rules
+  // denial, hard to diagnose).
+  const _isTablet = typeof location !== 'undefined' && /^\/tablet(\.html)?(\/|$)/.test(location.pathname);
   const _hasRememberMe = !!localStorage.getItem('ipear_rem');
-  const _initPersist = _hasRememberMe ? browserLocalPersistence : browserSessionPersistence;
+  const _initPersist = (_isTablet || _hasRememberMe) ? browserLocalPersistence : browserSessionPersistence;
   await setPersistence(auth, _initPersist);
-  tagLog('INIT', `✅ Persistence at init: ${_hasRememberMe ? 'LOCAL 👑 (ipear_rem found)' : 'SESSION ⏳ (no ipear_rem)'}`);
+  tagLog('INIT', `✅ Persistence at init: ${_initPersist === browserLocalPersistence ? 'LOCAL 👑' : 'SESSION ⏳'} (tablet=${_isTablet}, rememberMe=${_hasRememberMe})`);
   window._auth = auth;
   window._signIn = signInWithEmailAndPassword;
   window._createUser = createUserWithEmailAndPassword;
