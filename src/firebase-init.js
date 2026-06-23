@@ -453,6 +453,16 @@ if (IS_DEMO) {
   onAuthStateChanged(auth, async (user) => {
     if (!_bootstrapDone) return;
     if (!user) return;  // signed out — nothing to validate
+    // CRITICAL: this validator was written for the CUSTOMER site (main.js
+    // mounts state.foundCustomer.id when a customer doc is bound to the
+    // session). The TABLET kiosk has no foundCustomer — its session is the
+    // cashier's admin login, not a customer record. Without this guard the
+    // validator fires signOut() ~4.7s after every tablet login (3.5s
+    // bootstrap + 1.2s probe), creating the "phantom logout" loop where the
+    // cashier sees the idle screen briefly then gets bounced back to login
+    // with no error. This was the real root cause of the iPear hotfix loop,
+    // not App Check / rules / persistence (those were red herrings).
+    if (_isTabletPath) return;
     // If app already mounted us against a customer doc, trust that.
     if (state.foundCustomer?.id) return;
     // We are signed in to Firebase Auth but no customer doc is bound to the
