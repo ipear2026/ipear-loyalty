@@ -239,16 +239,32 @@ export function stopOffersListener() {
 }
 
 async function _loadOffersOnce() {
+  // Split the fetch and render into separate try blocks so the log message
+  // identifies the actual failure mode. Previously both paths funneled into
+  // a single "[offers] _loadOffersOnce error" line, which masked render
+  // crashes (malformed doc) behind a network-style error.
+  let snap;
   try {
-    const snap = await window._getDocs(
+    snap = await window._getDocs(
       window._query(window._col(window._db,'ipear_offers'), window._where('active','==',true))
     );
-    _renderOffersSnap(snap);
   } catch(e) {
-    logger.error('[offers] _loadOffersOnce error:', e.code, e.message);
+    logger.error('[offers] fetch failed:', e?.code, e?.message);
     const userMsg = !navigator.onLine ? '📡 Ελέγξτε τη σύνδεσή σας.' : 'Δεν ήταν δυνατή η φόρτωση προσφορών.';
     const _errHtml = `<div style="color:var(--grl);padding:20px;text-align:center;font-size:.85rem">${esc(userMsg)}</div>`;
-    document.getElementById('offers-list').innerHTML = _errHtml;
+    const _fl = document.getElementById('offers-list');
+    if (_fl) _fl.innerHTML = _errHtml;
+    const _hp = document.getElementById('h-offers-preview');
+    if (_hp) _hp.innerHTML = _errHtml;
+    return;
+  }
+  try {
+    _renderOffersSnap(snap);
+  } catch(e) {
+    logger.error('[offers] render crashed on snap:', e?.message, e?.stack);
+    const _errHtml = `<div style="color:var(--grl);padding:20px;text-align:center;font-size:.85rem">${esc('Σφάλμα εμφάνισης προσφορών. Ανανέωσε τη σελίδα.')}</div>`;
+    const _fl = document.getElementById('offers-list');
+    if (_fl) _fl.innerHTML = _errHtml;
     const _hp = document.getElementById('h-offers-preview');
     if (_hp) _hp.innerHTML = _errHtml;
   }
@@ -337,14 +353,11 @@ function _renderOffersSnap(snap) {
     }
   }
 
-  // HIGH-3: delegates to the module-scoped safe factories (top of file).
-  const _imgTag = _safeImgTag;
-
   const preview = active.slice(0,2).map((o, idx) => {
     const _iu = typeof o.imageUrl === 'string' ? o.imageUrl : '';
     const safeImg = (_iu && (_iu.startsWith('https://') || _iu.startsWith('data:image/'))) ? _iu : '';
     const imgHtml = safeImg
-      ? _imgTag('op-img', safeImg, o.emoji)
+      ? _safeImgTag('op-img', safeImg, o.emoji)
       : `<div class="op-img-placeholder">${esc(o.emoji)||'🎁'}</div>`;
     return `<div class="offer-preview" role="button" tabindex="0" onclick="openOfferSheet(${idx})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openOfferSheet(${idx})}" aria-label="${esc(o.title)}">
       ${imgHtml}
@@ -369,7 +382,7 @@ function _renderOffersSnap(snap) {
     const _iu2 = typeof o.imageUrl === 'string' ? o.imageUrl : '';
     const safeImg = (_iu2 && (_iu2.startsWith('https://') || _iu2.startsWith('data:image/'))) ? _iu2 : '';
     const imgHtml = safeImg
-      ? _imgTag('ocf-img', safeImg, o.emoji)
+      ? _safeImgTag('ocf-img', safeImg, o.emoji)
       : `<div class="ocf-img-placeholder">${esc(o.emoji)||'🎁'}</div>`;
     const _bp = o.bonusPoints || o.pointsCost || 0;
     const ptsBadge = _bp ? `<span class="ocf-badge-pts">+${_bp} πόντοι</span>` : '';
@@ -797,9 +810,28 @@ function _watchOfferRedemptionDoc(entry) {
   } catch(e) { logger.warn('[offer-redeem-watch]', e); }
 }
 
-// Kept as an exported no-op so main.js's imported reference still resolves
-// — the per-entry watcher unsub is now handled inside _removeOfferEntry.
-export function _stopOfferRedeemWatch() {}
+// Full queue teardown — called by main.js's _forceCleanup on logout / account
+// deletion. Iterates the offer queue, unsubs every per-entry Firestore watcher,
+// stops the shared interval, and resets ALL module-scope state so a subsequent
+// login from another account doesn't inherit stale closures.
+//
+// Was previously a no-op left over from the multi-offer refactor — that
+// silently leaked N snapshot listeners + 1 interval per logout cycle, and
+// kept the floating bar / overlay state alive into the next session.
+export function _stopOfferRedeemWatch() {
+  for (const entry of _offerQueue) {
+    if (entry.unsub) { try { entry.unsub(); } catch(_) {} entry.unsub = null; }
+  }
+  _offerQueue.length = 0;
+  _currentOfferIdx = 0;
+  _offerBarMinimized = false;
+  _offerQRBusy = false;
+  if (_offerQRTimer) { clearInterval(_offerQRTimer); _offerQRTimer = null; }
+  const bar = document.getElementById('active-offer-bar');
+  if (bar) { bar.style.display = 'none'; bar.classList.remove('hiding'); }
+  const overlay = document.getElementById('offer-qr-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
 
 export async function offerGenerateQR() {
   if (_offerQRBusy) return;
@@ -1498,7 +1530,22 @@ export async function shareReferral() {
   const appUrl = window.location.origin + basePath + '?ref=' + encodeURIComponent(code);
   const text = `Εγγράψου στο iPear Loyalty και κέρδισε πόντους σε κάθε αγορά! 🎁\n\nΆνοιξε τον σύνδεσμο παρακάτω — ο κωδικός παραπομπής ${code} θα συμπληρωθεί αυτόματα!\n\n🔗 ${appUrl}`;
   if (navigator.share) {
-    try { await navigator.share({title:'iPear Loyalty', text, url: appUrl}); } catch(e) {}
+    try {
+      await navigator.share({title:'iPear Loyalty', text, url: appUrl});
+    } catch(e) {
+      // AbortError = user dismissed the share sheet — silent, no feedback needed.
+      // Anything else (NotAllowedError, TypeError, missing-data) → fall back to
+      // clipboard so the user still gets *something* useful instead of a
+      // dead-tap experience.
+      if (e?.name === 'AbortError') return;
+      logger.warn('[share] navigator.share failed:', e?.name, e?.message);
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast('✅ Αντιγράφηκε','green');
+      } catch(_) {
+        showToast('Κωδικός: ' + code);
+      }
+    }
   } else {
     try { await navigator.clipboard.writeText(text); showToast('✅ Αντιγράφηκε','green'); } catch(e) { showToast('Κωδικός: ' + code); }
   }
