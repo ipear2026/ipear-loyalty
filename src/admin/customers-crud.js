@@ -562,6 +562,23 @@ function _renderCustRows(rows) {
   tb.innerHTML = r;
 }
 
+// Push-listener hook: apply an upstream customer mutation to the cached
+// table row (mirrors what the previous admin-main.js local closure did).
+export function updateCachedCustomerRow(id, data) {
+  const idx = _allCustRows.findIndex((r) => r.id === id);
+  if (idx < 0) return;
+  _allCustRows[idx].data = data;
+  _allCustRows[idx].pts = data.points || 0;
+  _allCustRows[idx].tot = data.totalPoints || data.points || 0;
+}
+
+// Logout cleanup: drop the cached rows + clear the active segment filter
+// without triggering loadAll (which would fail post-signOut anyway).
+export function resetCustomersScope() {
+  _activeSegment = null;
+  _allCustRows = [];
+}
+
 // Window-exposed for the in-table client-side filter (no recompute, just slice _allCustRows)
 export function _filterCustTable() {
   const q = (document.getElementById('cust-search')?.value || '').trim().toLowerCase();

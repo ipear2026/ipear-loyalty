@@ -5,7 +5,6 @@ import { logger } from './logger.js';
 //  Shared core: firebase-init.js (Firebase refs), utils.js (tier)
 // ═══════════════════════════════════════════════════════════════════════════
 import './firebase-init.js';
-import { tier, escHtml, escJs, tierFloor } from './utils.js';
 import {
   setAnPeriod,
   loadAnalytics,
@@ -36,12 +35,12 @@ import {
   register, search, renderCust, blockCust, deleteCust,
   openEdit, saveEdit, loadAll, _filterCustTable,
   clearSegmentFilter, quickSel, renderSegments, filterBySegment,
+  updateCachedCustomerRow, resetCustomersScope,
 } from './admin/customers-crud.js';
 import {
   getWorkerSecret as _getWorkerSecret,
   setWorkerSecret as _setWorkerSecret,
 } from './admin/worker-secret.js';
-import { processBirthdayClaims as _processBirthdayClaims } from './admin/birthday-claims.js';
 import { fillPushTpl, sendPushNotification } from './admin/push-fcm.js';
 import {
   toggleWorkerConfig,
@@ -95,7 +94,6 @@ import {
   startPushListener as _startPushListener,
   stopPushListener,
 } from './admin/push-listener.js';
-import { publishLeaderboard as _publishLeaderboard } from './admin/leaderboard.js';
 import { exportCSV } from './admin/csv-export.js';
 import { startMaintenanceListener, stopMaintenanceListener, toggleKillSwitch } from './admin/kill-switch.js';
 import {
@@ -113,7 +111,6 @@ import {
   previewTierDowngrade,
   executeTierDowngrade,
 } from './admin/maintenance.js';
-import { getCachedCustomers, setCachedCustomers } from './admin/snapshot-cache.js';
 import { loadStats, configureStats } from './admin/stats.js';
 import {
   previewSmsBulk,
@@ -122,42 +119,28 @@ import {
   sendSMSBulk,
 } from './admin/bulk-messaging-send.js';
 
-// Wire push-listener: keep admin-main's _allCustRows cache in sync.
+// Wire push-listener: keep the customers-crud table cache in sync.
 initPushListener({
-  onCustomerChange: (id, data) => {
-    const idx = _allCustRows.findIndex((r) => r.id === id);
-    if (idx >= 0) {
-      _allCustRows[idx].data = data;
-      _allCustRows[idx].pts = data.points || 0;
-      _allCustRows[idx].tot = data.totalPoints || data.points || 0;
-    }
-  },
+  onCustomerChange: (id, data) => updateCachedCustomerRow(id, data),
 });
 
-// Wire approvals module to admin-main's store context + refresh callbacks.
+// Wire approvals + redemption-verify modules. Store context resolved from
+// authState directly — admin-auth.js mirrors storeId/storeName there on
+// login, so we don't need to keep a local copy in admin-main anymore.
 initApprovals({
-  getStoreContext: () => ({ storeId: _storeId, storeName: _storeName }),
-  refreshAdminViews: () => {
-    loadTx();
-    loadStats();
-  },
+  getStoreContext: () => ({ storeId: authState.storeId, storeName: authState.storeName }),
+  refreshAdminViews: () => { loadTx(); loadStats(); },
 });
 
-// Wire redemption-verify module to admin-main's mutable state (cid/cdata,
-// _storeId/_storeName) and refresh callbacks (loadTx/loadStats) without
-// leaking those globals into the module itself.
 initRedemptionVerify({
-  getStoreContext: () => ({ storeId: _storeId, storeName: _storeName }),
+  getStoreContext: () => ({ storeId: authState.storeId, storeName: authState.storeName }),
   onRedemptionApproved: ({ customerId, newPoints }) => {
     if (cid === customerId && cdata) {
       cdata.points = newPoints;
       renderCust(cdata);
     }
   },
-  refreshAdminViews: () => {
-    loadTx();
-    loadStats();
-  },
+  refreshAdminViews: () => { loadTx(); loadStats(); },
 });
 
 window.ADMIN_BUILD_TAG = 'admin-20260605-a11y1';
@@ -253,11 +236,6 @@ if (window.DEMO) {
 // via hooks so admin-auth.js stays free of cross-module imports.
 initAdminAuth({
   onLoginComplete: () => {
-    // Mirror authState.storeId/Name into admin-main's local vars so the
-    // existing customer/messaging/ledger code (register/confirmAdd/etc.) keeps
-    // resolving them without becoming aware of authState.
-    _storeId   = authState.storeId;
-    _storeName = authState.storeName;
     configureSystemHealth({ onDataChanged: loadStats });
     configureStats({ onSnapshot: renderSegments });
     loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startPushListener();
@@ -269,10 +247,11 @@ initAdminAuth({
     stopApprovalListener();
     stopPushListener();
     stopMaintenanceListener();
-    // Clear session-sensitive runtime state owned by admin-main.js
-    _activeSegment = null;
+    // Wipe admin-main's per-customer scope + the cached segment table
     cid = null; cdata = null; msgCh = '';
-    _storeId = null; _storeName = '—';
+    resetCustomersScope();
+    // authState.storeId/Name + actorUid + authenticated are already cleared
+    // by admin-auth.js's adminLogout() before this hook fires.
     // Return to search tab (safe default)
     showTab('search');
   },
@@ -287,11 +266,15 @@ initAdminAuth({
 // ══════════════════════════════════════
 
 // ══════════════════════════════════════
-//  STATE
+//  STATE — admin-main as the live customer-scope owner
 // ══════════════════════════════════════
+// cid + cdata: selected customer for the search/edit/block/delete/messaging/
+//   customer-points/gdpr modules. Read via getScope hooks across modules.
+// msgCh: currently-active messaging channel ('viber' | 'sms' | 'email'),
+//   consumed by messaging.js#sendCustom.
+// Store context (storeId / storeName) lives in authState — all modules read
+// it from there directly. admin-auth.js mirrors it on login.
 let cid = null, cdata = null, msgCh = '';
-let _storeId = null, _storeName = '—';
-const DB = () => window._db;
 const TABS = ['search','register','customers','transactions','approvals','offers','rewards','marketing','stats','system','gdpr'];
 
 // ── Online indicator + keep-alive moved to ./admin/admin-auth.js ──
@@ -357,42 +340,8 @@ initCustomersCrud({
   getWorkerSecret: () => _getWorkerSecret(),
 });
 
-// ══════════════════════════════════════
-//  TOAST  →  moved to ./admin/ui.js (toast, closeM)
-// ══════════════════════════════════════
+// Modal click-outside dismissal — every .modal-bg closes on background click.
 document.querySelectorAll('.modal-bg').forEach(b=>b.addEventListener('click',e=>{ if(e.target===b)closeM(); }));
-
-// ══════════════════════════════════════
-//  REGISTER
-// ══════════════════════════════════════
-// register / search / renderCust / blockCust / deleteCust / openEdit /
-// saveEdit / loadAll / _renderCustRows / _filterCustTable /
-// clearSegmentFilter / quickSel / renderSegments / filterBySegment all
-// moved to ./admin/customers-crud.js. Scope / showTab / getWorkerSecret
-// injected via initCustomersCrud.
-
-// ══════════════════════════════════════
-//  CSV EXPORT
-// ══════════════════════════════════════
-// ══════════════════════════════════════════════════════════════════
-//  PUSH NOTIFICATIONS (FCM)  →  moved to ./admin/push-fcm.js
-// ══════════════════════════════════════════════════════════════════
-
-// ── Bulk messaging (preview + send) — extracted to ./admin/bulk-messaging-send.js
-// ── Maintenance (points expiry + tier downgrade) — extracted to ./admin/maintenance.js
-
-// loadKpiOverview moved to ./admin/dashboard-ops.js.
-
-// ── System Health & Orphan Cleanup — extracted to ./admin/system-health.js
-
-// ══════════════════════════════════════
-//  PART 3: WORKER HEALTH CHECK  →  moved to ./admin/email-worker.js
-// ══════════════════════════════════════
-
-// ══════════════════════════════════════
-//  PART 5: KILL SWITCH — extracted to ./admin/kill-switch.js
-
-// exportCSV — extracted to ./admin/csv-export.js
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  WINDOW EXPORTS — required for inline HTML event handlers (onclick, etc.)
