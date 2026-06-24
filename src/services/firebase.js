@@ -115,6 +115,48 @@ export function setPersistenceMode(mode) {
 //   Conflating that with a network error sends users into a confusing
 //   "App Check problem" message when their account simply does not
 //   exist. Treating it as not-found is the correct UX.
+// ═══════════════════════════════════════════════════════════════════════════
+//  HIGH-1 (Pen-Test 2026-06-24): Customer-app field whitelist
+//
+//  The customer doc rule allows the owner to read their own document, but
+//  Firestore can't project fields server-side — the entire doc reaches the
+//  client. We can't hide it from the Network tab (architectural fix tracked
+//  for Sprint 4 = split customer / customer_internal collections), but we
+//  CAN keep the admin-only fields out of in-app state + localStorage so
+//  they're not surfaced via DevTools Console / Application tabs.
+//
+//  Excluded fields (deliberately NOT in the whitelist):
+//   • suspicious        — fraud watchlist flag set by admin. Leaking this
+//                         to the customer defeats the entire feature.
+//   • _migratedFrom     — internal data-model metadata (legacy doc id).
+//   • registeredStoreId — which store onboarded the customer. Will become
+//   • registeredStoreName intelligence once iPear adds more stores.
+//
+//  Kept (customer needs them for UI):
+//   • Identity / profile (name, phone, email, card, uid, birthday)
+//   • Financial state   (points, totalPoints, tier, lastTierCheck)
+//   • Push / consent    (fcmToken, marketingOptIn*, notificationsEnabled,
+//                        termsAcceptedAt)
+//   • Lifecycle flags   (blocked, deletionRequested*, eshopCouponUsed,
+//                        referralCount, referralProcessed, createdAt)
+// ═══════════════════════════════════════════════════════════════════════════
+const _CUSTOMER_SAFE_FIELDS = [
+  'name', 'phone', 'email', 'card', 'uid',
+  'points', 'totalPoints', 'tier', 'lastTierCheck',
+  'birthday', 'fcmToken', 'blocked', 'createdAt',
+  'referralCount', 'referralProcessed', 'eshopCouponUsed',
+  'marketingOptIn', 'marketingOptInAt', 'termsAcceptedAt',
+  'notificationsEnabled', 'deletionRequested', 'deletionRequestedAt',
+];
+
+function _pickCustomerFields(raw) {
+  const out = {};
+  for (const k of _CUSTOMER_SAFE_FIELDS) {
+    if (k in raw) out[k] = raw[k];
+  }
+  return out;
+}
+
 export async function findCustomerByAuth(authUid, email, { logger } = {}) {
   const _log = logger || { warn: () => {} };
   let found = null;
@@ -133,7 +175,7 @@ export async function findCustomerByAuth(authUid, email, { logger } = {}) {
   if (authUid) {
     try {
       const docSnap = await window._getDoc(window._doc(window._db, 'ipear_customers', authUid));
-      if (docSnap.exists()) found = { id: docSnap.id, ...docSnap.data() };
+      if (docSnap.exists()) found = { id: docSnap.id, ..._pickCustomerFields(docSnap.data()) };
     } catch (e) { noteError('uid-doc', e); }
 
     if (!found) {
@@ -141,7 +183,7 @@ export async function findCustomerByAuth(authUid, email, { logger } = {}) {
         const uidSnap = await window._getDocs(
           window._query(window._col(window._db, 'ipear_customers'), window._where('uid', '==', authUid))
         );
-        uidSnap.forEach(d => { if (!found) found = { id: d.id, ...d.data() }; });
+        uidSnap.forEach(d => { if (!found) found = { id: d.id, ..._pickCustomerFields(d.data()) }; });
       } catch (e) { noteError('uid-field', e); }
     }
   }
@@ -151,7 +193,7 @@ export async function findCustomerByAuth(authUid, email, { logger } = {}) {
       const snap = await window._getDocs(
         window._query(window._col(window._db, 'ipear_customers'), window._where('email', '==', email))
       );
-      snap.forEach(d => { if (!found) found = { id: d.id, ...d.data() }; });
+      snap.forEach(d => { if (!found) found = { id: d.id, ..._pickCustomerFields(d.data()) }; });
     } catch (e) { noteError('email', e); }
   }
 

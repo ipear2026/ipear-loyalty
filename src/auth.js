@@ -22,10 +22,50 @@ let _brevoOtpMode = false;
 export const _REM_KEY = 'ipear_rem';
 const _CACHE_KEY = 'ipear_customer_cache';
 
+// HIGH-2 (Pen-Test 2026-06-24): minimal cache surface for instant-paint UX.
+// Pre-fix the cache stored the WHOLE customer doc in plain JSON — including
+// PII (phone, email, birthday), the fcmToken, and admin-only flags from
+// HIGH-1 (suspicious, _migratedFrom). Now we persist only the 5 fields the
+// splash → home transition needs, plus a schema version (_v) so old
+// "polluted" caches from previous sessions get invalidated on next read.
+//
+// Trade-off: cache fallback (used when Firestore is unreachable during
+// auto-login) now has less data. The home / card / rewards tabs still
+// render correctly. Tabs that need email/phone/birthday (profile, edit)
+// will refetch when the network is back, which is the existing behaviour.
+const _CACHE_SCHEMA_VERSION = 2;
+
+function _persistMinimalCache(c) {
+  if (!c || !c.id) return;
+  try {
+    localStorage.setItem(_CACHE_KEY, JSON.stringify({
+      _v: _CACHE_SCHEMA_VERSION,
+      id: c.id,
+      name: c.name || '',
+      card: c.card || '',
+      points: c.points || 0,
+      tier: c.tier || '',
+    }));
+  } catch(_) {}
+}
+
 function _getCachedCustomer(email) {
   try {
     const c = JSON.parse(localStorage.getItem(_CACHE_KEY));
-    return (c && c.email === email && !c.blocked) ? c : null;
+    if (!c) return null;
+    // Schema migration: pre-v2 caches held the full polluted payload.
+    // Drop them so the next Firestore lookup repopulates with the
+    // whitelist-projected version from services/firebase.js.
+    if (c._v !== _CACHE_SCHEMA_VERSION) {
+      localStorage.removeItem(_CACHE_KEY);
+      return null;
+    }
+    // The email parameter was the pre-fix identity check. With minimal
+    // cache that field is gone — the cache is browser-scoped and Firebase
+    // Auth's currentUser already gates access, so per-email matching is
+    // redundant. Kept the parameter to preserve the call-site signature.
+    void email;
+    return c;
   } catch { return null; }
 }
 
@@ -228,7 +268,7 @@ export async function autoLogin(email) {
       localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); state.foundCustomer = null;
       showScreen('s-phone'); _initCheckboxStyle(); return;
     }
-    localStorage.setItem(_CACHE_KEY, JSON.stringify(state.foundCustomer));
+    _persistMinimalCache(state.foundCustomer);
     const authUid = window._auth?.currentUser?.uid;
     if (authUid && state.foundCustomer.id !== authUid) {
       // Fire-and-forget: UI advances on the (still-correct) legacy data while
@@ -964,7 +1004,7 @@ export async function submitPhone() {
       } catch(_) {}
     }
 
-    localStorage.setItem(_CACHE_KEY, JSON.stringify(state.foundCustomer));
+    _persistMinimalCache(state.foundCustomer);
     if (remCb?.checked) {
       localStorage.setItem(_REM_KEY, JSON.stringify({email: state.foundCustomer.email||email, name: state.foundCustomer.name}));
       logger.log('%c[LOGIN] ✅ Saved _REM_KEY + cache to localStorage', 'color:#00cc00;font-weight:bold;font-size:14px');
@@ -1043,7 +1083,7 @@ export async function submitCreatePass() {
         state.foundCustomer.uid = firebaseUID;
       } catch(_) {}
     }
-    localStorage.setItem(_CACHE_KEY, JSON.stringify(state.foundCustomer));
+    _persistMinimalCache(state.foundCustomer);
     if (remCb?.checked) {
       localStorage.setItem(_REM_KEY, JSON.stringify({email: state.foundCustomer.email||email, name: state.foundCustomer.name}));
       logger.log('%c[CREATE-PASS] ✅ Saved _REM_KEY + cache', 'color:#00cc00;font-weight:bold;font-size:14px');
