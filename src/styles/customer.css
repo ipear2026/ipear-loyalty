@@ -407,14 +407,20 @@ a:focus-visible,
 .tab-pane.active{display:block}
 .tab-inner{max-width:480px;margin:0 auto;padding:16px 16px 0}
 
-/* ── BOTTOM NAV ── */
+/* ── BOTTOM NAV ──
+ * iOS Safari + Android Chrome default path: bottom:0 sits the nav on the
+ * physical bottom edge, which on iPhones with a home indicator means the
+ * nav buttons overlap the system gesture area. We add a safe-area buffer
+ * so the nav floats above the home indicator with breathing room. PWA
+ * standalone (display-mode:standalone) and in-app browser overrides
+ * further below replace this with their own offsets where appropriate. */
 .bottom-nav{
   background:#fff;border-top:1px solid #eee;
   display:grid;grid-template-columns:repeat(5,1fr);
   align-items:center;
   position:fixed;bottom:0;left:0;right:0;z-index:50;
   box-shadow:0 -2px 10px rgba(0,0,0,.04);
-  padding-bottom:0;
+  padding-bottom:env(safe-area-inset-bottom, 0px);
   -webkit-transform:translateZ(0);transform:translateZ(0);
   will-change:transform;
 }
@@ -503,9 +509,13 @@ html.inapp-browser .bn {
   height: 52px;
 }
 /* Bottom padding on tab content so the last item isn't hidden under the
- * fixed nav once the user scrolls to the end. */
+ * fixed nav once the user scrolls to the end. In-app browser path: the
+ * nav's padding-bottom carries env(safe-area-inset-bottom), so content
+ * padding has to clear nav-h + that same safe-area inset + a 16px buffer.
+ * Without the safe-area term the last item on the Profile tab
+ * ("Διαγραφή Λογαριασμού") slid under the nav. */
 html.inapp-browser .tab-pane {
-  padding-bottom: calc(var(--nav-h, 56px) + 16px);
+  padding-bottom: calc(var(--nav-h, 56px) + env(safe-area-inset-bottom, 0px) + 16px);
 }
 
 html.pwa-standalone .bn {
