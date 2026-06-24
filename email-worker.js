@@ -334,6 +334,17 @@ export default {
     // pre-rejected.
     if (path === '/push')       return handlePush(request, env, CORS);
 
+    // ── ERP integration: phone-based customer lookup ──
+    //
+    //  POST /erp/lookup-by-phone  { phone: "6912345678" }
+    //  Authorization: Bearer <ERP_SECRET>
+    //
+    //  Routed BEFORE the ADMIN_SECRET gate because it uses its OWN secret
+    //  (env.ERP_SECRET) — different audience (ERP system at the cashier),
+    //  different blast radius, and rotatable without disturbing the admin
+    //  tooling. timingSafeEqual prevents secret-comparison side channels.
+    if (path === '/erp/lookup-by-phone') return handleErpLookup(request, env, CORS);
+
     // All other endpoints require ADMIN_SECRET
     const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
     if (!env.ADMIN_SECRET || !(await timingSafeEqual(auth, env.ADMIN_SECRET))) {
@@ -1319,6 +1330,121 @@ async function handleWooGetUser(request, env, CORS) {
 
   } catch (e) {
     console.error('[woo-get-user]', e.message);
+    return resp({ error: 'Internal error' }, 500, CORS);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  POST /erp/lookup-by-phone  { phone: "6912345678" }
+//  Authorization: Bearer <ERP_SECRET>
+//
+//  ERP integration endpoint — cashier types a customer's phone at checkout,
+//  the ERP queries this endpoint, gets back the loyalty profile to apply
+//  points-on-purchase, show tier, etc.
+//
+//  Security:
+//   • Bearer ERP_SECRET (separate from ADMIN_SECRET → blast-radius isolation,
+//     rotatable independently). Comparison is timing-safe.
+//   • Per-IP rate limit (60 hits / minute — looser than admin endpoints
+//     because a busy store may run dozens of lookups per minute, but tight
+//     enough to throttle a leaked-secret enumeration attack).
+//   • Returns ONLY the 5 fields the ERP needs (name, phone, card, points,
+//     tier). Email, birthday, blocked flag, fcmToken, suspicious flag are
+//     all NOT exposed — minimum-PII principle for B2B integrations.
+//   • Server-side tier computation from totalPoints (Bronze/Silver/Gold/
+//     Diamond/Platinum) — the customer doc's `tier` field may be stale
+//     between async cron runs, so we don't trust it.
+//   • If a customer is blocked, returns 403 — ERP must not apply points
+//     to a banned account.
+// ══════════════════════════════════════════════════════════════════════════
+function _computeTier(totalPoints) {
+  const tp = Number(totalPoints) || 0;
+  if (tp >= 10000) return 'Platinum';
+  if (tp >= 6000)  return 'Diamond';
+  if (tp >= 3000)  return 'Gold';
+  if (tp >= 1000)  return 'Silver';
+  return 'Bronze';
+}
+
+async function handleErpLookup(request, env, CORS) {
+  // 1. Auth — separate secret from ADMIN_SECRET, timing-safe compare.
+  const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.ERP_SECRET || !(await timingSafeEqual(auth, env.ERP_SECRET))) {
+    return resp({ error: 'Unauthorized' }, 401, CORS);
+  }
+
+  // 2. Rate limit per-IP — 60 hits/min/IP via the same KV-backed limiter
+  //    used by /verify-sms-otp etc. Fails CLOSED if KV is unreachable.
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const rl = await rateLimitOrBlock(env, ip, 'erp-lookup', 60, 60, CORS,
+    'Πολλά αιτήματα. Δοκιμάστε σε λίγο.');
+  if (rl) return rl;
+
+  // 3. Payload validation — phone must be 10 digits, Greek mobile (starts with 6).
+  let body;
+  try { body = await readJsonCapped(request, 8 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+
+  const phone = String(body.phone || '').trim().replace(/[\s\-()]/g, '');
+  if (!/^6\d{9}$/.test(phone)) {
+    return resp({ error: 'Valid Greek mobile phone required (10 digits, starts with 6)' }, 400, CORS);
+  }
+
+  // 4. Service-account config check.
+  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
+    return resp({ error: 'Server not configured' }, 503, CORS);
+
+  try {
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId = env.FCM_PROJECT_ID;
+    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+
+    const queryRes = await fetch(`${fsBase}:runQuery`, {
+      method: 'POST', headers: fsHeaders,
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'ipear_customers' }],
+          where: { fieldFilter: { field: { fieldPath: 'phone' }, op: 'EQUAL', value: { stringValue: phone } } },
+          select: { fields: [
+            { fieldPath: 'name' }, { fieldPath: 'phone' }, { fieldPath: 'card' },
+            { fieldPath: 'points' }, { fieldPath: 'totalPoints' }, { fieldPath: 'blocked' },
+          ]},
+          limit: 1
+        }
+      })
+    });
+
+    if (!queryRes.ok) {
+      console.error('[erp-lookup] firestore query failed:', queryRes.status);
+      return resp({ error: 'Lookup failed' }, 502, CORS);
+    }
+
+    const results = await queryRes.json();
+    const doc = Array.isArray(results) && results[0]?.document;
+    if (!doc) return resp({ error: 'Customer not found' }, 404, CORS);
+
+    const f = doc.fields || {};
+    if (f.blocked?.booleanValue === true) {
+      // Blocked customer — don't expose their loyalty data to the ERP, and
+      // signal that points should NOT be awarded to this purchase.
+      return resp({ error: 'Customer is blocked', blocked: true }, 403, CORS);
+    }
+
+    const points = Number(f.points?.integerValue || 0);
+    const totalPoints = Number(f.totalPoints?.integerValue || 0);
+
+    return resp({
+      ok: true,
+      name:   f.name?.stringValue   || '',
+      phone:  f.phone?.stringValue  || phone,
+      card:   f.card?.stringValue   || '',
+      points,
+      tier:   _computeTier(totalPoints),
+    }, 200, CORS);
+
+  } catch (e) {
+    console.error('[erp-lookup]', e.message);
     return resp({ error: 'Internal error' }, 500, CORS);
   }
 }
