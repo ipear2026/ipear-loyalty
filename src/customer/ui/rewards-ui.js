@@ -1,46 +1,46 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //  Customer UI — Rewards (dynamic catalog)
 //
-//  Extracted from src/ui-renderers.js during the Sprint 3 god-module split.
+//  Source of truth: `ipear_rewards` (admin-managed). Admins CRUD reward
+//  tiers from the Admin panel and the customer app subscribes via
+//  onSnapshot below.
 //
-//  Source of truth: `ipear_rewards` (admin-managed). The legacy `REWARDS`
-//  const is gone — admins now CRUD reward tiers from the Admin panel and
-//  the customer app subscribes via onSnapshot below. Fallback: if the
-//  collection is empty (or the listener errors before first snapshot),
-//  we paint the same 5/15/30 ladder so the app never shows an empty
-//  rewards section to a confused customer.
+//  State machine for the rendered rewards surface:
+//    1. Initial:           _rewardsLoaded === false  → skeleton placeholders
+//    2. First snapshot:    _rewardsLoaded === true   → real cards OR empty
+//                                                       state depending on
+//                                                       _activeRewards.length
+//    3. Listener error:    _rewardsLoaded === true,
+//                          _activeRewards === []      → same empty state
+//
+//  Pre-fix the catalog used a hardcoded 1000/2500/4000 ladder as a fallback
+//  so the section "never painted blank". The effect was UI flashing: fake
+//  rewards on first paint → real rewards on first snapshot. Replaced with
+//  skeleton-then-real, which matches the loading model used by the
+//  leaderboard + history panels elsewhere in the app.
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from '../../logger.js';
 import { esc } from '../../utils.js';
 import { _t } from '../../i18n.js';
 import { _safeImgTag } from './_shared.js';
 
-const _REWARDS_FALLBACK = [
-  { id: 'fallback-1000', cost: 1000, discount: 5,  icon: '🎟️', title: '5€ Έκπτωση',  description: '',  isActive: true, order: 1, i18nKey: 'rw_1000' },
-  { id: 'fallback-2500', cost: 2500, discount: 15, icon: '💵', title: '15€ Έκπτωση', description: '', isActive: true, order: 2, i18nKey: 'rw_2500' },
-  { id: 'fallback-4000', cost: 4000, discount: 30, icon: '👑', title: '30€ Έκπτωση', description: '', isActive: true, order: 3, i18nKey: 'rw_4000' },
-];
-
 let _rewardsUnsub = null;
-let _activeRewards = _REWARDS_FALLBACK.slice();
+let _activeRewards = [];
 let _rewardsLoaded = false;
 let _rewardsLastPts = 0;
 
 function _rewardLabel(r) {
-  // i18nKey only exists on the seeded fallback rows; admin-managed rewards
-  // store their final Greek text in `title`. _t() returns the key itself
-  // when missing, so falling through to title gives the right output.
-  if (r.i18nKey) {
-    const localised = _t(r.i18nKey);
-    if (localised && localised !== r.i18nKey) return localised;
-  }
   return r.title || '';
 }
 
 export function startRewardsListener() {
   stopRewardsListener();
   if (window.DEMO) {
-    _activeRewards = _REWARDS_FALLBACK.slice();
+    // DEMO mode has no ipear_rewards mock. Mark the surface as loaded with
+    // an empty catalog so the empty state renders immediately instead of
+    // a permanent skeleton (which would happen if we waited on the no-op
+    // demo onSnapshot to fire a callback that never comes).
+    _activeRewards = [];
     _rewardsLoaded = true;
     _rerenderRewards();
     return;
@@ -59,21 +59,23 @@ export function startRewardsListener() {
           rows.push({ id: d.id || data.id, ...data });
         });
         rows.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
-        // Empty catalog → keep the fallback so the UI never paints blank.
-        _activeRewards = rows.length ? rows : _REWARDS_FALLBACK.slice();
+        _activeRewards = rows;
         _rewardsLoaded = true;
         _rerenderRewards();
       },
       (err) => {
         logger.error('[rewards] onSnapshot error:', err.code, err.message);
-        _activeRewards = _REWARDS_FALLBACK.slice();
+        // Network / permission error: surface the empty state rather than
+        // ghost data. The error message is logged for ops; the customer
+        // sees "no rewards right now" which is honest.
+        _activeRewards = [];
         _rewardsLoaded = true;
         _rerenderRewards();
       }
     );
   } catch (e) {
     logger.error('[rewards] startRewardsListener exception:', e);
-    _activeRewards = _REWARDS_FALLBACK.slice();
+    _activeRewards = [];
     _rewardsLoaded = true;
     _rerenderRewards();
   }
@@ -98,6 +100,49 @@ function _rerenderRewards() {
   } catch (e) { logger.warn('[rewards] rerender failed:', e?.message || e); }
 }
 
+// ── Skeleton card factories (use the .sk shimmer class from customer.css) ──
+//
+// Matches the real .rw-card / .rw-full-card dimensions so the layout
+// doesn't jump when real data lands. aria-hidden keeps screen readers
+// from announcing the placeholder content.
+function _homeSkeletonHtml() {
+  const card = `<div class="rw-card" aria-hidden="true" style="pointer-events:none">
+    <div class="rw-emoji-area"><span class="sk" style="width:48px;height:48px;border-radius:10px"></span></div>
+    <div class="rw-body">
+      <div class="sk" style="display:block;width:64px;height:18px;border-radius:6px;margin-bottom:6px"></div>
+      <div class="sk" style="display:block;width:92%;height:14px;border-radius:6px;margin-bottom:4px"></div>
+      <div class="sk" style="display:block;width:70%;height:12px;border-radius:6px"></div>
+    </div>
+  </div>`;
+  return card + card + card;
+}
+
+function _listSkeletonHtml() {
+  const row = `<div class="rw-full-card" aria-hidden="true" style="pointer-events:none">
+    <div class="rw-full-icon"><span class="sk" style="width:36px;height:36px;border-radius:8px"></span></div>
+    <div class="rw-full-body">
+      <div class="sk" style="display:block;width:60%;height:18px;border-radius:6px;margin-bottom:6px"></div>
+      <div class="sk" style="display:block;width:40%;height:14px;border-radius:6px;margin-bottom:8px"></div>
+      <div class="sk" style="display:block;width:100%;height:5px;border-radius:3px"></div>
+    </div>
+    <span class="sk" style="width:54px;height:36px;border-radius:8px"></span>
+  </div>`;
+  return row + row + row;
+}
+
+const _EMPTY_HTML_HOME =
+  '<div class="empty-state empty-state--compact" style="flex:1">' +
+    '<div class="empty-state__icon" aria-hidden="true">🎟️</div>' +
+    '<div class="empty-state__title">Δεν υπάρχουν διαθέσιμες ανταμοιβές αυτή τη στιγμή.</div>' +
+  '</div>';
+
+const _EMPTY_HTML_LIST =
+  '<div class="empty-state">' +
+    '<div class="empty-state__icon" aria-hidden="true">🎟️</div>' +
+    '<div class="empty-state__title">Δεν υπάρχουν διαθέσιμες ανταμοιβές αυτή τη στιγμή.</div>' +
+    '<div class="empty-state__sub">Νέες ανταμοιβές προστίθενται τακτικά</div>' +
+  '</div>';
+
 // ════════════════════════════════════════
 //  HOME — REWARD SCROLL CARDS
 // ════════════════════════════════════════
@@ -105,6 +150,8 @@ export function renderHomeRewards(pts) {
   _rewardsLastPts = pts;
   const el = document.getElementById('h-rewards-scroll');
   if (!el) return;
+  if (!_rewardsLoaded) { el.innerHTML = _homeSkeletonHtml(); return; }
+  if (!_activeRewards.length) { el.innerHTML = _EMPTY_HTML_HOME; return; }
   el.innerHTML = _activeRewards.map((r) => {
     const cost = Number(r.cost) || 0;
     const ok = pts >= cost;
@@ -134,10 +181,8 @@ export function renderRewardsList(pts) {
   _rewardsLastPts = pts;
   const el = document.getElementById('rw-list');
   if (!el) return;
-  if (!_activeRewards.length) {
-    el.innerHTML = '<div class="empty-state"><div class="empty-state__icon" aria-hidden="true">🎟️</div><div class="empty-state__title">Καμία ανταμοιβή ακόμα</div><div class="empty-state__sub">Νέες ανταμοιβές προστίθενται τακτικά</div></div>';
-    return;
-  }
+  if (!_rewardsLoaded) { el.innerHTML = _listSkeletonHtml(); return; }
+  if (!_activeRewards.length) { el.innerHTML = _EMPTY_HTML_LIST; return; }
   el.innerHTML = _activeRewards.map((r, i) => {
     const cost = Number(r.cost) || 0;
     const ok = pts >= cost;
