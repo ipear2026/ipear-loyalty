@@ -13,10 +13,10 @@ import {
   openDrillDown,
 } from './admin/analytics.js';
 import { toast, closeM } from './admin/ui.js';
+import { initAdminAuth, unlock, adminLogout } from './admin/admin-auth.js';
 import {
   getWorkerSecret as _getWorkerSecret,
   setWorkerSecret as _setWorkerSecret,
-  clearWorkerSecret as _clearWorkerSecret,
 } from './admin/worker-secret.js';
 import { processBirthdayClaims as _processBirthdayClaims } from './admin/birthday-claims.js';
 import { fillPushTpl, sendPushNotification } from './admin/push-fcm.js';
@@ -222,155 +222,42 @@ if (window.DEMO) {
 //  ADMIN APPLICATION CODE
 // ═══════════════════════════════════════════════════════════════════════════
 // ══════════════════════════════════════
-//  LOCK
+//  LOCK / AUTH — moved to ./admin/admin-auth.js
 // ══════════════════════════════════════
-let _adminAttempts = 0;
-let _adminLockUntil = 0;
-let _adminActorUid = null;
-
-// Shared post-auth bootstrap. Used by manual unlock() AND by silent
-// _tryAdminAutoRestore() when Firebase Auth carries a live session forward
-// (page reload, 30-min sleep recovery, Chrome memory-saver tab restore).
-async function _completeAdminAuth(user) {
-  _adminActorUid = user?.uid || null;
-  authState.actorUid = _adminActorUid;
-  _storeId = null; _storeName = '—';
-  authState.storeId = null; authState.storeName = '—';
-
-  const adminRef  = window._doc(window._db, 'ipear_admins', user.uid);
-  const adminSnap = await window._getDoc(adminRef);
-  if (!window.DEMO && !adminSnap.exists()) {
-    await window._adminSignOut().catch(() => {});
-    throw new Error('not-admin');
-  }
-  _storeId = adminSnap.data()?.storeid || null;
-  authState.storeId = _storeId;
-
-  if (_storeId) {
-    try {
-      const storeSnap = await window._getDoc(window._doc(window._db, 'ipear_stores', _storeId));
-      if (storeSnap.exists()) {
-        _storeName = storeSnap.data().name || '—';
-        authState.storeName = _storeName;
-        const badge = document.getElementById('store-badge');
-        if (badge) { badge.textContent = '🏪 ' + _storeName; badge.style.display = 'inline-block'; }
-        const regBadge = document.getElementById('reg-store-badge');
-        if (regBadge) { regBadge.textContent = '🏪 Εγγραφή για: ' + _storeName; regBadge.style.display = 'block'; }
-      }
-    } catch(_) {}
-  }
-
-  authState.authenticated = true;
-  document.getElementById('lock').style.display = 'none';
-  document.getElementById('lock-in').value  = '';
-  document.getElementById('lock-email').value = '';
-  document.getElementById('admin-logout-btn').style.display = 'flex';
-  configureSystemHealth({ onDataChanged: loadStats });
-  configureStats({ onSnapshot: renderSegments });
-  loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startPushListener();
-  processReferralQueue(); loadKpiOverview(); startMaintenanceListener(); checkWorkerHealth();
-  loadDeletionRequests();
-}
-
-// Silent auto-restore: if Firebase Auth has a valid session in the tab's
-// IndexedDB (set on first unlock with SESSION persistence), skip the email
-// /password lock screen entirely. Falls back to the lock screen on any error.
-let _autoRestoreAttempted = false;
-async function _tryAdminAutoRestore() {
-  if (_autoRestoreAttempted) return;
-  _autoRestoreAttempted = true;
-  const user = window._auth?.currentUser;
-  if (!user) return;  // no session → keep lock screen visible
-  logger.log('%c[ADMIN] 🔓 auto-restoring from Firebase session: ' + user.email, 'color:#00cc00;font-weight:bold;font-size:14px');
-  try { await _completeAdminAuth(user); }
-  catch(e) {
-    logger.warn('[ADMIN] auto-restore failed:', e.message);
-    // Lock screen is already visible by default — nothing to do
-  }
-}
-
-// Bootstrap: kick auto-restore as soon as firebase-init.js finishes loading.
-// firebase-init uses top-level await so by the time this module runs the flag
-// may already be set; otherwise wait for the event.
-if (window._firebaseReady) _tryAdminAutoRestore();
-else window.addEventListener('firebase-ready', _tryAdminAutoRestore);
-
-async function unlock() {
-  const email = document.getElementById('lock-email').value.trim().toLowerCase();
-  const pass  = document.getElementById('lock-in').value;
-  const err   = document.getElementById('lock-err');
-  const btn   = document.getElementById('lock-btn');
-  err.textContent = '';
-  if (!email || !email.includes('@')) { err.textContent = '⚠️ Εισάγετε email.'; return; }
-  if (!pass) { err.textContent = '⚠️ Εισάγετε κωδικό.'; return; }
-  if (Date.now() < _adminLockUntil) {
-    const secs = Math.ceil((_adminLockUntil - Date.now()) / 1000);
-    err.textContent = `🔒 Κλειδωμένο — δοκίμασε σε ${secs}s`; return;
-  }
-  btn.disabled = true; btn.textContent = '⏳';
-  try {
-    const user = await window._adminSignIn(email, pass);
-    await _completeAdminAuth(user);
-  } catch(e) {
-    if (e.message === 'not-admin') {
-      err.textContent = '⛔ Ο λογαριασμός δεν έχει δικαιώματα admin.';
-      btn.disabled = false; btn.textContent = 'Είσοδος →'; return;
-    }
-    _adminAttempts++;
-    if (_adminAttempts >= 5) {
-      _adminLockUntil = Date.now() + 60000; // 60s lockout after 5 failures
-      _adminAttempts = 0;
-    }
-    const msgs = {
-      'auth/wrong-password':        '❌ Λάθος κωδικός.',
-      'auth/user-not-found':        '❌ Δεν βρέθηκε λογαριασμός.',
-      'auth/invalid-credential':    '❌ Λάθος email ή κωδικός.',
-      'auth/too-many-requests':     '⚠️ Πάρα πολλές προσπάθειες. Δοκίμασε αργότερα.',
-      'auth/invalid-email':         '⚠️ Μη έγκυρο email.',
-    };
-    err.textContent = msgs[e.code] || ('❌ ' + (e.message || e.code));
-  }
-  btn.disabled = false; btn.textContent = 'Είσοδος →';
-}
-
-function adminLogout() {
-  try { window._adminSignOut(); } catch(_) {}
-  // Stop real-time listeners (prevent leak + stale re-login)
-  stopApprovalListener();
-  stopPushListener();
-  stopMaintenanceListener();
-  _adminActorUid = null;
-  authState.actorUid = null;
-  // Clear session-sensitive runtime state
-  authState.authenticated = false;  // H-7: block data-loading after logout
-  _activeSegment = null;
-  cid = null; cdata = null; msgCh = '';
-  _storeId = null; _storeName = '—';
-  authState.storeId = null; authState.storeName = '—';
-  // Clear sessionStorage (worker secret lives only for this tab session)
-  _clearWorkerSecret();
-  localStorage.removeItem('ipear_worker_url');
-  // Clear UI: customer result
-  document.getElementById('cust-result')?.classList.remove('show');
-  const sinput = document.getElementById('sinput');
-  if (sinput) sinput.value = '';
-  // kpi-overview merged into dashboard — no hide needed
-  const whEl = document.getElementById('worker-health');
-  if (whEl) whEl.style.display = 'none';
-  // Clear UI: store badges
-  const badge = document.getElementById('store-badge');
-  if (badge) { badge.textContent = ''; badge.style.display = 'none'; }
-  const regBadge = document.getElementById('reg-store-badge');
-  if (regBadge) { regBadge.textContent = ''; regBadge.style.display = 'none'; }
-  // Clear UI: lock screen inputs
-  document.getElementById('lock-email').value = '';
-  document.getElementById('lock-in').value = '';
-  document.getElementById('lock-err').textContent = '';
-  document.getElementById('admin-logout-btn').style.display = 'none';
-  document.getElementById('lock').style.display = 'flex';
-  // Return to search tab (safe default)
-  showTab('search');
-}
+// Cross-domain wiring: admin-auth.js owns the lock screen, session restore,
+// keep-alive timers, and online/offline indicator. Domain-specific work
+// (data loading, listener teardown, store-id mirror sync) is injected here
+// via hooks so admin-auth.js stays free of cross-module imports.
+initAdminAuth({
+  onLoginComplete: () => {
+    // Mirror authState.storeId/Name into admin-main's local vars so the
+    // existing customer/messaging/ledger code (register/confirmAdd/etc.) keeps
+    // resolving them without becoming aware of authState.
+    _storeId   = authState.storeId;
+    _storeName = authState.storeName;
+    configureSystemHealth({ onDataChanged: loadStats });
+    configureStats({ onSnapshot: renderSegments });
+    loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startPushListener();
+    processReferralQueue(); loadKpiOverview(); startMaintenanceListener(); checkWorkerHealth();
+    loadDeletionRequests();
+  },
+  onLogout: () => {
+    // Stop real-time listeners (prevent leak + stale re-login)
+    stopApprovalListener();
+    stopPushListener();
+    stopMaintenanceListener();
+    // Clear session-sensitive runtime state owned by admin-main.js
+    _activeSegment = null;
+    cid = null; cdata = null; msgCh = '';
+    _storeId = null; _storeName = '—';
+    // Return to search tab (safe default)
+    showTab('search');
+  },
+  keepAliveRefresh: () => {
+    loadStats(); loadTx(); loadOffers(); startApprovalListener(); _startPushListener();
+    loadKpiOverview(); checkWorkerHealth();
+  },
+});
 
 // ══════════════════════════════════════
 //  XSS GUARD (escHtml + escJs imported from utils.js)
@@ -384,59 +271,7 @@ let _storeId = null, _storeName = '—';
 const DB = () => window._db;
 const TABS = ['search','register','customers','transactions','approvals','offers','rewards','marketing','stats','system','gdpr'];
 
-// ══════════════════════════════════════
-//  ONLINE
-// ══════════════════════════════════════
-function setOnline(on) {
-  document.getElementById('cdot').className = 'conn-dot ' + (on ? 'ok' : 'err');
-  document.getElementById('ctxt').textContent = on ? 'Firebase' : 'OFFLINE';
-  if (!on) toast('🔴 Χάθηκε το ίντερνετ!', 'error');
-}
-window.addEventListener('online',  () => { setOnline(true); _adminKeepAliveRefresh(); });
-window.addEventListener('offline', () => setOnline(false));
-// ── Worker secret helpers  →  moved to ./admin/worker-secret.js ──
-
-setOnline(navigator.onLine);
-// firebase-init.js already executed (imported above) — run directly
-if (window.DEMO) document.getElementById('lock-demo').style.display = 'block';
-
-// ── KEEPALIVE: auto-refresh data + recover from sleep/background ──────────
-let _adminLastRefresh = 0;
-const _ADMIN_REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
-
-function _adminKeepAliveRefresh() {
-  if (!authState.authenticated || !navigator.onLine) return;
-  const now = Date.now();
-  if (now - _adminLastRefresh < 30000) return; // debounce 30s
-  _adminLastRefresh = now;
-  try { loadStats(); loadTx(); loadOffers(); startApprovalListener(); _startPushListener(); loadKpiOverview(); checkWorkerHealth(); } catch(e) { logger.warn('[keepalive] refresh error:', e.message); }
-  // keepalive refreshed
-}
-
-// Periodic refresh every 5 min
-setInterval(() => { if (authState.authenticated) _adminKeepAliveRefresh(); }, _ADMIN_REFRESH_INTERVAL);
-
-// Recover from sleep/tab-switch: visibilitychange + pageshow
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && authState.authenticated) {
-    // If asleep >30 min, Firestore listeners are dead — full reload
-    if (Date.now() - _adminLastRefresh > 30 * 60 * 1000) {
-      logger.log('[keepalive] admin was asleep >30min, reloading...');
-      location.reload();
-      return;
-    }
-    setTimeout(_adminKeepAliveRefresh, 500);
-  }
-});
-window.addEventListener('pageshow', (e) => {
-  if (e.persisted && authState.authenticated) {
-    logger.log('[keepalive] bfcache restore, reloading...');
-    location.reload();
-  }
-});
-window.addEventListener('focus', () => {
-  if (authState.authenticated) setTimeout(_adminKeepAliveRefresh, 300);
-});
+// ── Online indicator + keep-alive moved to ./admin/admin-auth.js ──
 
 // ══════════════════════════════════════
 //  TABS
@@ -586,7 +421,7 @@ async function register() {
               category: '🎁 Referral Bonus',
               note: `Παραπομπή: ${card} (${(live.referralCount||0)+1}/${MAX_REFERRALS_PER_USER})`,
               date: refNowIso,
-              createdByAdmin: _adminActorUid || ''
+              createdByAdmin: authState.actorUid || ''
             });
           });
           referrerAwarded = true;
@@ -607,7 +442,7 @@ async function register() {
               category: '🎁 Referral Bonus',
               note: `Μπόνους εγγραφής με παραπομπή: ${refCode}`,
               date: newCustNowIso,
-              createdByAdmin: _adminActorUid || ''
+              createdByAdmin: authState.actorUid || ''
             });
           });
           toast(`✅ Εγγραφή επιτυχής! +100 πόντοι και στους δύο (referral)! 🎉`,'success');
@@ -747,7 +582,7 @@ async function renderCust(d) {
               category: '🎂 Birthday Bonus', note: 'Δώρο γενεθλίων',
               storeId: _storeId || null, storeName: _storeName,
               date: nowIsoBd,
-              createdByAdmin: _adminActorUid || ''
+              createdByAdmin: authState.actorUid || ''
             });
           });
           cdata.points = newPts; cdata.totalPoints = newTot;
@@ -856,7 +691,7 @@ async function confirmAdd() {
         storeId: _storeId || null,
         storeName: _storeName,
         date: nowIso,
-        createdByAdmin: _adminActorUid || ''
+        createdByAdmin: authState.actorUid || ''
       });
     });
     cdata.points=newPts; cdata.totalPoints=newTot;
@@ -909,7 +744,7 @@ async function confirmRedeem() {
       txn.set(auditRef, {
         action: 'manual_redeem',
         source: 'admin',
-        approvedByUid: _adminActorUid || '',
+        approvedByUid: authState.actorUid || '',
         approvedAt: nowIso,
         customerId: cid,
         customerUid: custData.uid || cdata.uid || '',
@@ -932,7 +767,7 @@ async function confirmRedeem() {
         storeId: _storeId || null,
         storeName: _storeName,
         date: nowIso,
-        approvedByAdmin: _adminActorUid || ''
+        approvedByAdmin: authState.actorUid || ''
       });
     });
     cdata.points=newPts; renderCust(cdata);
