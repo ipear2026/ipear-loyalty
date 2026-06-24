@@ -3,45 +3,7 @@ import { state } from './state.js';
 import { esc, showToast, _trackEvent, _trapFocus, _releaseFocus, _fireConfetti, tier, _WORKER_URL, _haptic } from './utils.js';
 import { _t } from './i18n.js';
 import { _migrateCustomerToUid } from './main.js';
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  HIGH-3: Safe <img> factory.
-//
-//  Building the <img> via DOM API (createElement + property assignment) means
-//  the browser handles every attribute escape — no string interpolation, no
-//  hand-rolled `onerror=` template, no chance of attribute breakout from
-//  admin-supplied `emoji` or `imageUrl`. Returns a real Element; callers can
-//  either appendChild it or read `.outerHTML` (which is also safe because the
-//  serializer escapes attributes when stringifying).
-//
-//  Used by both the offer list renderer and the offer bottom sheet.
-// ═══════════════════════════════════════════════════════════════════════════
-function _safeImgEl(cls, src, emoji) {
-  const safeSrc = typeof src === 'string' ? src : '';
-  const isData = safeSrc.startsWith('data:');
-  const img = document.createElement('img');
-  img.className = cls + (isData ? ' loaded' : '');
-  img.src = safeSrc;
-  img.alt = '';
-  if (!isData) img.loading = 'lazy';
-  img.decoding = 'async';
-  const ph = cls + '-placeholder';
-  const em = String(emoji || '🎁');
-  img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
-  img.addEventListener('error', () => {
-    const d = document.createElement('div');
-    d.className = ph;
-    d.textContent = em;
-    img.replaceWith(d);
-  }, { once: true });
-  return img;
-}
-
-// Module-scope helper for string-fragment callers.
-// Safe because _safeImgEl never uses innerHTML or hand-rolled attribute injection.
-function _safeImgTag(cls, src, emoji) {
-  return _safeImgEl(cls, src, emoji).outerHTML;
-}
+import { _safeImgEl, _safeImgTag } from './customer/ui/_shared.js';
 
 // ════════════════════════════════════════
 //  REWARDS — dynamic catalog (Firestore-backed)
