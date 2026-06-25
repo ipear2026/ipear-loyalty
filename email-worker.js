@@ -268,13 +268,19 @@ export default {
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
 
-    // Reject requests from disallowed origins outright
-    if (origin && !allowedOrigins.includes(origin)) {
+    const path = new URL(request.url).pathname;
+
+    // Reject requests from disallowed origins outright — EXCEPT /erp/*
+    // endpoints, which authenticate via their own ERP_SECRET bearer token
+    // and are called from native desktop apps (e.g. iPear ERP / Tauri) whose
+    // Origin header (tauri://localhost or https://tauri.localhost) cannot be
+    // pre-registered in a browser-style allowlist. The Bearer secret + per-IP
+    // rate limit are the real security gates for those routes.
+    if (origin && !allowedOrigins.includes(origin) && !path.startsWith('/erp/')) {
       return resp({ error: 'Forbidden' }, 403, CORS);
     }
 
     // ── GET /health — lightweight health check (no auth needed) ───────────
-    const path = new URL(request.url).pathname;
     if (request.method === 'GET' && path === '/health') {
       return resp({
         status: 'ok',
