@@ -132,6 +132,14 @@ export function setPersistenceMode(mode) {
 //   • registeredStoreId — which store onboarded the customer. Will become
 //   • registeredStoreName intelligence once iPear adds more stores.
 //
+//  ⚠️ MAINTENANCE: when the Worker (email-worker.js) adds a NEW server-set
+//      flag to ipear_customers that the CUSTOMER APP reads to gate a retry
+//      (e.g. "send X if Y is not set"), that flag MUST be added here. Missing
+//      a flag turns into a per-login spam loop because the client sees
+//      `undefined !== true` and re-fires. See the 2026-06-25 regression:
+//      marketingWelcomeProcessed was missed → welcome-email per login.
+//      Reference _retryPendingBonuses in src/main.js for the pattern.
+//
 //  Kept (customer needs them for UI):
 //   • Identity / profile (name, phone, email, card, uid, birthday)
 //   • Financial state   (points, totalPoints, tier, lastTierCheck)
