@@ -146,6 +146,14 @@ const _CUSTOMER_SAFE_FIELDS = [
   'birthday', 'fcmToken', 'blocked', 'createdAt',
   'referralCount', 'referralProcessed', 'eshopCouponUsed',
   'marketingOptIn', 'marketingOptInAt', 'termsAcceptedAt',
+  // marketingWelcomeProcessed / marketingWelcomeAt are owned by the Worker
+  // (set inside /send-welcome's atomic transaction) but the customer client
+  // MUST be able to read them — _retryPendingBonuses gates the
+  // /send-welcome retry on the customer-app side using these flags. Leaving
+  // them out of the whitelist caused a welcome-email spam loop: client
+  // saw `undefined !== true`, retried, worker skipped the bonus credit but
+  // still sent the email. (Pen-Test regression fix, 2026-06-25.)
+  'marketingWelcomeProcessed', 'marketingWelcomeAt',
   'notificationsEnabled', 'deletionRequested', 'deletionRequestedAt',
 ];
 

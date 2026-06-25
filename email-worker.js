@@ -815,6 +815,13 @@ async function handleSendWelcome(request, env, CORS) {
   //    a clear marketing opt-in. The bonus is the contractual promise; the
   //    email is a nice-to-have. Atomic + idempotent via marketingWelcomeProcessed.
   let bonusAwarded = false;
+  // alreadyProcessed becomes true when the read inside step 3's tx confirms
+  // the flag is already set. Step 4 (email send) uses it as a defense-in-depth
+  // gate so the welcome email isn't re-sent on every login when the bonus
+  // step has correctly become a no-op (the customer-app retry loop fix.
+  // Without this guard a client misreading the flag — e.g. the 2026-06-25
+  // F12 whitelist regression — turned into a per-login email spam.).
+  let alreadyProcessed = false;
   if (marketingOptIn) {
       try {
         const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
@@ -838,6 +845,7 @@ async function handleSendWelcome(request, env, CORS) {
         // Idempotency guard — never credit twice
         if (fields.marketingWelcomeProcessed?.booleanValue === true) {
           console.log('[send-welcome] marketing bonus already processed for', verifiedUid);
+          alreadyProcessed = true;
         } else {
           const curPts = Number(fields.points?.integerValue || 0);
           const curTot = Number(fields.totalPoints?.integerValue || 0);
@@ -895,6 +903,19 @@ async function handleSendWelcome(request, env, CORS) {
   //    A Brevo failure (quota, transient 5xx, sender misconfig) must NOT
   //    silently drop the +50 customer-facing credit; the email is the
   //    nice-to-have, the points are the contract.
+  //
+  //    Idempotency: for marketing users we skip the email when the bonus
+  //    step found the flag was already set. That way, even if a client
+  //    misreads the flag (e.g. a future field-projection bug like the
+  //    2026-06-25 regression) and hammers /send-welcome on every login,
+  //    the customer's inbox doesn't flood. Non-marketing users only hit
+  //    /send-welcome once at registration time (the _retryPendingBonuses
+  //    loop on the customer app gates exclusively on marketing flags), so
+  //    they don't need a separate flag here.
+  if (alreadyProcessed) {
+    console.log('[send-welcome] skipping email — welcome already processed for', verifiedUid);
+    return resp({ ok: true, bonusAwarded, alreadyProcessed: true }, 200, CORS);
+  }
   try {
     const appUrl = (env.APP_URL || 'https://loyalty.ipear.gr') + '/customer.html';
     const displayPoints = marketingOptIn ? 50 : 0;
