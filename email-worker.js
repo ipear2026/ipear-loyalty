@@ -350,6 +350,7 @@ export default {
     //  different blast radius, and rotatable without disturbing the admin
     //  tooling. timingSafeEqual prevents secret-comparison side channels.
     if (path === '/erp/lookup-by-phone') return handleErpLookup(request, env, CORS);
+    if (path === '/erp/ping')            return handleErpPing(request, env, CORS);
 
     // All other endpoints require ADMIN_SECRET
     const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
@@ -1370,6 +1371,33 @@ function _computeTier(totalPoints) {
   if (tp >= 3000)  return 'Gold';
   if (tp >= 1000)  return 'Silver';
   return 'Bronze';
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  GET|POST /erp/ping
+//  Authorization: Bearer <ERP_SECRET>
+//
+//  Health endpoint for the ERP "Δοκιμή Σύνδεσης" / connection-test button.
+//  No body required, no Firestore round-trip. Verifies:
+//   • Worker is reachable from the ERP's network.
+//   • CORS escape clause is wired (request reaches the handler).
+//   • ERP_SECRET is the correct one.
+//
+//  Returns { ok: true, service, version, ts }. The ERP only checks
+//  HTTP 200 + ok===true; the other fields are diagnostic for support
+//  tickets ("which version is the bridge on right now").
+// ══════════════════════════════════════════════════════════════════════════
+async function handleErpPing(request, env, CORS) {
+  const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.ERP_SECRET || !(await timingSafeEqual(auth, env.ERP_SECRET))) {
+    return resp({ error: 'Unauthorized' }, 401, CORS);
+  }
+  return resp({
+    ok: true,
+    service: 'ipear-loyalty-bridge',
+    version: '1.0',
+    ts: new Date().toISOString(),
+  }, 200, CORS);
 }
 
 async function handleErpLookup(request, env, CORS) {
