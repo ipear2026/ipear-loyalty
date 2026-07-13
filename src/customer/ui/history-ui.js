@@ -184,7 +184,17 @@ function _renderHistory(el) {
     if (tx.type === 'add') {
       ico = '🛒'; cls = 'add'; lbl = tx.category || 'Αγορά';
     } else if (tx.type === 'redeem') {
-      ico = '💶'; cls = 'redeem'; lbl = `Έκπτωση ${tx.discount||''}€`;
+      // Prefer the reward's own title (`tx.label`) — dynamic catalog rewards
+      // like "Καλώδιο Baseus" are physical items, not euro discounts, so the
+      // hardcoded "Έκπτωση Xε" template misrepresented them (it read the
+      // stored numeric `discount` and always rendered as a currency amount).
+      // The legacy manual-redeem paths (tablet-main.js:754, admin
+      // customer-points.js:185) don't store a label — for those we still
+      // fall back to the generic euro-discount format.
+      ico = '💶'; cls = 'redeem';
+      lbl = tx.label
+        ? `🎁 ${tx.label}`
+        : `Έκπτωση ${tx.discount || ''}€`;
     } else if (tx.type === 'expire') {
       ico = '⏳'; cls = 'redeem'; lbl = '⏳ Εκπνοή Πόντων';
     } else if (tx.type === 'tier_downgrade') {

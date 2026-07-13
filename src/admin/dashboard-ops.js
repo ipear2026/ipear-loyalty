@@ -160,7 +160,13 @@ export async function loadTx() {
       const ds=dt.toLocaleDateString('el-GR')+' '+dt.toLocaleTimeString('el-GR',{hour:'2-digit',minute:'2-digit'});
       let det, cls;
       if (t.type==='add')            { cls='add';    det=`🛒 ${t.category||'Αγορά'}`; }
-      else if (t.type==='redeem')    { cls='redeem'; det=`💶 Έκπτωση ${t.discount||''}€`; }
+      else if (t.type==='redeem')    {
+        // See history-ui.js:186 — prefer the stored reward title (dynamic
+        // catalog items like "Καλώδιο Baseus" aren't euro discounts).
+        // Legacy manual redeems have no label → fall back to the amount.
+        cls='redeem';
+        det = t.label ? `🎁 ${t.label}` : `💶 Έκπτωση ${t.discount||''}€`;
+      }
       else if (t.type==='expire')    { cls='redeem'; det=`⏳ Εκπνοή Πόντων`; }
       else if (t.type==='tier_downgrade') { cls='redeem'; det=`📉 Tier Downgrade`; }
       else { cls=t.points>=0?'add':'redeem'; det=t.category||t.type||'Συναλλαγή'; }
