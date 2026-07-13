@@ -1046,8 +1046,10 @@ async function handleSendVerificationLink(request, env, CORS) {
   }
 
   // 4. Generate the Firebase verification link via Admin REST API.
-  //    continueUrl uses the Pages alias (always allowlisted) — `loyalty.ipear.gr`
-  //    is not currently registered as an authorized domain in Firebase Auth.
+  //    continueUrl uses APP_URL (prod: loyalty.ipear.gr) — the domain MUST be
+  //    listed in Firebase Auth → Settings → Authorized domains for sendOobCode
+  //    to accept it. Fallback keeps working during dev / against Pages preview.
+  const appBase = env.APP_URL || 'https://loyalty.ipear.gr';
   let verifyUrl;
   try {
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
@@ -1060,7 +1062,7 @@ async function handleSendVerificationLink(request, env, CORS) {
           requestType:    'VERIFY_EMAIL',
           idToken,
           returnOobLink:  true,
-          continueUrl:    'https://ipear-loyalty.pages.dev/?verified=1',
+          continueUrl:    `${appBase}/?verified=1`,
         }),
       }
     );
@@ -2605,8 +2607,8 @@ async function handlePushDebug(request, env, CORS) {
               notification: { title: '🍐 Debug Test', body: 'Push notification debug — ' + new Date().toLocaleTimeString() },
               webpush: {
                 headers: { Urgency: 'high' },
-                notification: { icon: 'https://ipear-loyalty.pages.dev/icon-192.png' },
-                fcm_options: { link: 'https://ipear-loyalty.pages.dev/customer.html' },
+                notification: { icon: `${env.APP_URL || 'https://loyalty.ipear.gr'}/icon-192.png` },
+                fcm_options: { link: `${env.APP_URL || 'https://loyalty.ipear.gr'}/customer.html` },
               },
             }
           }),
@@ -2638,7 +2640,7 @@ async function handlePushDebug(request, env, CORS) {
 }
 
 async function sendSinglePush(fcmUrl, accessToken, token, title, body, appUrl) {
-  const baseUrl = appUrl || 'https://ipear-loyalty.pages.dev';
+  const baseUrl = appUrl || 'https://loyalty.ipear.gr';
   try {
     const res = await fetch(fcmUrl, {
       method:  'POST',
