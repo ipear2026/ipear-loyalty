@@ -1,5 +1,9 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
-const CACHE_VER = 'ipear-loyalty-20260619-v69';
+// v70 (2026-07-29): forced re-install to invalidate cached auth.js from v69,
+// which still sent points: initPoints on signup — the CRITICAL-2 firestore
+// rule since 2026-06-23 requires points==0, so v69 users hit
+// "Missing or insufficient permissions" on every registration attempt.
+const CACHE_VER = 'ipear-loyalty-20260729-v70';
 
 // ═══ KILL SWITCH: Nuclear self-destruct for zombie PWA recovery ═════════════
 // If the Worker returns { nuke: true }, this SW wipes all caches and unregisters itself.
