@@ -57,7 +57,7 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
    ═══════════════════════════════════════════════════════════════════════════ */
 #splash-screen{
   position:fixed;inset:0;z-index:9998;
-  background:radial-gradient(circle at 50% 40%,#fbfffb 0%,#f5f9f0 50%,#eef4e6 100%);
+  background:#ffffff;
   display:none;flex-direction:column;align-items:center;justify-content:center;gap:24px;
   transition:opacity .6s cubic-bezier(.4,0,.2,1);
   overflow:hidden;
