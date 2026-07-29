@@ -83,55 +83,138 @@ export function showScreen(id) {
   }
 }
 
-// ════════════════════════════════════════
-//  SPLASH SCREEN (Login -> App transition)
-// ════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
+//  SPLASH SCREEN (Login → App transition) — 5-second McDonald's-style track
+//
+//  Fixed 5000ms duration. _splashDone() is a no-op for pacing (we no longer
+//  cut short when data is ready fast) — the deliberate reveal + status log
+//  IS the UX. The 5s window buys time for slow-network first-loads and reads
+//  as "we're doing serious work for you" instead of "loading spinner".
+//
+//  Timeline (see customer.css splash section for CSS-side timings):
+//    0ms    → screen fades in, box drops (CSS: boxDrop@.2s)
+//    500ms  → Step 1 "Έλεγχος ασφάλειας" appears + spins
+//    1400ms → Step 1 ✓, progress 33%, label swaps, Step 2 appears + spins
+//    1450ms → lid pops off (CSS: lidPop@1.45s)
+//    1600ms → items begin bursting (CSS: burst0…5, 1.6–2.35s staggered)
+//    2400ms → Step 2 ✓, progress 66%, Step 3 appears + spins
+//    3400ms → items settled, floating begins (JS: .landed toggle)
+//    3400ms → Step 3 ✓, progress 100%
+//    3500ms → label morphs to "🍐 Έτοιμα!" with celebration pulse
+//    5000ms → fade out (600ms transition)
+// ════════════════════════════════════════════════════════════════════════════
 let _splashStart = 0;
 let _splashDataReady = false;
-const _SPLASH_MIN_MS  = 2800;
-const _SPLASH_MAX_MS  = 5500;
+let _splashHideTimer = null;
+const _SPLASH_DURATION_MS = 5000;
+const _SPLASH_FADE_MS     = 600;
+
+// Choreography markers (relative to _splashStart). Numbers here are the ONLY
+// truth for JS-side timing; CSS-side (customer.css splash block) is what
+// draws the box/lid/burst — those files must be updated together.
+const _SPLASH_STEPS = [
+  { at:  500, step: 1, label: '🔐 Έλεγχος ασφάλειας…' },
+  { at: 1400, step: 1, done: true, fill: 33, nextStep: 2, label: '📦 Φόρτωση δεδομένων…' },
+  { at: 2400, step: 2, done: true, fill: 66, nextStep: 3, label: '🎁 Προσφορές & πόντοι…' },
+  { at: 3400, step: 3, done: true, fill: 100, landed: true },
+  { at: 3500, celebrate: true, label: '🍐 Έτοιμα!' },
+];
 
 function _showSplash() {
   _splashStart = Date.now();
   _splashDataReady = false;
+  if (_splashHideTimer) { clearTimeout(_splashHideTimer); _splashHideTimer = null; }
+
   document.getElementById('loading').style.display = 'none';
   const el = document.getElementById('splash-screen');
   el.classList.remove('fade-out');
   el.classList.add('active');
+
+  // Reset all step + item states — safe for re-entry (e.g., re-login).
   el.querySelectorAll('.splash-item').forEach(it => it.classList.remove('burst','landed'));
+  el.querySelectorAll('.splash-step').forEach(s => s.classList.remove('appear','active','done'));
+
   const fill = document.getElementById('splash-fill');
+  const lbl  = document.getElementById('splash-lbl');
   fill.style.transition = 'none';
   fill.style.width = '0%';
+  lbl.classList.remove('celebrate');
+  lbl.textContent = 'Σύνδεση…';
+
+  // Kick off CSS animations (box/lid/burst) on next frame + fire the burst class.
   requestAnimationFrame(() => requestAnimationFrame(() => {
     fill.style.transition = '';
-    fill.style.width = '100%';
     el.querySelectorAll('.splash-item').forEach(it => it.classList.add('burst'));
-    setTimeout(() => {
-      el.querySelectorAll('.splash-item.burst').forEach(it => it.classList.add('landed'));
-    }, 2400);
+
+    // Schedule the choreographed step reveals.
+    for (const mark of _SPLASH_STEPS) {
+      setTimeout(() => _splashMark(el, mark), mark.at);
+    }
   }));
+
   _spawnSparkles(el.querySelector('.splash-scene'));
-  setTimeout(_hideSplash, _SPLASH_MAX_MS);
+
+  // Hard-cap at 5s — regardless of whether data is ready or not.
+  _splashHideTimer = setTimeout(_hideSplash, _SPLASH_DURATION_MS);
+}
+
+function _splashMark(root, mark) {
+  if (!root || !root.classList.contains('active')) return;
+
+  // Step-level transitions
+  if (mark.step) {
+    const stepEl = root.querySelector(`.splash-step[data-step="${mark.step}"]`);
+    if (stepEl) {
+      if (mark.done) {
+        stepEl.classList.remove('active');
+        stepEl.classList.add('done');
+      } else {
+        stepEl.classList.add('appear', 'active');
+      }
+    }
+  }
+  if (mark.nextStep) {
+    const nextEl = root.querySelector(`.splash-step[data-step="${mark.nextStep}"]`);
+    if (nextEl) nextEl.classList.add('appear', 'active');
+  }
+
+  // Progress + label
+  if (typeof mark.fill === 'number') {
+    const fill = document.getElementById('splash-fill');
+    if (fill) fill.style.width = mark.fill + '%';
+  }
+  if (mark.label) {
+    const lbl = document.getElementById('splash-lbl');
+    if (lbl) lbl.textContent = mark.label;
+  }
+  if (mark.celebrate) {
+    const lbl = document.getElementById('splash-lbl');
+    if (lbl) lbl.classList.add('celebrate');
+  }
+
+  // Item landing (freezes them in float positions)
+  if (mark.landed) {
+    root.querySelectorAll('.splash-item.burst').forEach(it => it.classList.add('landed'));
+  }
 }
 
 function _splashDone() {
+  // Data-ready signal — kept for API compat with existing callers, but the
+  // splash is time-locked to 5s now. Data being ready faster is fine; we
+  // just note it and let the timer complete the fade.
   _splashDataReady = true;
-  const elapsed = Date.now() - _splashStart;
-  const wait = Math.max(0, _SPLASH_MIN_MS - elapsed);
-  setTimeout(_hideSplash, wait);
 }
 
 function _hideSplash() {
   const el = document.getElementById('splash-screen');
   if (!el || !el.classList.contains('active') || el.classList.contains('fade-out')) return;
-  document.getElementById('splash-lbl').textContent = 'Καλωσήρθες! 🍐';
   el.classList.add('fade-out');
   setTimeout(() => {
     el.classList.remove('active','fade-out');
     // Broadcast so deferred UI (live-points animation queued while splash
     // was up) can fire AFTER the splash is fully gone, not behind it.
     window.dispatchEvent(new Event('splash-hidden'));
-  }, 600);
+  }, _SPLASH_FADE_MS);
 }
 
 function _spawnSparkles(scene) {

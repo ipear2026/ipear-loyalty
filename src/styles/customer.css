@@ -42,27 +42,43 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
 .spin{display:inline-block;width:20px;height:20px;border:2px solid rgba(0,0,0,.15);border-top-color:var(--g);border-radius:50%;animation:rot .7s linear infinite}
 @keyframes rot{to{transform:rotate(360deg)}}
 
-/* ── SPLASH SCREEN (Login → App transition) ── */
+/* ═══════════════════════════════════════════════════════════════════════════
+   SPLASH SCREEN (Login → App transition) — 5s McDonald's-style status track
+   Timeline (5000ms total):
+     0.00s  → screen fades in, box drops
+     0.50s  → Step 1 "Έλεγχος ασφάλειας" spinner appears
+     1.40s  → Step 1 ✓, progress 33%, Step 2 spinner appears
+     1.50s  → lid pops off (slower, more dramatic)
+     1.60s  → items begin bursting out (staggered, 40% slower than before)
+     2.40s  → Step 2 ✓, progress 66%, Step 3 spinner appears
+     3.40s  → Step 3 ✓, progress 100%, items settled floating
+     3.50s  → label morphs to "🍐 Έτοιμα!" with celebration pulse
+     5.00s  → fade out
+   ═══════════════════════════════════════════════════════════════════════════ */
 #splash-screen{
   position:fixed;inset:0;z-index:9998;
-  background:#ffffff;
-  display:none;flex-direction:column;align-items:center;justify-content:center;
-  transition:opacity .55s cubic-bezier(.4,0,.2,1);
+  background:radial-gradient(circle at 50% 40%,#fbfffb 0%,#f5f9f0 50%,#eef4e6 100%);
+  display:none;flex-direction:column;align-items:center;justify-content:center;gap:24px;
+  transition:opacity .6s cubic-bezier(.4,0,.2,1);
   overflow:hidden;
 }
 #splash-screen.active{display:flex}
 #splash-screen.fade-out{opacity:0;pointer-events:none}
 
 /* ── Box Scene (centered) ── */
-.splash-scene{position:relative;width:260px;height:220px;perspective:800px}
+.splash-scene{position:relative;width:260px;height:220px;perspective:800px;flex:0 0 auto}
 
-/* Premium glow behind box (anticipation) */
+/* Premium glow behind box (anticipation) — slowed for 5s timeline */
 .splash-scene::before{
   content:'';position:absolute;bottom:-15px;left:50%;
   width:180px;height:110px;border-radius:50%;
   background:radial-gradient(ellipse,rgba(138,233,0,.4) 0%,rgba(138,233,0,.12) 45%,transparent 75%);
   transform:translateX(-50%) scale(0);opacity:0;z-index:0;
-  animation:boxGlow 2s .45s ease-in-out forwards;pointer-events:none;
+  animation:boxGlow 3s .5s ease-in-out forwards,boxGlowPulse 1.6s 3.4s ease-in-out infinite;pointer-events:none;
+}
+@keyframes boxGlowPulse{
+  0%,100%{opacity:.28}
+  50%{opacity:.55}
 }
 @keyframes boxGlow{
   0%{transform:translateX(-50%) scale(0);opacity:0}
@@ -71,14 +87,14 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
   100%{transform:translateX(-50%) scale(1);opacity:.3}
 }
 
-/* Light burst on lid pop */
+/* Light burst on lid pop — timed to the retimed lidPop (now at 1.5s) */
 .splash-scene::after{
   content:'';position:absolute;bottom:25px;left:50%;
   width:200px;height:200px;border-radius:50%;
   background:radial-gradient(circle,rgba(255,255,255,.95) 0%,rgba(138,233,0,.22) 28%,rgba(255,224,102,.1) 52%,transparent 75%);
   transform:translateX(-50%) scale(0);opacity:0;z-index:1;
   pointer-events:none;
-  animation:lightBurst .7s 1.02s cubic-bezier(.22,1,.36,1) forwards;
+  animation:lightBurst .9s 1.4s cubic-bezier(.22,1,.36,1) forwards;
 }
 @keyframes lightBurst{
   0%{transform:translateX(-50%) scale(0);opacity:1}
@@ -89,9 +105,9 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
 .splash-box{
   position:absolute;bottom:0;left:50%;font-size:4rem;line-height:1;
   opacity:0;z-index:2;
-  animation:boxDrop .5s .15s cubic-bezier(.34,1.56,.64,1) forwards,
-            boxShake .55s .68s ease both,
-            boxPop .35s 1.04s cubic-bezier(.34,1.56,.64,1) both;
+  animation:boxDrop .55s .2s cubic-bezier(.34,1.56,.64,1) forwards,
+            boxShake .75s .78s ease both,
+            boxPop .4s 1.4s cubic-bezier(.34,1.56,.64,1) both;
   filter:drop-shadow(0 8px 20px rgba(0,0,0,.1));
 }
 @keyframes boxDrop{
@@ -115,11 +131,11 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
   100%{transform:translateX(-50%) scale(1.05)}
 }
 
-/* Lid that pops off */
+/* Lid that pops off — pushed to 1.5s so the box shake reads clearly first */
 .splash-lid{
   position:absolute;bottom:46px;left:50%;font-size:1.8rem;
   transform:translateX(-50%);opacity:0;z-index:3;
-  animation:lidPop .7s 1.1s cubic-bezier(.34,1.56,.64,1) forwards;
+  animation:lidPop .9s 1.45s cubic-bezier(.34,1.56,.64,1) forwards;
 }
 @keyframes lidPop{
   0%{transform:translateX(-50%) translateY(0) rotate(0) scale(1);opacity:.7}
@@ -135,13 +151,13 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
   pointer-events:none;z-index:3;
 }
 
-/* 6 unique burst trajectories */
-.splash-item[data-i="0"].burst{animation:burst0 .85s 1.12s cubic-bezier(.22,1,.36,1) forwards}
-.splash-item[data-i="1"].burst{animation:burst1 .85s 1.20s cubic-bezier(.22,1,.36,1) forwards}
-.splash-item[data-i="2"].burst{animation:burst2 .85s 1.28s cubic-bezier(.22,1,.36,1) forwards}
-.splash-item[data-i="3"].burst{animation:burst3 .85s 1.36s cubic-bezier(.22,1,.36,1) forwards}
-.splash-item[data-i="4"].burst{animation:burst4 .85s 1.44s cubic-bezier(.22,1,.36,1) forwards}
-.splash-item[data-i="5"].burst{animation:burst5 .85s 1.52s cubic-bezier(.22,1,.36,1) forwards}
+/* 6 unique burst trajectories — 40% slower + wider stagger for dramatic reveal */
+.splash-item[data-i="0"].burst{animation:burst0 1.1s 1.60s cubic-bezier(.22,1,.36,1) forwards}
+.splash-item[data-i="1"].burst{animation:burst1 1.1s 1.75s cubic-bezier(.22,1,.36,1) forwards}
+.splash-item[data-i="2"].burst{animation:burst2 1.1s 1.90s cubic-bezier(.22,1,.36,1) forwards}
+.splash-item[data-i="3"].burst{animation:burst3 1.1s 2.05s cubic-bezier(.22,1,.36,1) forwards}
+.splash-item[data-i="4"].burst{animation:burst4 1.1s 2.20s cubic-bezier(.22,1,.36,1) forwards}
+.splash-item[data-i="5"].burst{animation:burst5 1.1s 2.35s cubic-bezier(.22,1,.36,1) forwards}
 
 @keyframes burst0{
   0%{transform:translate(-50%,0) scale(0) rotate(0);opacity:0}
@@ -226,22 +242,108 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
   100%{transform:scale(1) translate(var(--sx),var(--sy));opacity:0}
 }
 
+/* ── Status Track (McDonald's-style sequential steps) ── */
+.splash-status{
+  display:flex;flex-direction:column;gap:10px;
+  width:min(280px,80vw);margin-top:-8px;
+}
+.splash-step{
+  display:flex;align-items:center;gap:10px;padding:8px 12px;
+  background:rgba(255,255,255,.85);
+  border:1px solid rgba(138,233,0,.15);
+  border-radius:11px;
+  box-shadow:0 2px 6px rgba(0,0,0,.03);
+  opacity:0;transform:translateY(10px);
+  transition:border-color .3s ease,box-shadow .3s ease,background .3s ease;
+}
+.splash-step.appear{
+  animation:stepAppear .45s cubic-bezier(.34,1.56,.64,1) forwards;
+}
+.splash-step.active{
+  border-color:rgba(138,233,0,.55);
+  box-shadow:0 3px 12px rgba(138,233,0,.18);
+  background:#ffffff;
+}
+.splash-step.done{
+  border-color:rgba(138,233,0,.35);
+  background:linear-gradient(90deg,#f5ffe6,#ffffff);
+}
+@keyframes stepAppear{
+  0%{opacity:0;transform:translateY(10px) scale(.94)}
+  60%{opacity:1;transform:translateY(-2px) scale(1.02)}
+  100%{opacity:1;transform:translateY(0) scale(1)}
+}
+.splash-step-icon{font-size:1.2rem;line-height:1;width:24px;text-align:center;flex:0 0 auto}
+.splash-step-text{
+  flex:1;font-family:var(--font);font-size:.85rem;font-weight:600;color:#2a3f0a;
+  letter-spacing:.01em;
+}
+.splash-step-state{position:relative;width:20px;height:20px;flex:0 0 auto}
+.splash-step-spin{
+  position:absolute;inset:0;border:2px solid rgba(138,233,0,.2);
+  border-top-color:#8ae900;border-radius:50%;
+  animation:rot .7s linear infinite;
+  opacity:0;transition:opacity .2s ease;
+}
+.splash-step.active .splash-step-spin{opacity:1}
+.splash-step-check{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:.9rem;font-weight:900;color:#fff;
+  background:linear-gradient(135deg,#6bb800,#8ae900);
+  border-radius:50%;
+  transform:scale(0);opacity:0;
+  box-shadow:0 2px 6px rgba(107,184,0,.35);
+}
+.splash-step.done .splash-step-check{
+  animation:checkPop .5s cubic-bezier(.34,1.56,.64,1) forwards;
+}
+.splash-step.done .splash-step-spin{opacity:0}
+@keyframes checkPop{
+  0%{transform:scale(0) rotate(-45deg);opacity:0}
+  60%{transform:scale(1.2) rotate(5deg);opacity:1}
+  100%{transform:scale(1) rotate(0);opacity:1}
+}
+
 /* ── Progress Bar ── */
-.splash-progress-wrap{width:200px;margin-top:8px}
+.splash-progress-wrap{width:min(280px,80vw);margin-top:0}
 .splash-progress-lbl{
-  font-family:var(--font);font-size:.72rem;font-weight:700;color:var(--grl);
-  text-align:center;margin-bottom:6px;letter-spacing:.03em;
-  opacity:0;animation:fadeUp .4s 1.6s ease forwards;
+  font-family:var(--font);font-size:.78rem;font-weight:700;color:#5a9900;
+  text-align:center;margin-bottom:8px;letter-spacing:.03em;
+  opacity:0;animation:fadeUp .4s .3s ease forwards;
+  transition:color .3s ease,transform .3s ease;
+}
+.splash-progress-lbl.celebrate{
+  color:#5a9900;font-size:.95rem;
+  /* Include opacity:1 in the celebrate keyframes so we don't fall back to the
+     base .splash-progress-lbl{opacity:0} when this animation replaces fadeUp. */
+  animation:labelCelebrate .6s cubic-bezier(.34,1.56,.64,1) forwards;
+}
+@keyframes labelCelebrate{
+  0%{transform:scale(1);opacity:1}
+  40%{transform:scale(1.18);opacity:1}
+  100%{transform:scale(1.08);opacity:1}
 }
 @keyframes fadeUp{0%{transform:translateY(8px);opacity:0}100%{transform:translateY(0);opacity:1}}
 .splash-progress{
-  width:100%;height:5px;border-radius:99px;background:#e8e8e8;overflow:hidden;
-  opacity:0;animation:fadeUp .4s 1.5s ease forwards;
+  width:100%;height:6px;border-radius:99px;background:#eaefe0;overflow:hidden;
+  opacity:0;animation:fadeUp .4s .3s ease forwards;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.04);
 }
 .splash-progress-fill{
   height:100%;width:0%;border-radius:99px;
   background:linear-gradient(90deg,var(--gd),var(--g));
-  transition:width 2.2s cubic-bezier(.25,.46,.45,.94);
+  box-shadow:0 0 8px rgba(138,233,0,.4);
+  transition:width .55s cubic-bezier(.25,.46,.45,.94);
+  position:relative;
+}
+/* subtle shimmer stripe traveling across the fill while loading */
+.splash-progress-fill::after{
+  content:'';position:absolute;top:0;left:-30%;height:100%;width:30%;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);
+  animation:shimmer 1.4s linear infinite;
+}
+@keyframes shimmer{
+  to{left:130%}
 }
 
 /* ── LOGIN COMMON ── */

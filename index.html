@@ -81,7 +81,7 @@
   <div class="spin" style="margin-top:8px"></div>
 </div>
 
-<!-- SPLASH SCREEN (Login → App) -->
+<!-- SPLASH SCREEN (Login → App) — 5s McDonald's-style status track -->
 <div id="splash-screen">
   <div class="splash-scene">
     <div class="splash-item" data-i="0">📱</div>
@@ -92,6 +92,25 @@
     <div class="splash-item" data-i="5">🍐</div>
     <div class="splash-lid">🎁</div>
     <div class="splash-box">📦</div>
+  </div>
+
+  <!-- Status track: 3 sequential steps + celebration -->
+  <div class="splash-status" id="splash-status">
+    <div class="splash-step" data-step="1">
+      <div class="splash-step-icon">🔐</div>
+      <div class="splash-step-text">Έλεγχος ασφάλειας</div>
+      <div class="splash-step-state"><div class="splash-step-spin"></div><div class="splash-step-check">✓</div></div>
+    </div>
+    <div class="splash-step" data-step="2">
+      <div class="splash-step-icon">📦</div>
+      <div class="splash-step-text">Φόρτωση δεδομένων</div>
+      <div class="splash-step-state"><div class="splash-step-spin"></div><div class="splash-step-check">✓</div></div>
+    </div>
+    <div class="splash-step" data-step="3">
+      <div class="splash-step-icon">🎁</div>
+      <div class="splash-step-text">Προσφορές &amp; πόντοι</div>
+      <div class="splash-step-state"><div class="splash-step-spin"></div><div class="splash-step-check">✓</div></div>
+    </div>
   </div>
 
   <div class="splash-progress-wrap">
