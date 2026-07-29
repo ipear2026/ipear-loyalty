@@ -58,14 +58,32 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
 #splash-screen{
   position:fixed;inset:0;z-index:9998;
   background:#ffffff;
-  display:none;flex-direction:column;align-items:center;justify-content:center;gap:24px;
+  display:none;flex-direction:column;align-items:center;
+  /* Optical centering (not flex-centering):
+     items burst UPWARD from the scene by ~200px but are absolutely-positioned
+     so they don't count in flex layout. If we just use justify-content:center
+     the visual center of the composition ends up ~120px above viewport center.
+     We compensate with a generous asymmetric padding-block so the whole
+     visual stack (items → box → chips → progress) reads as centered.
+     iPhone safe-area-inset-bottom (34px on notched devices) is respected. */
+  justify-content:flex-start;
+  /* padding-top compensates for the ~92px optical offset caused by items
+     bursting UPWARD (position:absolute, invisible to flex layout). Result:
+     the ENTIRE visual composition — from topmost item at ~y:154 to progress
+     bar bottom at ~y:660 — sits centered around the viewport midline (406px
+     on a 375x812 iPhone). */
+  padding:clamp(160px,26vh,260px) 20px calc(clamp(72px,10vh,120px) + env(safe-area-inset-bottom,0px));
+  gap:32px;
   transition:opacity .6s cubic-bezier(.4,0,.2,1);
   overflow:hidden;
 }
 #splash-screen.active{display:flex}
 #splash-screen.fade-out{opacity:0;pointer-events:none}
 
-/* ── Box Scene (centered) ── */
+/* ── Box Scene ──
+   Height 220px is intentional: it declares vertical space in the flex layout
+   for the burst upward trajectories (items burst up to -200px from box).
+   Without this height, the chips would butt right up against the burst items. */
 .splash-scene{position:relative;width:260px;height:220px;perspective:800px;flex:0 0 auto}
 
 /* Premium glow behind box (anticipation) — slowed for 5s timeline */
