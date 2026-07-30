@@ -6,7 +6,6 @@
 //                    {id}.fcmToken + send confirmation push
 //   • _disablePush — clear fcmToken on customer doc + flip UI
 //   • _togglePush  — route to enable/disable based on current state
-//   • _requestPush — alias of _enablePush (legacy UI binding)
 //
 //  WHY THIS FILE EXISTS (not firebase-init.js):
 //   firebase-init.js is shared by main.js (customer), admin-main.js, and
@@ -80,13 +79,10 @@ window._enablePush = async () => {
     // Let Firebase Messaging auto-register firebase-messaging-sw.js at its
     // default scope (/firebase-cloud-messaging-push-scope/). This does NOT
     // conflict with sw-customer.js which lives at root scope /.
-    logger.log('[push] requesting FCM token...');
-    const t0 = Date.now();
     const token = await _withTimeout(
       getToken(_messaging, { vapidKey: VAPID_KEY }),
       _PUSH_TIMEOUT_MS,
     );
-    logger.log(`[push] getToken completed in ${Date.now() - t0}ms`);
 
     if (!token) {
       _setPushUI(false);
@@ -184,5 +180,3 @@ window._togglePush = () => {
   if (state.foundCustomer?.fcmToken) window._disablePush();
   else window._enablePush();
 };
-
-window._requestPush = window._enablePush;

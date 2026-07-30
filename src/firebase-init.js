@@ -150,7 +150,7 @@ if (IS_DEMO) {
   window._sendEmailVerif = async () => {};
   window._deleteAuthUser = async () => {};
   window._getDoc = async () => ({ exists: () => false, data: () => ({}) });
-  window._requestPush = window._enablePush = async () => showToast('🔔 Push notifications: demo mode','green');
+  window._enablePush = async () => showToast('🔔 Push notifications: demo mode','green');
   window._disablePush = async () => showToast('🔕 Push disabled: demo mode','green');
   // DEMO toggle: state-free routing. Real toggle logic lives in
   // customer-push.js — it overrides this assignment when main.js loads.
@@ -265,7 +265,7 @@ if (IS_DEMO) {
   // Expose the Messaging instance so customer-side code (src/customer/
   // customer-push.js) can call getToken() against it without re-importing
   // firebase/messaging. Customer-push.js is loaded by main.js and owns the
-  // window._enablePush / _disablePush / _togglePush / _requestPush handlers.
+  // window._enablePush / _disablePush / _togglePush handlers.
   // Tablet + admin never touch this — _messaging stays null is fine on those
   // surfaces because customer-push.js is never imported there.
   window._messaging = _messaging;

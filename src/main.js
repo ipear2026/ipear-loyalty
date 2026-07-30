@@ -2,8 +2,6 @@
 //  MAIN.JS — Central Orchestrator
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger, tagLog } from './logger.js';
-tagLog('PAGE-LOAD', `🚀 main.js loaded at ${new Date().toISOString()}`);
-tagLog('PAGE-LOAD', 'ipear_rem in localStorage:', localStorage.getItem('ipear_rem') || '❌ NOT FOUND');
 
 // ── Module imports ──
 import { state } from './state.js';
@@ -38,7 +36,7 @@ import {
 } from './ui-renderers.js';
 import {
   showScreen, _showLogin, autoLogin, _getSavedAccount, _initCheckboxStyle,
-  setupReferralAutoFill, togglePassVis, _REM_KEY,
+  setupReferralAutoFill, togglePassVis,
   submitPhone, submitCreatePass, goToPhone,
   openForgotPass, submitForgotPass, backToLogin,
   openRegister, submitRegister, submitOTP, resendOTP, cancelOTP,
@@ -237,7 +235,7 @@ async function _generateUniquePendingCode(maxTries = 3) {
 //  "still signed in" to a deleted account.
 // ════════════════════════════════════════════════════════════════════
 let _kickInFlight = false;
-export async function _kickOutDeletedAccount(reason = 'deleted') {
+async function _kickOutDeletedAccount(reason = 'deleted') {
   if (_kickInFlight) return;
   _kickInFlight = true;
   logger.warn('[kick-out] account no longer exists — reason:', reason);
@@ -1745,19 +1743,14 @@ registerServiceWorker();
 function _handleFirebaseReady() {
   if (_handleFirebaseReady._done) return;
   _handleFirebaseReady._done = true;
-  logger.log('%c[MAIN] 🔥 firebase-ready HANDLER RUNNING', 'color:#ff6600;font-weight:bold;font-size:16px');
   if (window.DEMO) {
     const dh = document.getElementById('demo-hint');
     if (dh) dh.style.display = 'block';
   }
   const saved = _getSavedAccount();
-  logger.log('%c[MAIN] _getSavedAccount() =', 'color:#ff6600;font-weight:bold;font-size:14px', saved ? JSON.stringify(saved) : 'NULL (no remember-me data)');
-  logger.log('%c[MAIN] auth.currentUser =', 'color:#0088ff;font-weight:bold;font-size:14px', window._auth?.currentUser ? '✅ ' + window._auth.currentUser.email : '❌ NULL');
   if (saved) {
-    logger.log('%c[MAIN] → Calling autoLogin(' + saved.email + ')', 'color:#00cc00;font-weight:bold;font-size:14px');
     autoLogin(saved.email);
   } else {
-    logger.log('%c[MAIN] → No saved account, showing login screen', 'color:#ff0000;font-weight:bold;font-size:14px');
     _showLogin();
   }
   _startMaintenanceListener();
@@ -1768,10 +1761,7 @@ window.addEventListener('firebase-ready', _handleFirebaseReady);
 
 // firebase-init.js uses top-level await and finishes BEFORE this module body runs,
 // so the 'firebase-ready' event has already fired — check the flag immediately.
-if (window._firebaseReady) {
-  logger.log('%c[MAIN] ⚡ firebase-ready already fired (flag=true), running handler immediately', 'color:#ff6600;font-weight:bold;font-size:16px');
-  _handleFirebaseReady();
-}
+if (window._firebaseReady) _handleFirebaseReady();
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  CUSTOMER-ORPHAN AUTH VALIDATOR (was: firebase-init.js)
