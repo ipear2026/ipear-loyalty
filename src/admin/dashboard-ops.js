@@ -111,15 +111,32 @@ export async function processReferralQueue() {
             });
           });
         }
-        // Write ledger for the NEW customer + lock referralProcessed in one commit.
-        // Deterministic id de-dupes vs the self-registration write that may have
-        // already happened (set() with same id is a no-op overwrite — fine).
+        // Write balance +100 for the NEW customer + ledger + lock referralProcessed
+        // in ONE atomic commit. BUGFIX 2026-07-30: this used to only write the
+        // ledger row and set referralProcessed, leaving the actual balance
+        // untouched — a leftover from when the client self-credited +100 at
+        // signup. Post-CRITICAL-2 the client starts at points=0, so without
+        // this credit the new customer was left showing "+100 in history, 0
+        // in balance". Deterministic ledger id de-dupes vs any parallel worker
+        // credit (set() with same id is a no-op overwrite — fine).
         const ncLedgerId = `referral_queue_out_${q.newCustomerId}`;
         await window._runTransaction(db, async (txn) => {
           const ncRef = window._doc(db, 'ipear_customers', q.newCustomerId);
           const ncSnapLive = await txn.get(ncRef);
           if (!ncSnapLive.exists()) throw new Error('New customer missing');
-          txn.update(ncRef, { referralProcessed: true });
+          const ncLive = ncSnapLive.data();
+          // Guard: if the worker's /process-referral already credited via
+          // referralProcessed=true, don't double-credit.
+          if (ncLive.referralProcessed === true) {
+            return;
+          }
+          const ncPts = (ncLive.points || 0) + 100;
+          const ncTot = (ncLive.totalPoints || ncLive.points || 0) + 100;
+          txn.update(ncRef, {
+            points: ncPts,
+            totalPoints: ncTot,
+            referralProcessed: true
+          });
           txn.set(window._doc(db, 'ipear_transactions', ncLedgerId), {
             customerId: q.newCustomerId, customerUid: q.newCustomerUid || '',
             customerEmail: q.newCustomerEmail || '', customerName: q.newCustomerName,

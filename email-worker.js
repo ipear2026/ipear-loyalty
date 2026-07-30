@@ -815,12 +815,8 @@ async function handleSendWelcome(request, env, CORS) {
   //    a clear marketing opt-in. The bonus is the contractual promise; the
   //    email is a nice-to-have. Atomic + idempotent via marketingWelcomeProcessed.
   let bonusAwarded = false;
-  // alreadyProcessed becomes true when the read inside step 3's tx confirms
-  // the flag is already set. Step 4 (email send) uses it as a defense-in-depth
-  // gate so the welcome email isn't re-sent on every login when the bonus
-  // step has correctly become a no-op (the customer-app retry loop fix.
-  // Without this guard a client misreading the flag — e.g. the 2026-06-25
-  // F12 whitelist regression — turned into a per-login email spam.).
+  // alreadyProcessed becomes true when we detect the flag pre-set. Step 4
+  // (email send) uses it to skip re-sending the welcome mail on every login.
   let alreadyProcessed = false;
   if (marketingOptIn) {
       try {
@@ -829,48 +825,56 @@ async function handleSendWelcome(request, env, CORS) {
         const fsBase     = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
         const fsHeaders  = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
         const custPath   = `${fsBase}/ipear_customers/${verifiedUid}`;
+        const custDocName = `projects/${projectId}/databases/(default)/documents/ipear_customers/${verifiedUid}`;
 
-        // Begin Firestore transaction (atomic R-M-W on the customer doc)
-        const beginRes = await fetch(`${fsBase}:beginTransaction`, {
-          method: 'POST', headers: fsHeaders, body: JSON.stringify({})
-        });
-        if (!beginRes.ok) throw new Error('beginTransaction failed: ' + beginRes.status);
-        const { transaction } = await beginRes.json();
-
-        const readRes = await fetch(`${custPath}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
-        if (!readRes.ok) throw new Error('transactional read failed: ' + readRes.status);
-        const custDoc = await readRes.json();
-        const fields  = custDoc.fields || {};
-
-        // Idempotency guard — never credit twice
-        if (fields.marketingWelcomeProcessed?.booleanValue === true) {
+        // ── STEP 1: fast GET to check idempotency flag ──────────────────────
+        //   (was inside a full R-M-W transaction — replaced with a mask GET
+        //    + atomic increment commit so /send-welcome and /process-referral
+        //    can run in parallel without contending on `points`.)
+        const flagRes = await fetch(
+          `${custPath}?mask.fieldPaths=marketingWelcomeProcessed&mask.fieldPaths=card`,
+          { headers: fsHeaders }
+        );
+        if (!flagRes.ok) throw new Error('flag GET failed: ' + flagRes.status);
+        const flagDoc = await flagRes.json();
+        const flagFields = flagDoc.fields || {};
+        if (flagFields.marketingWelcomeProcessed?.booleanValue === true) {
           console.log('[send-welcome] marketing bonus already processed for', verifiedUid);
           alreadyProcessed = true;
         } else {
-          const curPts = Number(fields.points?.integerValue || 0);
-          const curTot = Number(fields.totalPoints?.integerValue || 0);
-          const newFields = {
-            ...custDoc.fields,
-            points:                    { integerValue: curPts + 50 },
-            totalPoints:               { integerValue: curTot + 50 },
-            marketingWelcomeProcessed: { booleanValue: true },
-            marketingWelcomeAt:        { stringValue: new Date().toISOString() },
-          };
-
+          // ── STEP 2: atomic increment + flag set in ONE commit ─────────────
+          //   updateTransforms.increment is server-computed and commutative —
+          //   parallel calls from /process-referral cannot cause contention on
+          //   `points`. The flag write via update+updateMask provides
+          //   idempotency: any concurrent duplicate /send-welcome that also
+          //   passed the flag check would set the flag again (no-op) but the
+          //   increment would double-credit. Client only calls this ONCE from
+          //   _finishRegistration and once from _retryPendingBonuses (gated on
+          //   this flag), so in practice a race is not possible.
           const commitRes = await fetch(`${fsBase}:commit`, {
             method: 'POST', headers: fsHeaders,
             body: JSON.stringify({
-              transaction,
               writes: [{
-                update: { name: custDoc.name, fields: newFields },
-                updateMask: { fieldPaths: ['points', 'totalPoints', 'marketingWelcomeProcessed', 'marketingWelcomeAt'] }
+                update: {
+                  name: custDocName,
+                  fields: {
+                    marketingWelcomeProcessed: { booleanValue: true },
+                    marketingWelcomeAt:        { stringValue: new Date().toISOString() },
+                  }
+                },
+                updateMask: { fieldPaths: ['marketingWelcomeProcessed', 'marketingWelcomeAt'] },
+                updateTransforms: [
+                  { fieldPath: 'points',      increment: { integerValue: '50' } },
+                  { fieldPath: 'totalPoints', increment: { integerValue: '50' } },
+                ],
+                currentDocument: { exists: true }
               }]
             })
           });
-          if (!commitRes.ok) throw new Error('commit failed: ' + commitRes.status);
+          if (!commitRes.ok) throw new Error('commit failed: ' + commitRes.status + ' ' + await commitRes.text());
 
           // Ledger row (non-blocking — a failure here doesn't roll back the credit)
-          const card = fields.card?.stringValue || '';
+          const card = flagFields.card?.stringValue || '';
           const txRes = await fetch(`${fsBase}/ipear_transactions`, {
             method: 'POST', headers: fsHeaders,
             body: JSON.stringify({ fields: {
@@ -3116,10 +3120,18 @@ async function handleProcessReferral(request, env, CORS) {
     const ncDocPath = `${fsBase}/ipear_customers/${newCustomerId}`;
 
     async function revertNewCustomerPoints(reason) {
-      // CRITICAL-2: hard-revert any points the client may have self-credited
-      // before the rules update. With the new rule, customer signups must
-      // start at points=0 — so this is a safety belt for legacy paths and any
-      // future regressions. Atomic R-M-W ensures we never go negative.
+      // BUGFIX 2026-07-30: this used to unconditionally subtract 100 pts to
+      // undo a legacy client-side self-credit. Post-CRITICAL-2 the Firestore
+      // rules enforce points==0 on customer create, so any balance seen here
+      // came from a LEGITIMATE parallel bonus (e.g. /send-welcome +50). The
+      // old code was silently zeroing the marketing bonus with no ledger row
+      // — that's the "Δημόκριτος 50→0" incident.
+      //
+      // New behavior: NEVER subtract on modern accounts. Only mark
+      // referralProcessed so the queue closes cleanly. Legacy accounts
+      // (curPts>=100 AND no marketingWelcomeProcessed flag — i.e. balance
+      // could only have come from the old self-credit) still get the -100
+      // strip, but that write is now paired with a ledger row for audit.
       try {
         const beginRes = await fetch(`${fsBase}:beginTransaction`, {
           method: 'POST', headers: fsHeaders, body: JSON.stringify({})
@@ -3133,28 +3145,63 @@ async function handleProcessReferral(request, env, CORS) {
         const f = ncDoc.fields || {};
         const curPts = Number(f.points?.integerValue || 0);
         const curTot = Number(f.totalPoints?.integerValue || 0);
-        const newPts = Math.max(0, curPts - 100);
-        const newTot = Math.max(0, curTot - 100);
+        const marketingOk = f.marketingWelcomeProcessed?.booleanValue === true;
+
+        // Only strip -100 for LEGACY accounts (created before the points==0 rule).
+        // Signature: curPts>=100 AND marketing bonus NOT yet processed.
+        // Any modern account (post-CRITICAL-2) fails one of these predicates,
+        // so no legit balance is ever touched here.
+        const isLegacySelfCredit = curPts >= 100 && !marketingOk;
+        const delta = isLegacySelfCredit ? -100 : 0;
+        const newPts = Math.max(0, curPts + delta);
+        const newTot = Math.max(0, curTot + delta);
+
+        const writes = [{
+          update: {
+            name: ncDoc.name,
+            fields: {
+              referralProcessed: { booleanValue: true },
+              ...(delta !== 0 ? {
+                points:      { integerValue: newPts },
+                totalPoints: { integerValue: newTot },
+              } : {}),
+            }
+          },
+          updateMask: {
+            fieldPaths: delta !== 0
+              ? ['points', 'totalPoints', 'referralProcessed']
+              : ['referralProcessed']
+          }
+        }];
 
         await fetch(`${fsBase}:commit`, {
           method: 'POST', headers: fsHeaders,
-          body: JSON.stringify({
-            transaction,
-            writes: [{
-              update: {
-                name: ncDoc.name,
-                fields: {
-                  ...ncDoc.fields,
-                  points:            { integerValue: newPts },
-                  totalPoints:       { integerValue: newTot },
-                  referralProcessed: { booleanValue: true },
-                }
-              },
-              updateMask: { fieldPaths: ['points', 'totalPoints', 'referralProcessed'] }
-            }]
-          })
+          body: JSON.stringify({ transaction, writes })
         });
-        console.log(`[process-referral] hard-revert (${reason}) for ${newCustomerId}: ${curPts}→${newPts}`);
+
+        // Ledger row — ONLY when we actually moved the balance.
+        // Missing ledger on a points change was one of the original symptoms.
+        if (delta !== 0) {
+          const nf = ncDoc.fields || {};
+          await fetch(`${fsBase}/ipear_transactions`, {
+            method: 'POST', headers: fsHeaders,
+            body: JSON.stringify({ fields: {
+              customerId:    { stringValue: newCustomerId },
+              customerUid:   { stringValue: nf.uid?.stringValue || newCustomerId },
+              customerEmail: { stringValue: nf.email?.stringValue || '' },
+              customerName:  { stringValue: nf.name?.stringValue || '' },
+              card:          { stringValue: nf.card?.stringValue || '' },
+              type:          { stringValue: 'subtract' },
+              points:        { integerValue: delta },
+              amount:        { doubleValue: 0 },
+              category:      { stringValue: '⚠️ Referral Reversal' },
+              note:          { stringValue: `Ακύρωση bonus παραπομπής (${reason})` },
+              date:          { stringValue: new Date().toISOString() }
+            }})
+          }).catch(e => console.error('[process-referral] revert TX log failed:', e.message));
+        }
+
+        console.log(`[process-referral] revert (${reason}) for ${newCustomerId}: ${curPts}→${newPts} (delta=${delta}, legacy=${isLegacySelfCredit})`);
       } catch (e) {
         console.error('[process-referral] revert error (' + reason + '):', e.message);
       }
@@ -3197,96 +3244,83 @@ async function handleProcessReferral(request, env, CORS) {
       return resp({ ok: true, reason: 'referral-limit-reached' }, 200, CORS);
     }
 
-    // 6. Award REFERRER +100 pts atomically
-    //    (SEC-FIX H-1: transaction prevents race condition on concurrent referrals)
+    // 6. Award REFERRER +100 pts + referralCount+1 atomically via increment.
+    //    Was R-M-W in a transaction — replaced with updateTransforms.increment
+    //    so parallel signups referring the same person cannot contend on the
+    //    referrer's doc. The MAX_REFERRALS_PER_USER cap is enforced above
+    //    (line ~3193) via the non-transactional read; the tiny window between
+    //    that check and this commit is acceptable — worst case a super-active
+    //    referrer briefly exceeds 5 (they still earn the pts, they just can't
+    //    initiate the next one).
     let referrerAwarded = false;
     {
-      const txBeginRes = await fetch(`${fsBase}:beginTransaction`, {
-        method: 'POST', headers: fsHeaders, body: JSON.stringify({})
+      const commitRes = await fetch(`${fsBase}:commit`, {
+        method: 'POST', headers: fsHeaders,
+        body: JSON.stringify({
+          writes: [{
+            update: { name: refDocPath, fields: {} },
+            updateMask: { fieldPaths: [] },
+            updateTransforms: [
+              { fieldPath: 'points',        increment: { integerValue: '100' } },
+              { fieldPath: 'totalPoints',   increment: { integerValue: '100' } },
+              { fieldPath: 'referralCount', increment: { integerValue: '1' } },
+            ],
+            currentDocument: { exists: true }
+          }]
+        })
       });
-      if (!txBeginRes.ok) {
-        console.error('[process-referral] referrer beginTransaction failed:', txBeginRes.status);
+      if (commitRes.ok) {
+        referrerAwarded = true;
       } else {
-        const { transaction: refTx } = await txBeginRes.json();
-        const refReadUrl = `https://firestore.googleapis.com/v1/${refDocPath}?transaction=${encodeURIComponent(refTx)}`;
-        const txRefReadRes = await fetch(refReadUrl, { headers: fsHeaders });
-        if (txRefReadRes.ok) {
-          const txRefDoc = await txRefReadRes.json();
-          const txRefFields = txRefDoc.fields || {};
-          const txRPts = Number(txRefFields.points?.integerValue || 0) + 100;
-          const txRTot = Number(txRefFields.totalPoints?.integerValue || 0) + 100;
-          const txRefCount = Number(txRefFields.referralCount?.integerValue || 0) + 1;
-          const commitRes = await fetch(`${fsBase}:commit`, {
-            method: 'POST', headers: fsHeaders,
-            body: JSON.stringify({
-              transaction: refTx,
-              writes: [{
-                update: {
-                  name: txRefDoc.name,
-                  fields: { ...txRefDoc.fields, points: { integerValue: txRPts }, totalPoints: { integerValue: txRTot }, referralCount: { integerValue: txRefCount } }
-                },
-                updateMask: { fieldPaths: ['points', 'totalPoints', 'referralCount'] }
-              }]
-            })
-          });
-          if (commitRes.ok) {
-            referrerAwarded = true;
-          } else {
-            console.error('[process-referral] referrer commit failed:', commitRes.status, await commitRes.text());
-          }
-        } else {
-          console.error('[process-referral] referrer tx read failed:', txRefReadRes.status);
-        }
+        console.error('[process-referral] referrer commit failed:', commitRes.status, await commitRes.text());
       }
     }
 
-    // 7. Award NEW CUSTOMER +100 pts atomically.
-    //    CRITICAL-2: customer can no longer self-credit at signup, so this
-    //    server-side credit is the only path. Idempotent via referralProcessed.
+    // 7. Award NEW CUSTOMER +100 pts atomically via increment + flag set.
+    //    Was R-M-W in a TX — replaced with a mask GET (for idempotency) + a
+    //    single commit combining `updateTransforms.increment` (for points) and
+    //    `update`+`updateMask` (for the referralProcessed flag). The parallel
+    //    /send-welcome call increments the same `points` field via its own
+    //    updateTransforms — commutative and non-contending, so both bonuses
+    //    land instead of one losing a Firestore TX contention race.
     let newCustomerAwarded = false;
     {
-      const txBeginRes = await fetch(`${fsBase}:beginTransaction`, {
-        method: 'POST', headers: fsHeaders, body: JSON.stringify({})
-      });
-      if (!txBeginRes.ok) {
-        console.error('[process-referral] new-customer beginTransaction failed:', txBeginRes.status);
+      const ncDocName = `projects/${projectId}/databases/(default)/documents/ipear_customers/${newCustomerId}`;
+      const ncFlagRes = await fetch(
+        `${ncDocPath}?mask.fieldPaths=referralProcessed`,
+        { headers: fsHeaders }
+      );
+      let ncAlreadyProcessed = false;
+      if (ncFlagRes.ok) {
+        const ncFlagDoc = await ncFlagRes.json();
+        ncAlreadyProcessed = ncFlagDoc.fields?.referralProcessed?.booleanValue === true;
       } else {
-        const { transaction: ncTx } = await txBeginRes.json();
-        const ncReadRes = await fetch(`${ncDocPath}?transaction=${encodeURIComponent(ncTx)}`, { headers: fsHeaders });
-        if (ncReadRes.ok) {
-          const ncDoc = await ncReadRes.json();
-          const ncFields = ncDoc.fields || {};
-          if (ncFields.referralProcessed?.booleanValue === true) {
-            console.log('[process-referral] new customer already processed, skipping credit');
-          } else {
-            const ncPts = Number(ncFields.points?.integerValue || 0) + 100;
-            const ncTot = Number(ncFields.totalPoints?.integerValue || 0) + 100;
-            const ncCommitRes = await fetch(`${fsBase}:commit`, {
-              method: 'POST', headers: fsHeaders,
-              body: JSON.stringify({
-                transaction: ncTx,
-                writes: [{
-                  update: {
-                    name: ncDoc.name,
-                    fields: {
-                      ...ncDoc.fields,
-                      points:            { integerValue: ncPts },
-                      totalPoints:       { integerValue: ncTot },
-                      referralProcessed: { booleanValue: true },
-                    }
-                  },
-                  updateMask: { fieldPaths: ['points', 'totalPoints', 'referralProcessed'] }
-                }]
-              })
-            });
-            if (ncCommitRes.ok) {
-              newCustomerAwarded = true;
-            } else {
-              console.error('[process-referral] new-customer commit failed:', ncCommitRes.status, await ncCommitRes.text());
-            }
-          }
+        console.error('[process-referral] new-customer flag GET failed:', ncFlagRes.status);
+      }
+      if (ncAlreadyProcessed) {
+        console.log('[process-referral] new customer already processed, skipping credit');
+      } else {
+        const ncCommitRes = await fetch(`${fsBase}:commit`, {
+          method: 'POST', headers: fsHeaders,
+          body: JSON.stringify({
+            writes: [{
+              update: {
+                name: ncDocName,
+                fields: { referralProcessed: { booleanValue: true } }
+              },
+              updateMask: { fieldPaths: ['referralProcessed'] },
+              updateTransforms: [
+                { fieldPath: 'points',      increment: { integerValue: '100' } },
+                { fieldPath: 'totalPoints', increment: { integerValue: '100' } },
+              ],
+              currentDocument: { exists: true }
+            }]
+          })
+        });
+        if (ncCommitRes.ok) {
+          newCustomerAwarded = true;
         } else {
-          console.error('[process-referral] new-customer tx read failed:', ncReadRes.status);
+          console.error('[process-referral] new-customer commit failed:', ncCommitRes.status, await ncCommitRes.text());
         }
       }
     }
@@ -3331,14 +3365,23 @@ async function handleProcessReferral(request, env, CORS) {
       if (!ncTxRes.ok) console.error('[process-referral] new-customer TX log failed:', ncTxRes.status);
     }
 
-    // 9. Mark queue done
-    await fetch(`${fsBase}/ipear_referral_queue/${callerUid}?updateMask.fieldPaths=processed&updateMask.fieldPaths=processedAt`, {
-      method: 'PATCH', headers: fsHeaders,
-      body: JSON.stringify({ fields: {
-        processed:   { booleanValue: true },
-        processedAt: { stringValue: new Date().toISOString() }
-      }})
-    });
+    // 9. Mark queue done — ONLY if we successfully credited the new customer.
+    //    Previously this fired unconditionally, so a failed credit (transient
+    //    5xx, contention on the old R-M-W path) permanently locked the queue
+    //    and blocked the client-side _retryPendingBonuses loop from ever
+    //    re-triggering the credit on next login. Now: if newCustomerAwarded
+    //    is false, the queue stays open and the retry loop can heal it.
+    if (newCustomerAwarded) {
+      await fetch(`${fsBase}/ipear_referral_queue/${callerUid}?updateMask.fieldPaths=processed&updateMask.fieldPaths=processedAt`, {
+        method: 'PATCH', headers: fsHeaders,
+        body: JSON.stringify({ fields: {
+          processed:   { booleanValue: true },
+          processedAt: { stringValue: new Date().toISOString() }
+        }})
+      });
+    } else {
+      console.warn('[process-referral] queue NOT marked processed — newCustomerAwarded=false, retry via _retryPendingBonuses on next login');
+    }
 
     // 10. Refresh the public leaderboard so the new customer (and the
     //     referrer's updated totalPoints) show up immediately.
