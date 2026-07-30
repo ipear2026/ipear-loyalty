@@ -16,9 +16,7 @@ import { findCustomerByAuth } from './services/firebase.js';
 //  AUTH STATE
 // ════════════════════════════════════════
 let _regData = null;
-let _confirmResult = null;
 let _otpResendTimer = null;
-let _brevoOtpMode = false;
 export const _REM_KEY = 'ipear_rem';
 const _CACHE_KEY = 'ipear_customer_cache';
 
@@ -49,7 +47,7 @@ function _persistMinimalCache(c) {
   } catch(_) {}
 }
 
-function _getCachedCustomer(email) {
+function _getCachedCustomer() {
   try {
     const c = JSON.parse(localStorage.getItem(_CACHE_KEY));
     if (!c) return null;
@@ -60,11 +58,6 @@ function _getCachedCustomer(email) {
       localStorage.removeItem(_CACHE_KEY);
       return null;
     }
-    // The email parameter was the pre-fix identity check. With minimal
-    // cache that field is gone — the cache is browser-scoped and Firebase
-    // Auth's currentUser already gates access, so per-email matching is
-    // redundant. Kept the parameter to preserve the call-site signature.
-    void email;
     return c;
   } catch { return null; }
 }
@@ -86,10 +79,9 @@ export function showScreen(id) {
 // ════════════════════════════════════════════════════════════════════════════
 //  SPLASH SCREEN (Login → App transition) — 5-second McDonald's-style track
 //
-//  Fixed 5000ms duration. _splashDone() is a no-op for pacing (we no longer
-//  cut short when data is ready fast) — the deliberate reveal + status log
-//  IS the UX. The 5s window buys time for slow-network first-loads and reads
-//  as "we're doing serious work for you" instead of "loading spinner".
+//  Fixed 5000ms duration — the deliberate reveal + status log IS the UX. The
+//  5s window buys time for slow-network first-loads and reads as "we're doing
+//  serious work for you" instead of "loading spinner".
 //
 //  Timeline (see customer.css splash section for CSS-side timings):
 //    0ms    → screen fades in, box drops (CSS: boxDrop@.2s)
@@ -104,7 +96,6 @@ export function showScreen(id) {
 //    5000ms → fade out (600ms transition)
 // ════════════════════════════════════════════════════════════════════════════
 let _splashStart = 0;
-let _splashDataReady = false;
 let _splashHideTimer = null;
 const _SPLASH_DURATION_MS = 5000;
 const _SPLASH_FADE_MS     = 600;
@@ -122,7 +113,6 @@ const _SPLASH_STEPS = [
 
 function _showSplash() {
   _splashStart = Date.now();
-  _splashDataReady = false;
   if (_splashHideTimer) { clearTimeout(_splashHideTimer); _splashHideTimer = null; }
 
   document.getElementById('loading').style.display = 'none';
@@ -198,13 +188,6 @@ function _splashMark(root, mark) {
   }
 }
 
-function _splashDone() {
-  // Data-ready signal — kept for API compat with existing callers, but the
-  // splash is time-locked to 5s now. Data being ready faster is fine; we
-  // just note it and let the timer complete the fade.
-  _splashDataReady = true;
-}
-
 function _hideSplash() {
   const el = document.getElementById('splash-screen');
   if (!el || !el.classList.contains('active') || el.classList.contains('fade-out')) return;
@@ -245,7 +228,6 @@ async function _transitionToApp() {
     // Raw e.message is logged elsewhere; user sees clean copy.
     showToast('⚠️ Δεν φόρτωσε. Δοκίμασε ξανά', 'red');
   }
-  _splashDone();
 }
 
 // ── Loading hide: guarded so it runs only once
@@ -320,8 +302,6 @@ export function togglePassVis() {
 //  AUTO LOGIN (from remember-me)
 // ════════════════════════════════════════
 export async function autoLogin(email) {
-  logger.log('%c[AUTO-LOGIN] ▶️ autoLogin CALLED with email:', 'color:#ff6600;font-weight:bold;font-size:14px', email);
-  logger.log('%c[AUTO-LOGIN] auth.currentUser:', 'color:#0088ff;font-weight:bold;font-size:14px', window._auth?.currentUser ? '✅ ' + window._auth.currentUser.email : '❌ NULL');
   _loginShown = true;
   document.getElementById('loading').style.display = 'none';
   try {
@@ -334,20 +314,17 @@ export async function autoLogin(email) {
     if (!state.foundCustomer) {
       if (lookup.error) {
         // Reads failed — App Check token expiry, offline, Firestore unreachable.
-        // Surface the connectivity issue and try the cached customer (handled
-        // by the outer catch fallback); do NOT wipe the remember-me cache on a
-        // transient failure.
-        logger.log('%c[AUTO-LOGIN] ⚠️ lookup error:', 'color:#ff6600;font-weight:bold;font-size:14px', lookup.error);
-        const cached = _getCachedCustomer(email);
+        // Surface the connectivity issue and try the cached customer; do NOT
+        // wipe the remember-me cache on a transient failure.
+        logger.warn('[auto-login] lookup error:', lookup.error);
+        const cached = _getCachedCustomer();
         if (cached) { state.foundCustomer = cached; _transitionToApp(); return; }
         showToast('⚠️ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
         showScreen('s-phone'); _initCheckboxStyle(); return;
       }
-      logger.log('%c[AUTO-LOGIN] ❌ Firestore snap EMPTY', 'color:#ff0000;font-weight:bold;font-size:14px');
       localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); showScreen('s-phone'); _initCheckboxStyle(); return;
     }
     if (state.foundCustomer.blocked) {
-      logger.log('%c[AUTO-LOGIN] ❌ Customer BLOCKED', 'color:#ff0000;font-weight:bold;font-size:14px');
       localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); state.foundCustomer = null;
       showScreen('s-phone'); _initCheckboxStyle(); return;
     }
@@ -360,17 +337,14 @@ export async function autoLogin(email) {
       _migrateCustomerToUid(state.foundCustomer.id, authUid)
         .catch(e => logger.warn('[migrate-uid] background:', e?.code || e?.message || e));
     }
-    logger.log('%c[AUTO-LOGIN] ✅ Firestore OK → _transitionToApp()', 'color:#00cc00;font-weight:bold;font-size:16px');
     _transitionToApp();
   } catch(e) {
-    logger.log('%c[AUTO-LOGIN] ⚠️ Firestore query failed:', 'color:#ff6600;font-weight:bold;font-size:14px', e?.code || e?.message || e);
-    const cached = _getCachedCustomer(email);
+    logger.warn('[auto-login] failed:', e?.code || e?.message || e);
+    const cached = _getCachedCustomer();
     if (cached) {
-      logger.log('%c[AUTO-LOGIN] 📦 Using CACHED customer data — loading app from cache', 'color:#00cc00;font-weight:bold;font-size:16px');
       state.foundCustomer = cached;
       _transitionToApp();
     } else {
-      logger.log('%c[AUTO-LOGIN] ❌ No cache, showing login', 'color:#ff0000;font-weight:bold;font-size:14px');
       showScreen('s-phone'); _initCheckboxStyle();
     }
   }
@@ -728,7 +702,6 @@ export async function submitRegister() {
     const _otpData = await _otpRes.json();
     if (!_otpRes.ok) throw new Error(_otpData.error || 'Αποτυχία αποστολής SMS');
 
-    _brevoOtpMode = true;
     localStorage.setItem(_smsPhoneKey, _now.toString());
     localStorage.setItem(_smsGlobalKey, JSON.stringify([..._globalLog, _now]));
 
@@ -774,80 +747,31 @@ export async function submitOTP() {
     err.textContent = '⚠️ Εισάγετε τον 6ψήφιο κωδικό.'; return;
   }
 
-  if (_brevoOtpMode && _regData) {
-    btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
-    try {
-      const vRes = await fetch(_WORKER_URL + '/verify-sms-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // email passed so the worker can clean up orphan Auth users left over
-        // from prior admin deletions (no Firestore record, but Auth still locked).
-        body: JSON.stringify({ phone: _regData.phone, code, email: _regData.email }),
-      });
-      const vData = await vRes.json();
-      if (!vRes.ok) throw new Error(vData.error || 'Λάθος κωδικός');
-
-      if (window._setPersistenceMode) await window._setPersistenceMode('local');
-      const authResult = await window._createUser(window._auth, _regData.email, _regData.password);
-      const authUser = authResult?.user || null;
-      if (!authUser) throw new Error('Αποτυχία δημιουργίας λογαριασμού');
-
-      window._sendEmailVerif(authUser).catch(() => {});
-
-      const card = 'IP-' + authUser.uid.slice(-6).toUpperCase();
-      await _finishRegistration(authUser, {
-        name:     _regData.name,
-        phone:    _regData.phone,
-        email:    _regData.email,
-        card,
-        birthday: _regData.birthday,
-        refCode:  _regData.refCode,
-        marketingOptIn: _regData.marketingOptIn,
-      });
-
-      if (_otpResendTimer) { clearInterval(_otpResendTimer); _otpResendTimer = null; }
-      _regData = null; _confirmResult = null; _brevoOtpMode = false;
-      return;
-
-    } catch(e) {
-      logger.error('[brevo-otp] verify error:', e.code || '', e.message);
-      if (e.code === 'auth/email-already-in-use') {
-        err.textContent = '❌ Υπάρχει ήδη λογαριασμός με αυτό το email. Χρησιμοποίησε την Είσοδο.';
-      } else {
-        err.textContent = '❌ ' + (e.message || 'Σφάλμα επαλήθευσης');
-      }
-      btn.disabled = false; btn.innerHTML = 'Επαλήθευση →';
-      return;
-    }
-  }
-
-  if (!_confirmResult || !_regData) {
+  if (!_regData) {
     err.textContent = '❌ Λήξη συνεδρίας. Επιστρέψτε και ξαναδοκιμάστε.'; return;
   }
 
   btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
   try {
+    const vRes = await fetch(_WORKER_URL + '/verify-sms-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // email passed so the worker can clean up orphan Auth users left over
+      // from prior admin deletions (no Firestore record, but Auth still locked).
+      body: JSON.stringify({ phone: _regData.phone, code, email: _regData.email }),
+    });
+    const vData = await vRes.json();
+    if (!vRes.ok) throw new Error(vData.error || 'Λάθος κωδικός');
+
     if (window._setPersistenceMode) await window._setPersistenceMode('local');
-    const result = await _confirmResult.confirm(code);
-    const phoneUser = result.user;
+    const authResult = await window._createUser(window._auth, _regData.email, _regData.password);
+    const authUser = authResult?.user || null;
+    if (!authUser) throw new Error('Αποτυχία δημιουργίας λογαριασμού');
 
-    const uidSnap = await window._getDocs(
-      window._query(window._col(window._db,'ipear_customers'), window._where('uid','==',phoneUser.uid))
-    );
-    if (!uidSnap.empty) {
-      err.textContent = '⚠️ Αυτό το κινητό είναι ήδη εγγεγραμμένο. Χρησιμοποίησε την Είσοδο.';
-      btn.disabled = false; btn.innerHTML = 'Επαλήθευση →';
-      return;
-    }
+    window._sendEmailVerif(authUser).catch(() => {});
 
-    const emailCred = window._emailCredential(_regData.email, _regData.password);
-    const linkedResult = await window._linkCredential(phoneUser, emailCred);
-    const linkedUser = linkedResult?.user || phoneUser;
-    await linkedUser.getIdToken(true);
-    window._sendEmailVerif(linkedUser).catch(() => {});
-
-    const card = 'IP-' + linkedUser.uid.slice(-6).toUpperCase();
-    await _finishRegistration(linkedUser, {
+    const card = 'IP-' + authUser.uid.slice(-6).toUpperCase();
+    await _finishRegistration(authUser, {
       name:     _regData.name,
       phone:    _regData.phone,
       email:    _regData.email,
@@ -858,55 +782,15 @@ export async function submitOTP() {
     });
 
     if (_otpResendTimer) { clearInterval(_otpResendTimer); _otpResendTimer = null; }
-    _regData = null; _confirmResult = null;
+    _regData = null;
 
   } catch(e) {
+    logger.error('[brevo-otp] verify error:', e.code || '', e.message);
     if (e.code === 'auth/email-already-in-use') {
-      try {
-        const orphanPhoneUser = window._auth?.currentUser;
-        if (orphanPhoneUser) await window._deleteAuthUser(orphanPhoneUser);
-      } catch(_) {}
-      try {
-        const emailResult = await window._signIn(window._auth, _regData.email, _regData.password);
-        const emailUser = emailResult?.user || emailResult;
-        const existSnap = await window._getDocs(
-          window._query(window._col(window._db,'ipear_customers'), window._where('uid','==',emailUser.uid))
-        );
-        if (!existSnap.empty) {
-          await window._signOut();
-          err.textContent = '❌ Υπάρχει ήδη λογαριασμός με αυτό το email. Χρησιμοποίησε την Είσοδο.';
-          btn.disabled = false; btn.innerHTML = 'Επαλήθευση →';
-          return;
-        }
-        const card2 = 'IP-' + emailUser.uid.slice(-6).toUpperCase();
-        await _finishRegistration(emailUser, {
-          name: _regData.name, phone: _regData.phone,
-          email: _regData.email, card: card2,
-          birthday: _regData.birthday, refCode: _regData.refCode,
-          marketingOptIn: _regData.marketingOptIn,
-        });
-        if (_otpResendTimer) { clearInterval(_otpResendTimer); _otpResendTimer = null; }
-        _regData = null; _confirmResult = null;
-        return;
-      } catch(innerE) {
-        const wrongPass = ['auth/wrong-password','auth/invalid-credential','auth/invalid-login-credentials'];
-        if (wrongPass.includes(innerE.code)) {
-          err.textContent = '❌ Υπάρχει ήδη λογαριασμός με αυτό το email. Χρησιμοποίησε την Είσοδο.';
-        } else {
-          err.textContent = '❌ ' + (innerE.message || innerE.code || 'Σφάλμα εγγραφής.');
-        }
-        btn.disabled = false; btn.innerHTML = 'Επαλήθευση →';
-        return;
-      }
+      err.textContent = '❌ Υπάρχει ήδη λογαριασμός με αυτό το email. Χρησιμοποίησε την Είσοδο.';
+    } else {
+      err.textContent = '❌ ' + (e.message || 'Σφάλμα επαλήθευσης');
     }
-    const msgs = {
-      'auth/invalid-verification-code': '❌ Λάθος κωδικός. Ξαναδοκίμασε.',
-      'auth/code-expired':              '❌ Ο κωδικός έληξε. Πάτα "Επανάληψη SMS".',
-      'auth/too-many-requests':         '🔴 Πολλές αποτυχημένες προσπάθειες. Δοκίμασε αργότερα.',
-      'auth/network-request-failed':    '🔴 Πρόβλημα δικτύου.',
-    };
-    try { if (window._auth?.currentUser) await window._signOut(); } catch(_) {}
-    err.textContent = msgs[e.code] || ('❌ ' + (e.message || e.code || 'Σφάλμα επαλήθευσης.'));
     btn.disabled = false; btn.innerHTML = 'Επαλήθευση →';
   }
 }
@@ -938,7 +822,6 @@ export async function resendOTP() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Αποτυχία αποστολής');
 
-    _brevoOtpMode = true;
     localStorage.setItem('_sms_p_' + _regData.phone, _now2.toString());
     localStorage.setItem(_smsGlobalKey, JSON.stringify([..._globalLog2, _now2]));
     _startOTPResendTimer(60);
@@ -952,8 +835,6 @@ export async function resendOTP() {
 
 export function cancelOTP() {
   if (_otpResendTimer) { clearInterval(_otpResendTimer); _otpResendTimer = null; }
-  _confirmResult = null;
-  _brevoOtpMode = false;
   if (_regData?.phone) {
     try { localStorage.removeItem('_sms_p_' + _regData.phone); } catch(_) {}
   }
@@ -1001,10 +882,7 @@ export async function submitPhone() {
   btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
   try {
     const remCb = document.getElementById('rem-me');
-    logger.log('%c[LOGIN] CHECKBOX ELEMENT:', 'color:#ff00ff;font-weight:bold;font-size:14px', remCb);
-    logger.log('%c[LOGIN] CHECKBOX VALUE IS:', 'color:#ff00ff;font-weight:bold;font-size:14px', remCb?.checked);
     if (window._setPersistenceMode) {
-      logger.log('%c[LOGIN] Calling _setPersistenceMode with:', 'color:#ff6600;font-weight:bold;font-size:14px', remCb?.checked ? 'LOCAL 👑' : 'SESSION ⏳');
       try {
         await window._setPersistenceMode(remCb?.checked ? 'local' : 'session');
       } catch (pe) {
@@ -1022,8 +900,6 @@ export async function submitPhone() {
           setTimeout(() => { try { err.textContent = ''; } catch(_) {} }, 5000);
         }
       }
-    } else {
-      logger.log('%c[LOGIN] ⚠️ window._setPersistenceMode IS MISSING!', 'color:#ff0000;font-weight:bold;font-size:16px');
     }
     const authResult = await window._signIn(window._auth, email, pass);
     const firebaseUID = authResult?.user?.uid || authResult?.uid || null;
@@ -1117,12 +993,9 @@ export async function submitPhone() {
     _persistMinimalCache(state.foundCustomer);
     if (remCb?.checked) {
       localStorage.setItem(_REM_KEY, JSON.stringify({email: state.foundCustomer.email||email, name: state.foundCustomer.name}));
-      logger.log('%c[LOGIN] ✅ Saved _REM_KEY + cache to localStorage', 'color:#00cc00;font-weight:bold;font-size:14px');
     } else {
       localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY);
-      logger.log('%c[LOGIN] ❌ Removed _REM_KEY (checkbox unchecked)', 'color:#ff0000;font-weight:bold;font-size:14px');
     }
-    logger.log('%c[LOGIN] auth.currentUser after signIn:', 'color:#0088ff;font-weight:bold;font-size:14px', window._auth?.currentUser?.email || 'NULL');
 
     document.getElementById('auth-pass').value = '';
     _transitionToApp();
@@ -1174,13 +1047,8 @@ export async function submitCreatePass() {
   if (p1 !== p2) { err.textContent = '❌ Οι κωδικοί δεν ταιριάζουν.'; return; }
   try {
     const remCb = document.getElementById('rem-me');
-    logger.log('%c[CREATE-PASS] CHECKBOX ELEMENT:', 'color:#ff00ff;font-weight:bold;font-size:14px', remCb);
-    logger.log('%c[CREATE-PASS] CHECKBOX VALUE IS:', 'color:#ff00ff;font-weight:bold;font-size:14px', remCb?.checked);
     if (window._setPersistenceMode) {
-      logger.log('%c[CREATE-PASS] Calling _setPersistenceMode with:', 'color:#ff6600;font-weight:bold;font-size:14px', remCb?.checked ? 'LOCAL 👑' : 'SESSION ⏳');
       await window._setPersistenceMode(remCb?.checked ? 'local' : 'session');
-    } else {
-      logger.log('%c[CREATE-PASS] ⚠️ window._setPersistenceMode IS MISSING!', 'color:#ff0000;font-weight:bold;font-size:16px');
     }
     const authResult = await window._createUser(window._auth, email, p1);
     const firebaseUID = authResult?.user?.uid || authResult?.uid || null;
@@ -1196,11 +1064,7 @@ export async function submitCreatePass() {
     _persistMinimalCache(state.foundCustomer);
     if (remCb?.checked) {
       localStorage.setItem(_REM_KEY, JSON.stringify({email: state.foundCustomer.email||email, name: state.foundCustomer.name}));
-      logger.log('%c[CREATE-PASS] ✅ Saved _REM_KEY + cache', 'color:#00cc00;font-weight:bold;font-size:14px');
-    } else {
-      logger.log('%c[CREATE-PASS] ❌ _REM_KEY NOT saved (checkbox unchecked)', 'color:#ff0000;font-weight:bold;font-size:14px');
     }
-    logger.log('%c[CREATE-PASS] auth.currentUser after createUser:', 'color:#0088ff;font-weight:bold;font-size:14px', window._auth?.currentUser?.email || 'NULL');
     document.getElementById('auth-newpass1').value = '';
     document.getElementById('auth-newpass2').value = '';
     backToLogin();
@@ -1212,7 +1076,6 @@ export async function submitCreatePass() {
 }
 
 export function goToPhone() {
-  logger.log('%c[AUTH] 🔙 goToPhone() CALLED — removing _REM_KEY + signOut', 'color:#ff0000;font-weight:bold;font-size:14px');
   state.foundCustomer = null;
   localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY);
   document.getElementById('phone-in').value = '';
@@ -1228,15 +1091,12 @@ export function goToPhone() {
 //  LOGOUT
 // ════════════════════════════════════════
 export function logout() {
-  logger.log('%c[AUTH] 🚪 logout() CALLED', 'color:#ff0000;font-weight:bold;font-size:16px');
   // Q-2 fix: synchronous cleanup BEFORE signOut so listeners can't briefly
   // fire on a half-torn-down session.
   try { _forceCleanup(); } catch(_) {}
   try { _cancelActiveRedemption('logout'); } catch(_) {}
   if (_otpResendTimer) { clearInterval(_otpResendTimer); _otpResendTimer = null; }
   _regData = null;
-  _confirmResult = null;
-  _brevoOtpMode = false;
   state.foundCustomer = null;
   localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY);
   try { localStorage.removeItem('ipear_offline_card'); } catch(_) {}

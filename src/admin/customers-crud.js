@@ -336,30 +336,73 @@ export async function deleteCust() {
     const email = cdata?.email || '';
     const card  = cdata?.card  || '';
 
-    // ── 1. Delete primary Firestore doc ──────────────────────────────
-    await window._deleteDoc(window._doc(db,'ipear_customers',cid));
-
-    // ── 2. CASCADE: find & delete ALL remaining docs with same phone/email/card ──
-    // Handles migration duplicates (old random-ID doc + new UID-based doc)
+    // ── 1. Discover all customer doc IDs + uids BEFORE deleting anything ───
+    // Was doing the delete first; if the subsequent Auth call failed the
+    // Firestore doc was gone but the Auth account stayed → next re-registration
+    // failed with `auth/email-already-in-use`. Now: read-only enumeration
+    // first, then Auth-delete via Worker, then Firestore cascade. If Auth
+    // fails we abort BEFORE touching Firestore, so the customer keeps working.
     const uidsToDel = new Set();
-    const idsToDel = new Set([cid]); // track all customer doc IDs for downstream cleanup
+    const idsToDel = new Set([cid]);
     if (cdata?.uid) uidsToDel.add(cdata.uid);
     const orphanQueries = [];
     if (phone) orphanQueries.push(window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('phone','==',phone))));
     if (email) orphanQueries.push(window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('email','==',email))));
     if (card)  orphanQueries.push(window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('card','==',card))));
     const results = await Promise.allSettled(orphanQueries);
-    const orphanDels = [];
+    const orphanIds = [];
     for (const r of results) {
       if (r.status !== 'fulfilled' || r.value.empty) continue;
       r.value.forEach(d => {
         const od = d.data();
         if (od.uid) uidsToDel.add(od.uid);
         idsToDel.add(d.id);
-        orphanDels.push(window._deleteDoc(window._doc(db,'ipear_customers',d.id)));
+        if (d.id !== cid) orphanIds.push(d.id);
       });
     }
-    if (orphanDels.length) await Promise.allSettled(orphanDels);
+
+    // ── 2. Delete Firebase Auth accounts FIRST via Worker ─────────────────
+    //   Blocking. If this fails (worker down, wrong secret, network) we
+    //   abort — Firestore stays intact and the customer remains functional.
+    //   Worker uses Identity Toolkit admin API + email fallback for legacy
+    //   accounts without a stored uid.
+    const workerUrl = localStorage.getItem('ipear_worker_url');
+    const workerSec = _hooks.getWorkerSecret();
+    if (!workerUrl || !workerSec) {
+      toast('❌ Δεν είναι ρυθμισμένο το Worker URL/Secret. Ρύθμισε τα πρώτα ή διάγραψε τον χρήστη χειροκίνητα από το Firebase Console.', 'error');
+      _deleteCustBusy = false;
+      return;
+    }
+    const endpoint = workerUrl.replace(/\/$/, '') + '/admin/delete-auth-user';
+    const headers  = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + workerSec };
+    const targets = [];
+    for (const uid of uidsToDel) targets.push({ uid, email });
+    if (!targets.length && email) targets.push({ email });
+    if (targets.length) {
+      const authResults = await Promise.allSettled(targets.map(payload =>
+        fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(payload) })
+          .then(async r => {
+            if (!r.ok) {
+              const body = await r.json().catch(() => ({}));
+              throw new Error(body.error || ('HTTP ' + r.status));
+            }
+            return r.json();
+          })
+      ));
+      const failedAuth = authResults.filter(r => r.status === 'rejected');
+      if (failedAuth.length) {
+        logger.warn('[delete-auth] failures:', failedAuth.map(f => f.reason?.message));
+        toast('❌ Αποτυχία διαγραφής Firebase Auth: ' + (failedAuth[0].reason?.message || 'unknown') + '. Ο πελάτης ΔΕΝ διαγράφηκε — δοκίμασε ξανά ή διάγραψε χειροκίνητα.', 'error');
+        _deleteCustBusy = false;
+        return;
+      }
+    }
+
+    // ── 3. NOW delete primary + orphan Firestore customer docs ────────────
+    await window._deleteDoc(window._doc(db,'ipear_customers',cid));
+    if (orphanIds.length) {
+      await Promise.allSettled(orphanIds.map(id => window._deleteDoc(window._doc(db,'ipear_customers',id))));
+    }
 
     // ── 2b. IAM-FIX: CASCADE related collections (transactions, redemptions, queue) ──
     try {
@@ -419,51 +462,10 @@ export async function deleteCust() {
       }
     } catch(cascadeErr) { logger.warn('[delete-cascade] partial failure:', cascadeErr?.message); }
 
-    // ── 3. Delete ALL Firebase Auth accounts found ───────────────────
-    // The worker uses Identity Toolkit admin API — without this step the email
-    // stays locked in Firebase Auth and the customer cannot re-register with
-    // the same email. We send BOTH uid (when known) AND email (as fallback)
-    // so the worker can resolve legacy customers without a stored uid.
-    const workerUrl = localStorage.getItem('ipear_worker_url');
-    const workerSec = _hooks.getWorkerSecret();
-    let authIssue = null;
-    if (!workerUrl || !workerSec) {
-      authIssue = 'no-worker';
-    } else {
-      const endpoint = workerUrl.replace(/\/$/, '') + '/admin/delete-auth-user';
-      const headers  = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + workerSec };
-      const targets = [];
-      // Always include each known uid
-      for (const uid of uidsToDel) targets.push({ uid, email });
-      // If we never collected a uid, attempt email-only fallback (worker resolves via Identity Toolkit lookup)
-      if (!targets.length && email) targets.push({ email });
-      const results = await Promise.allSettled(targets.map(payload =>
-        fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(payload) })
-          .then(async r => {
-            if (!r.ok) {
-              const body = await r.json().catch(() => ({}));
-              throw new Error(body.error || ('HTTP ' + r.status));
-            }
-            return r.json();
-          })
-      ));
-      const failed = results.filter(r => r.status === 'rejected');
-      if (failed.length) {
-        authIssue = 'partial';
-        logger.warn('[delete-auth] failures:', failed.map(f => f.reason?.message));
-      }
-    }
-
     document.getElementById('cust-result').classList.remove('show');
     document.getElementById('sinput').value='';
     _hooks.setScope({ cid: null, cdata: null });
-    if (authIssue === 'no-worker') {
-      toast('⚠️ Πελάτης διαγράφηκε από Firestore, αλλά το Firebase Auth account ΠΑΡΑΜΕΝΕΙ — δεν είναι ρυθμισμένο το Worker secret. Διαγράψτε το χειροκίνητα από το Firebase Console για να μπορέσει ο πελάτης να ξαναγραφτεί.','error');
-    } else if (authIssue === 'partial') {
-      toast('⚠️ Ο πελάτης διαγράφηκε αλλά μέρος των Firebase Auth accounts ίσως παραμένει. Έλεγξε το Firebase Console.','error');
-    } else {
-      toast('🗑 Ο πελάτης διαγράφηκε.','success');
-    }
+    toast('🗑 Ο πελάτης διαγράφηκε (Auth + Firestore).','success');
     loadStats(); loadAll();
   } catch(e) { toast('❌ '+e.message,'error'); }
   finally { _deleteCustBusy = false; }
