@@ -470,6 +470,21 @@ export function openRegister() {
   showScreen('s-register');
 }
 
+// Timeout wrapper for the critical registration writes. Firestore SDK
+// occasionally hangs on client-side setDoc when App Check token acquisition
+// stalls or when the browser drops offline mid-request — without a hard
+// deadline the OTP button spins forever and the user has no way out.
+// 12s is generous enough for slow 3G but cuts off obvious hangs.
+function _withDeadline(promise, ms, label) {
+  let t;
+  return Promise.race([
+    promise.finally(() => { if (t) clearTimeout(t); }),
+    new Promise((_, rej) => {
+      t = setTimeout(() => rej(new Error(`Timeout: ${label} (${ms}ms)`)), ms);
+    }),
+  ]);
+}
+
 async function _finishRegistration(authUser, { name, phone, email, card, birthday, refCode, marketingOptIn }) {
   const firebaseUID = authUser?.uid || null;
   // CRITICAL-2: customer CANNOT self-credit any signup bonus. The Firestore
@@ -480,26 +495,38 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
   const customerDocId = firebaseUID;
   const _now = new Date().toISOString();
   try {
-    await window._setDoc(window._doc(window._db,'ipear_customers', customerDocId), {
-      name, phone, email, card,
-      uid: firebaseUID || '',
-      points: 0, totalPoints: 0,
-      birthday: birthday || '',
-      referredBy: refCode || '',
-      blocked: false,
-      referralProcessed: false,
-      referralCount: 0,
-      fcmToken: '',
-      marketingOptIn: !!marketingOptIn,
-      marketingOptInAt: marketingOptIn ? _now : '',
-      termsAcceptedAt: _now,
-      createdAt: _now
-    });
+    await _withDeadline(
+      window._setDoc(window._doc(window._db,'ipear_customers', customerDocId), {
+        name, phone, email, card,
+        uid: firebaseUID || '',
+        points: 0, totalPoints: 0,
+        birthday: birthday || '',
+        referredBy: refCode || '',
+        blocked: false,
+        referralProcessed: false,
+        referralCount: 0,
+        fcmToken: '',
+        marketingOptIn: !!marketingOptIn,
+        marketingOptInAt: marketingOptIn ? _now : '',
+        termsAcceptedAt: _now,
+        createdAt: _now
+      }),
+      12000, 'Firestore customer create'
+    );
   } catch(fsErr) {
+    logger.error('[register] setDoc failed:', fsErr?.code || '', fsErr?.message || fsErr);
+    // Roll back: delete the Auth user so the customer can retry from scratch
+    // without hitting `auth/email-already-in-use`.
     if (authUser && window._deleteAuthUser) {
-      try { await window._deleteAuthUser(authUser); } catch(_) {}
+      try { await _withDeadline(window._deleteAuthUser(authUser), 6000, 'auth rollback'); } catch(_) {}
     }
-    throw fsErr;
+    // Re-throw with a user-friendly message the OTP catch will surface.
+    const friendly = fsErr?.message?.startsWith('Timeout')
+      ? 'Πρόβλημα σύνδεσης με τη βάση. Έλεγξε internet και δοκίμασε ξανά.'
+      : 'Δεν ολοκληρώθηκε η εγγραφή. Δοκίμασε ξανά σε λίγο.';
+    const wrapped = new Error(friendly);
+    wrapped.cause = fsErr;
+    throw wrapped;
   }
 
   if (refCode) {
