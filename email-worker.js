@@ -294,19 +294,6 @@ export default {
       return handleHealthDeep(request, env, CORS);
     }
 
-    // ── GET /sw-kill — Service Worker kill switch (checked by SW on activate) ──
-    // Returns { nuke: true } if KV key "sw_kill" is set to "true".
-    // To activate: wrangler kv:key put --namespace-id=9b7bfd14b586445db94e932a75635f85 "sw_kill" "true"
-    // To deactivate: wrangler kv:key delete --namespace-id=9b7bfd14b586445db94e932a75635f85 "sw_kill"
-    if (request.method === 'GET' && path === '/sw-kill') {
-      let nuke = false;
-      if (env.RATE_LIMIT_KV) {
-        try { nuke = (await env.RATE_LIMIT_KV.get('sw_kill')) === 'true'; } catch(_) {}
-      }
-      return resp({ nuke, ts: new Date().toISOString() }, 200,
-        { ...CORS, 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Cache-Control': 'no-store' });
-    }
-
     // ── MEDIUM-1: GET /admin/export-download — HMAC-signed R2 streaming ──
     //  Routed BEFORE the POST-only gate; the signature in the URL IS the
     //  credential (no ADMIN_SECRET in the link), so the admin can paste the

@@ -1,27 +1,6 @@
 // ─── bump this version every deploy to bust the cache ────────────────────────
-const CACHE_VER = 'ipear-admin-20260615-v6';
+const CACHE_VER = 'ipear-admin-20260730-v7';
 
-// ═══ KILL SWITCH: Nuclear self-destruct for zombie PWA recovery ═════════════
-const _KILL_CHECK_URL = 'https://email-worker.ipear2026.workers.dev/sw-kill';
-let _killChecked = false;
-async function _checkKillSwitch() {
-  if (_killChecked) return false;
-  _killChecked = true;
-  try {
-    const res = await fetch(_KILL_CHECK_URL, { cache: 'no-store' });
-    if (!res.ok) return false;
-    const data = await res.json();
-    if (data.nuke) {
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-      await self.registration.unregister();
-      const clients = await self.clients.matchAll();
-      clients.forEach(c => c.navigate(c.url));
-      return true;
-    }
-  } catch(_) {}
-  return false;
-}
 const SHELL = ['admin.html', 'manifest.json'];
 
 // ── Install: pre-cache shell ─────────────────────────────────────────────────
@@ -33,17 +12,14 @@ self.addEventListener('install', e => {
   );
 });
 
-// ── Activate: check kill switch, delete old caches, take control ────────────
+// ── Activate: delete old caches, take control ───────────────────────────────
 self.addEventListener('activate', e => {
   e.waitUntil(
-    _checkKillSwitch().then(nuked => {
-      if (nuked) return;
-      return caches.keys()
-        .then(keys => Promise.all(
-          keys.filter(k => k !== CACHE_VER).map(k => caches.delete(k))
-        ))
-        .then(() => self.clients.claim());
-    })
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(k => k !== CACHE_VER).map(k => caches.delete(k))
+      ))
+      .then(() => self.clients.claim())
   );
 });
 

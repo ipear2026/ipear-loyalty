@@ -1,36 +1,7 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
-// v70 (2026-07-29): forced re-install to invalidate cached auth.js from v69,
-// which still sent points: initPoints on signup — the CRITICAL-2 firestore
-// rule since 2026-06-23 requires points==0, so v69 users hit
-// "Missing or insufficient permissions" on every registration attempt.
-const CACHE_VER = 'ipear-loyalty-20260729-v70';
+// v71 (2026-07-30): removed legacy kill-switch code (no functional change).
+const CACHE_VER = 'ipear-loyalty-20260730-v71';
 
-// ═══ KILL SWITCH: Nuclear self-destruct for zombie PWA recovery ═════════════
-// If the Worker returns { nuke: true }, this SW wipes all caches and unregisters itself.
-// Trigger: set KV key "sw_kill" to "true" → GET /sw-kill returns { nuke: true }
-// This runs on every fetch so even a broken cached page triggers recovery.
-const _KILL_CHECK_URL = 'https://email-worker.ipear2026.workers.dev/sw-kill';
-let _killChecked = false;
-
-async function _checkKillSwitch() {
-  if (_killChecked) return false;
-  _killChecked = true;  // check once per SW lifecycle
-  try {
-    const res = await fetch(_KILL_CHECK_URL, { cache: 'no-store' });
-    if (!res.ok) return false;
-    const data = await res.json();
-    if (data.nuke) {
-      console.warn('[SW-KILL] ☠️ Kill switch activated — nuking all caches');
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-      await self.registration.unregister();
-      const clients = await self.clients.matchAll();
-      clients.forEach(c => c.navigate(c.url));  // force hard reload
-      return true;
-    }
-  } catch(_) { /* network down — can't check, proceed normally */ }
-  return false;
-}
 const SHELL = [
   'customer.html',
   'snd-success.mp3',
@@ -136,25 +107,22 @@ self.addEventListener('install', e => {
   );
 });
 
-// ── Activate: check kill switch, delete old caches, take control ────────────
+// ── Activate: delete old caches, take control ───────────────────────────────
 self.addEventListener('activate', e => {
   e.waitUntil(
-    _checkKillSwitch().then(nuked => {
-      if (nuked) return; // SW is dead, don't continue
-      return caches.keys()
-        .then(keys => Promise.all(
-          keys.filter(k => k !== CACHE_VER).map(k => caches.delete(k))
-        ))
-        .then(() => self.clients.claim())
-        .then(() => self.clients.matchAll({ type: 'window' }))
-        .then(clients => {
-          // Tell all open tabs a new SW is active.
-          // v46+ pages listen for this and reload; older pages ignore it.
-          clients.forEach(c => {
-            try { c.postMessage({ type: 'SW_UPDATED', version: CACHE_VER }); } catch(_) {}
-          });
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(k => k !== CACHE_VER).map(k => caches.delete(k))
+      ))
+      .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then(clients => {
+        // Tell all open tabs a new SW is active.
+        // v46+ pages listen for this and reload; older pages ignore it.
+        clients.forEach(c => {
+          try { c.postMessage({ type: 'SW_UPDATED', version: CACHE_VER }); } catch(_) {}
         });
-    })
+      })
   );
 });
 
