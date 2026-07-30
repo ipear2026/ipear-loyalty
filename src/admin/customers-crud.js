@@ -369,7 +369,22 @@ export async function deleteCust() {
     const workerUrl = localStorage.getItem('ipear_worker_url');
     const workerSec = _hooks.getWorkerSecret();
     if (!workerUrl || !workerSec) {
-      toast('❌ Δεν είναι ρυθμισμένο το Worker URL/Secret. Ρύθμισε τα πρώτα ή διάγραψε τον χρήστη χειροκίνητα από το Firebase Console.', 'error');
+      // The Worker Secret lives in memory only (HIGH-1: never persisted, so
+      // XSS can't exfiltrate it). Every fresh browser session it must be
+      // re-entered. Instead of just erroring, auto-open the config panel and
+      // scroll + focus the input so the admin sees exactly where to put it.
+      const missing = !workerUrl
+        ? 'Worker URL + Secret'
+        : 'Worker Secret (χάθηκε στο reload — δεν αποθηκεύεται για ασφάλεια)';
+      toast(`⚠️ Λείπει: ${missing}. Άνοιξα τις ρυθμίσεις — συμπλήρωσε και δοκίμασε ξανά.`, 'error');
+      try {
+        const panel = document.getElementById('worker-cfg-panel');
+        const secretEl = document.getElementById('worker-secret');
+        const toggleBtn = document.getElementById('worker-cfg-toggle');
+        if (panel && panel.style.display === 'none' && toggleBtn) toggleBtn.click();
+        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (secretEl) setTimeout(() => { try { secretEl.focus(); } catch(_) {} }, 400);
+      } catch(_) {}
       _deleteCustBusy = false;
       return;
     }
