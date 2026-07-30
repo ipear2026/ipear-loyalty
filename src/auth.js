@@ -490,14 +490,28 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
   } catch(fsErr) {
     logger.error('[register] setDoc failed:', fsErr?.code || '', fsErr?.message || fsErr);
     // Roll back: delete the Auth user so the customer can retry from scratch
-    // without hitting `auth/email-already-in-use`.
+    // without hitting `auth/email-already-in-use`. If the rollback ITSELF
+    // fails (network drop, App Check token expiry, requires-recent-login),
+    // we log it as an ERROR (not warn) so it surfaces in customer reports —
+    // otherwise we'd have an orphan Auth account and silent divergence.
+    // Safety net: /verify-sms-otp orphan-cleanup will heal it on the next
+    // registration attempt with the same email, but the log makes the
+    // divergence traceable in the meantime.
+    let rollbackOk = false;
     if (authUser && window._deleteAuthUser) {
-      try { await _withDeadline(window._deleteAuthUser(authUser), 6000, 'auth rollback'); } catch(_) {}
+      try {
+        await _withDeadline(window._deleteAuthUser(authUser), 6000, 'auth rollback');
+        rollbackOk = true;
+      } catch(rbErr) {
+        logger.error('[register] ⚠️ AUTH ROLLBACK FAILED — orphan Auth left for',
+          authUser?.email || '?', ':', rbErr?.code || '', rbErr?.message || rbErr);
+      }
     }
-    // Re-throw with a user-friendly message the OTP catch will surface.
     const friendly = fsErr?.message?.startsWith('Timeout')
       ? 'Πρόβλημα σύνδεσης με τη βάση. Έλεγξε internet και δοκίμασε ξανά.'
-      : 'Δεν ολοκληρώθηκε η εγγραφή. Δοκίμασε ξανά σε λίγο.';
+      : (rollbackOk
+          ? 'Δεν ολοκληρώθηκε η εγγραφή. Δοκίμασε ξανά σε λίγο.'
+          : 'Πρόβλημα εγγραφής. Δοκίμασε ξανά — αν το πρόβλημα επιμένει, επικοινώνησε με το κατάστημα.');
     const wrapped = new Error(friendly);
     wrapped.cause = fsErr;
     throw wrapped;
@@ -587,6 +601,7 @@ export async function submitRegister() {
     return;
   }
   if (!name)  { err.textContent = '⚠️ Εισάγετε ονοματεπώνυμο.'; return; }
+  if (name.length > 100) { err.textContent = '⚠️ Το ονοματεπώνυμο είναι πολύ μεγάλο (μέγιστο 100 χαρακτήρες).'; return; }
   if (!phone || !/^6\d{9}$/.test(phone)) { err.textContent = '⚠️ Εισάγετε έγκυρο ελληνικό κινητό (π.χ. 6912345678).'; return; }
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.textContent = '⚠️ Εισάγετε έγκυρο email.'; return; }
   if (p1.length < 6) { err.textContent = '⚠️ Ο κωδικός πρέπει να έχει τουλάχιστον 6 χαρακτήρες.'; return; }

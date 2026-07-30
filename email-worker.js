@@ -2089,38 +2089,76 @@ async function handleDeleteAuthUser(request, env, CORS) {
   try {
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
 
-    // If only an email was supplied (or to double-check after a uid delete),
-    // resolve email → localId via Identity Toolkit lookup. This handles legacy
-    // / pre-migration customers whose Firestore record never stored a uid.
-    if (!uid && email) {
-      const lookupRes = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+    async function _deleteByUid(localId) {
+      const r = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-        body: JSON.stringify({ email: [email] })
+        body: JSON.stringify({ localId })
       });
-      if (!lookupRes.ok) {
-        console.error('[delete-auth-user] email lookup failed:', lookupRes.status);
-        return resp({ error: 'Lookup failed' }, 500, CORS);
-      }
-      const lookup = await lookupRes.json();
-      const found = (lookup?.users && lookup.users[0]) || null;
-      if (!found) return resp({ success: true, notFound: true }, 200, CORS);
-      uid = found.localId;
+      if (r.ok) return { ok: true };
+      const err = await r.json().catch(() => ({}));
+      const code = err?.error?.message || 'UNKNOWN';
+      return { ok: false, code };
     }
 
-    const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-      body: JSON.stringify({ localId: uid })
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const code = err?.error?.message || 'UNKNOWN';
-      if (code === 'USER_NOT_FOUND') return resp({ success: true, notFound: true }, 200, CORS);
-      console.error('[delete-auth-user]', code);
-      return resp({ error: 'Failed to delete auth user: ' + code }, 500, CORS);
+    async function _lookupByEmail(e) {
+      const r = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+        body: JSON.stringify({ email: [e] })
+      });
+      if (!r.ok) return { ok: false, status: r.status };
+      const data = await r.json();
+      return { ok: true, uid: data?.users?.[0]?.localId || null };
     }
-    return resp({ success: true, uid }, 200, CORS);
+
+    // ── Strategy: try uid first (fast path). If uid is missing OR the uid
+    //    delete returns USER_NOT_FOUND, fall back to email lookup so we
+    //    never leave an orphan Auth account behind. Previously the handler
+    //    treated USER_NOT_FOUND on a stale/bad uid as "success" and returned
+    //    — with the real Auth-under-email surviving. Root cause of
+    //    admin-side "delete then cannot re-register" incidents.
+
+    let deletedUid = null;
+
+    if (uid) {
+      const first = await _deleteByUid(uid);
+      if (first.ok) {
+        deletedUid = uid;
+      } else if (first.code !== 'USER_NOT_FOUND') {
+        console.error('[delete-auth-user] uid delete failed:', first.code);
+        return resp({ error: 'Failed to delete auth user: ' + first.code }, 500, CORS);
+      }
+      // If USER_NOT_FOUND, fall through to the email path below.
+    }
+
+    // Email fallback — runs when: no uid was sent, OR uid delete returned
+    // USER_NOT_FOUND. Resolves email → real Auth uid → deletes.
+    if (!deletedUid && email) {
+      const lookup = await _lookupByEmail(email);
+      if (!lookup.ok) {
+        console.error('[delete-auth-user] email lookup failed:', lookup.status);
+        return resp({ error: 'Lookup failed' }, 500, CORS);
+      }
+      if (!lookup.uid) {
+        // No Auth account under either the uid or the email — truly nothing to delete.
+        return resp({ success: true, notFound: true }, 200, CORS);
+      }
+      const second = await _deleteByUid(lookup.uid);
+      if (!second.ok) {
+        if (second.code === 'USER_NOT_FOUND') {
+          // Raced with another deletion. Still "clean" for our purposes.
+          return resp({ success: true, notFound: true }, 200, CORS);
+        }
+        console.error('[delete-auth-user] email-fallback delete failed:', second.code);
+        return resp({ error: 'Failed to delete auth user: ' + second.code }, 500, CORS);
+      }
+      deletedUid = lookup.uid;
+      console.log('[delete-auth-user] email fallback resolved uid=' + lookup.uid + ' for ' + email);
+    }
+
+    if (!deletedUid) return resp({ success: true, notFound: true }, 200, CORS);
+    return resp({ success: true, uid: deletedUid }, 200, CORS);
   } catch(e) {
     console.error('[delete-auth-user]', e.message);
     return resp({ error: 'Internal error: ' + e.message }, 500, CORS);
