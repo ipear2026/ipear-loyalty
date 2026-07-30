@@ -98,7 +98,6 @@ export async function _tryAdminAutoRestore() {
   _autoRestoreAttempted = true;
   const user = window._auth?.currentUser;
   if (!user) return;  // no session → keep lock screen visible
-  logger.log('%c[ADMIN] 🔓 auto-restoring from Firebase session: ' + user.email, 'color:#00cc00;font-weight:bold;font-size:14px');
   try { await _completeAdminAuth(user); }
   catch(e) {
     logger.warn('[ADMIN] auto-restore failed:', e.message);
@@ -229,7 +228,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && authState.authenticated) {
     // If asleep >30 min, Firestore listeners are dead — full reload
     if (Date.now() - _adminLastRefresh > 30 * 60 * 1000) {
-      logger.log('[keepalive] admin was asleep >30min, reloading...');
       location.reload();
       return;
     }
@@ -238,7 +236,6 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pageshow', (e) => {
   if (e.persisted && authState.authenticated) {
-    logger.log('[keepalive] bfcache restore, reloading...');
     location.reload();
   }
 });

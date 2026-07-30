@@ -144,7 +144,6 @@ initRedemptionVerify({
 });
 
 window.ADMIN_BUILD_TAG = 'admin-20260605-a11y1';
-logger.log('admin.html loaded', window.ADMIN_BUILD_TAG);
 
 // ── Admin auth wrappers (production — using Firebase refs from firebase-init.js) ──
 if (!window.DEMO) {

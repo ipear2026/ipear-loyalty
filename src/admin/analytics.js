@@ -66,10 +66,7 @@ function _anFilterPeriod(txs) {
 }
 
 export async function loadAnalytics() {
-  if (_loadAnalyticsBusy) {
-    logger.log('[loadAnalytics] ⏳ already loading');
-    return;
-  }
+  if (_loadAnalyticsBusy) return;
   const db = DB();
   if (!db) return;
   _loadAnalyticsBusy = true;

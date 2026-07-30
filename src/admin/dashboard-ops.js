@@ -159,7 +159,7 @@ let _historyBusy = false;
 export async function loadTx() {
   if (!authState.authenticated) return;
   if (!navigator.onLine) return;
-  if (_historyBusy) { logger.log('[loadTx] ⏳ already loading, ignoring duplicate call'); return; }
+  if (_historyBusy) return;
   const db=DB(); if(!db) return;
   const el=document.getElementById('txlist');
   const refreshBtn = document.querySelector('button[data-action="loadTx"]');
