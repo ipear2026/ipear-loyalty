@@ -14,14 +14,12 @@ import {
   getFirestore, collection, addDoc, setDoc, updateDoc, deleteDoc,
   doc, getDoc, getDocs, query, where, orderBy, limit, startAfter,
   onSnapshot, runTransaction,
-  getCountFromServer, getAggregateFromServer, sum, average,
+  getCountFromServer, getAggregateFromServer, sum,
 } from 'firebase/firestore';
 import {
   getAuth, onAuthStateChanged,
   signInWithEmailAndPassword, createUserWithEmailAndPassword,
   sendPasswordResetEmail, sendEmailVerification, signOut, deleteUser,
-  RecaptchaVerifier, signInWithPhoneNumber,
-  linkWithCredential, EmailAuthProvider,
   setPersistence, browserLocalPersistence, browserSessionPersistence,
 } from 'firebase/auth';
 import {
@@ -43,9 +41,9 @@ export const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FB_MSG_SENDER_ID      ?? '',
   appId:             import.meta.env.VITE_FB_APP_ID             ?? '',
 };
-export const CUSTOMER_BUILD_TAG = 'customer-20260615-v55';
-window.CUSTOMER_BUILD_TAG = CUSTOMER_BUILD_TAG;
-logger.log('customer.html loaded', CUSTOMER_BUILD_TAG);
+// Build tag surfaced to HTML footers via window.CUSTOMER_BUILD_TAG (never
+// imported as ES named export — index.html reads window global directly).
+window.CUSTOMER_BUILD_TAG = 'customer-20260615-v55';
 
 export const VAPID_KEY = import.meta.env.VITE_FCM_VAPID_KEY ?? '';
 
@@ -157,10 +155,6 @@ if (IS_DEMO) {
   window._togglePush = () => window._enablePush();
   // S-2 fix: demo stub takes string mode, persistence constants no longer exposed
   window._setPersistenceMode = async () => {};
-  window._RecaptchaVerifier = class { constructor(){} clear(){} };
-  window._sendPhoneOTP = async (_auth, _phone) => ({ confirm: async code => code === '123456' ? {user:{uid:'demo-phone-'+Date.now()}} : (() => { throw {code:'auth/invalid-verification-code'}; })() });
-  window._linkCredential = async (user) => user;
-  window._emailCredential = () => ({});
   window.dispatchEvent(new Event('firebase-ready'));
 } else {
   const app=initializeApp(firebaseConfig);
@@ -174,7 +168,7 @@ if (IS_DEMO) {
   // P-1: server-side aggregation helpers (zero per-doc read cost)
   window._getCountFromServer = getCountFromServer;
   window._getAggregateFromServer = getAggregateFromServer;
-  window._sum = sum; window._average = average;
+  window._sum = sum;
   const auth = getAuth(app);
   // Persistence policy:
   //   • /tablet — kiosk device, MUST keep session across tab/browser restarts
@@ -198,10 +192,6 @@ if (IS_DEMO) {
   window._signOut = () => signOut(auth);
   window._sendEmailVerif = (user) => user ? sendEmailVerification(user) : Promise.resolve();
   window._deleteAuthUser = (user) => deleteUser(user);
-  window._RecaptchaVerifier = RecaptchaVerifier;
-  window._sendPhoneOTP = signInWithPhoneNumber;
-  window._linkCredential = linkWithCredential;
-  window._emailCredential = EmailAuthProvider.credential;
   // S-2 fix: closure-scoped persistence constants. Expose a single string-mode
   // entry point only; persistence objects no longer reachable from DevTools.
   window._setPersistenceMode = async (mode) => {

@@ -17,76 +17,19 @@
 //    for backwards compat.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Pure SDK functions (no init needed — safe to re-export directly).
+// Pure SDK re-exports — only the symbols currently used by admin modules.
+// If you need another Firestore/Auth symbol, prefer a direct import from
+// 'firebase/firestore' or 'firebase/auth' instead of expanding this list.
 export {
-  collection, addDoc, setDoc, updateDoc, deleteDoc,
-  doc, getDoc, getDocs, query, where, orderBy, limit,
+  collection, doc, setDoc, deleteDoc,
+  getDocs, query, where,
   onSnapshot, runTransaction,
-  getCountFromServer, getAggregateFromServer, sum, average,
 } from 'firebase/firestore';
-
-export {
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
-  sendEmailVerification,
-  deleteUser,
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-  linkWithCredential,
-  EmailAuthProvider,
-} from 'firebase/auth';
-
-// ── Live bindings to the singletons created by firebase-init.js ──
-// Cannot use top-level `export const db = window._db;` because firebase-init.js
-// may not have finished initializing when this module is first evaluated.
-// Getter functions defer the read to call-time.
 
 /** Get the initialized Firestore instance. Throws if Firebase not yet ready. */
 export function getDb() {
   if (!window._db) throw new Error('[services/firebase] Firestore not initialized — wait for "firebase-ready" event');
   return window._db;
-}
-
-/** Get the initialized Auth instance. Throws if Firebase not yet ready. */
-export function getAuth() {
-  if (!window._auth) throw new Error('[services/firebase] Auth not initialized — wait for "firebase-ready" event');
-  return window._auth;
-}
-
-/** True once firebase-init.js has finished initialization. */
-export function isReady() {
-  return !!window._firebaseReady;
-}
-
-// ── Auth convenience wrappers (bind the singleton auth) ──────────
-
-export function signIn(email, password) {
-  return window._signIn(getAuth(), email, password);
-}
-
-export function signOut() {
-  return window._signOut();
-}
-
-export function createUser(email, password) {
-  return window._createUser(getAuth(), email, password);
-}
-
-export function sendPasswordReset(email) {
-  return window._sendPassReset(getAuth(), email);
-}
-
-export function sendEmailVerif(user) {
-  return window._sendEmailVerif(user);
-}
-
-export function deleteAuthUser(user) {
-  return window._deleteAuthUser(user);
-}
-
-export function setPersistenceMode(mode) {
-  return window._setPersistenceMode(mode);
 }
 
 // ── Customer lookup ladder (HIGH-1 / SMS-only compatible) ───────────
