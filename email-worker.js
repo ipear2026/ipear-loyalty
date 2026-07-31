@@ -21,7 +21,7 @@
 //  POST /                → αποστολή bulk email (Brevo) — requires ADMIN_SECRET
 //  POST /sms             → αποστολή SMS (Brevo Transactional SMS) — requires ADMIN_SECRET
 //  POST /bulk-sms        → μαζική αποστολή SMS (Brevo) — requires ADMIN_SECRET
-//  POST /push            → αποστολή push notifications (FCM V1) — requires ADMIN_SECRET
+// Push endpoints (/push, /push-debug) removed 2026-07-31 — app dropped push notifications.
 //  POST /admin/redeem-attempt → brute-force guard for redemption approval — requires ADMIN_SECRET
 //  POST /woo-add-points    → WooCommerce integration: add loyalty points on order — requires ADMIN_SECRET
 //  POST /woo-refund-points → WooCommerce: clawback loyalty points on order refund — requires ADMIN_SECRET
@@ -310,22 +310,14 @@ export default {
     // Public endpoints (no ADMIN_SECRET needed, rate-limited)
     if (path === '/reset-password') return handleResetPassword(request, env, CORS);
     if (path === '/check-registration') return handleCheckRegistration(request, env, CORS);
+    if (path === '/check-referrer') return handleCheckReferrer(request, env, CORS);
     if (path === '/process-referral') return handleProcessReferral(request, env, CORS);
     if (path === '/send-welcome') return handleSendWelcome(request, env, CORS);
-    if (path === '/send-verification-link') return handleSendVerificationLink(request, env, CORS);
     if (path === '/send-sms-otp') return handleSendSmsOtp(request, env, CORS);
     if (path === '/verify-sms-otp') return handleVerifySmsOtp(request, env, CORS);
     if (path === '/woo-sync-tier')   return handleWooSyncTier(request, env, CORS);
     if (path === '/client-error')    return handleClientError(request, env, CORS);
     if (path === '/log-event')       return handleLogEvent(request, env, CORS, ctx);
-    // /push has DUAL-mode auth handled inside the handler:
-    //   • ADMIN_SECRET → broadcast to any tokens array (admin marketing blasts)
-    //   • idToken      → self-push only, server resolves caller's own fcmToken
-    //                    from Firestore (so the SPA's enable-push confirmation
-    //                    works without exposing the broadcast surface).
-    // Routed BEFORE the central ADMIN_SECRET gate so the idToken branch isn't
-    // pre-rejected.
-    if (path === '/push')       return handlePush(request, env, CORS);
 
     // ── ERP integration: phone-based customer lookup ──
     //
@@ -345,7 +337,6 @@ export default {
       return resp({ error: 'Unauthorized' }, 401, CORS);
     }
 
-    if (path === '/push-debug') return handlePushDebug(request, env, CORS);
     if (path === '/bulk-sms') return handleBulkSMS(request, env, CORS);
     if (path === '/woo-create-coupon') return handleWooCreateCoupon(request, env, CORS);
     if (path === '/sms')      return handleSMS(request, env, CORS);
@@ -457,7 +448,10 @@ async function handleSendSmsOtp(request, env, CORS) {
       console.error('[send-sms-otp] Brevo error:', JSON.stringify(data));
       return resp({ error: 'Αποτυχία αποστολής SMS: ' + (data.message || res.status) }, 502, CORS);
     }
-    console.log('[send-sms-otp] sent to', intl, 'messageId:', data.messageId);
+    // GDPR-hygiene: mask the phone in tail logs (was leaking full +306XXXXXXXXX).
+    // Keeps first 4 + last 2 chars for support triage, redacts the middle.
+    const _maskedPhone = intl.length > 6 ? intl.slice(0, 4) + '****' + intl.slice(-2) : intl;
+    console.log('[send-sms-otp] sent to', _maskedPhone, 'messageId:', data.messageId);
     return resp({ ok: true, phone: rawPhone }, 200, CORS);
   } catch(e) {
     console.error('[send-sms-otp] fetch error:', e.message);
@@ -943,229 +937,6 @@ async function handleSendWelcome(request, env, CORS) {
   return resp({ ok: true, bonusAwarded }, 200, CORS);
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  POST /send-verification-link  { idToken }
-//
-//  Public endpoint. Caller is anyone with a fresh Firebase ID token for the
-//  account they JUST registered. We do NOT require emailVerified — that's
-//  the whole point: the user is about to verify.
-//
-//  Sends a branded verification email via Brevo. Content is conditional:
-//   • If customer doc has marketingOptIn===true AND !marketingWelcomeProcessed
-//     → show "+50 πόντοι καλωσορίσματος"
-//   • If ipear_referral_queue/{uid} exists with processed!==true
-//     → show "+100 πόντοι παραπομπής"
-//   • If neither → plain "verify your email" copy (no bonus copy at all)
-//
-//  Rate limits:
-//   • Per-IP   : RATE_LIMIT_MAX_HITS / 15 min  (anti-bomb from one host)
-//   • Per-email: RATE_LIMIT_MAX_HITS / 15 min  (anti-bomb of a single inbox)
-//  Returns 200 ok:true alreadyVerified:true if user is already verified
-//  (so the client can hide the banner).
-// ══════════════════════════════════════════════════════════════════════════
-async function handleSendVerificationLink(request, env, CORS) {
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  { const _rl = await rateLimitOrBlock(env, ip, 'verify-link', RATE_LIMIT_MAX_HITS, 900, CORS); if (_rl) return _rl; }
-
-  let body;
-  try { body = await readJsonCapped(request, 4 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const idToken = (body.idToken || '').trim();
-  if (!idToken) return resp({ error: 'idToken required' }, 401, CORS);
-
-  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
-  if (!env.BREVO_API_KEY)
-    return resp({ error: 'Email not configured' }, 503, CORS);
-
-  // 1. Verify the token. Note: we do NOT require emailVerified — this is the
-  //    only Worker endpoint that an unverified user must be able to call.
-  let verifiedEmail, verifiedUid, displayName = '';
-  try {
-    const verifyRes = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
-    );
-    const verifyData = await verifyRes.json();
-    const u = verifyData?.users?.[0];
-    if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
-    if (u.emailVerified === true) return resp({ ok: true, alreadyVerified: true }, 200, CORS);
-    verifiedUid   = u.localId;
-    verifiedEmail = String(u.email).trim().toLowerCase();
-    displayName   = String(u.displayName || '').trim();
-  } catch (e) {
-    console.error('[send-verification-link] token verify failed:', e.message);
-    return resp({ error: 'Token verification failed' }, 401, CORS);
-  }
-
-  // 2. Per-email rate limit — protects a single inbox from being bombed via
-  //    IPv6 rotation. Compounds with the per-IP limit above.
-  { const _rl = await rateLimitOrBlock(env, 't:email:' + verifiedEmail, 'verify-link', RATE_LIMIT_MAX_HITS, 900, CORS, 'Πολλές αιτήσεις. Περίμενε λίγο.'); if (_rl) return _rl; }
-
-  // 3. Read customer doc + referral queue to decide what bonuses to show.
-  //    Failures here only affect copy — they do NOT block sending.
-  let hasMarketingBonus = false;
-  let hasReferralBonus  = false;
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId   = env.FCM_PROJECT_ID;
-    const fsBase      = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-    const fsHeaders   = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-    // Customer doc → marketing eligibility
-    const custRes = await fetch(`${fsBase}/ipear_customers/${verifiedUid}`, { headers: fsHeaders });
-    if (custRes.ok) {
-      const custDoc = await custRes.json();
-      const f = custDoc.fields || {};
-      const marketingOptIn      = f.marketingOptIn?.booleanValue === true;
-      const marketingProcessed  = f.marketingWelcomeProcessed?.booleanValue === true;
-      hasMarketingBonus = marketingOptIn && !marketingProcessed;
-      if (!displayName) displayName = String(f.name?.stringValue || '').trim();
-    }
-
-    // Referral queue doc → referral eligibility
-    const queueRes = await fetch(`${fsBase}/ipear_referral_queue/${verifiedUid}`, { headers: fsHeaders });
-    if (queueRes.ok) {
-      const qDoc = await queueRes.json();
-      const f = qDoc.fields || {};
-      const processed = f.processed?.booleanValue === true;
-      hasReferralBonus = !processed;
-    }
-  } catch (e) {
-    console.error('[send-verification-link] Firestore read failed (non-fatal):', e.message);
-  }
-
-  // 4. Generate the Firebase verification link via Admin REST API.
-  //    continueUrl uses APP_URL (prod: loyalty.ipear.gr) — the domain MUST be
-  //    listed in Firebase Auth → Settings → Authorized domains for sendOobCode
-  //    to accept it. Fallback keeps working during dev / against Pages preview.
-  const appBase = env.APP_URL || 'https://loyalty.ipear.gr';
-  let verifyUrl;
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const oobRes = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-        body: JSON.stringify({
-          requestType:    'VERIFY_EMAIL',
-          idToken,
-          returnOobLink:  true,
-          continueUrl:    `${appBase}/?verified=1`,
-        }),
-      }
-    );
-    if (!oobRes.ok) {
-      const err = await oobRes.json().catch(() => ({}));
-      console.error('[send-verification-link] sendOobCode failed:', oobRes.status, JSON.stringify(err));
-      return resp({ error: 'Verification link generation failed' }, 502, CORS);
-    }
-    const oobData = await oobRes.json();
-    verifyUrl = oobData.oobLink;
-    if (!verifyUrl) return resp({ error: 'No link returned' }, 502, CORS);
-  } catch (e) {
-    console.error('[send-verification-link] OOB error:', e.message);
-    return resp({ error: 'Link generation failed' }, 502, CORS);
-  }
-
-  // 5. Build + send the branded email via Brevo.
-  const htmlContent = buildVerificationEmail(displayName || 'φίλε', verifyUrl, hasMarketingBonus, hasReferralBonus);
-  const subject = (hasMarketingBonus || hasReferralBonus)
-    ? '🍐 iPear Loyalty — Ξεκλείδωσε τα bonuses σου'
-    : '🍐 iPear Loyalty — Επιβεβαίωσε το email σου';
-
-  try {
-    const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'api-key':      env.BREVO_API_KEY,
-        'Content-Type': 'application/json',
-        'Accept':       'application/json',
-      },
-      body: JSON.stringify({
-        sender: {
-          name:  env.SENDER_NAME  || 'iPear Loyalty',
-          email: (env.SENDER_EMAIL || '').trim(),
-        },
-        to:      [{ email: verifiedEmail, name: displayName || '' }],
-        subject,
-        htmlContent,
-      }),
-    });
-    if (!brevoRes.ok) {
-      const err = await brevoRes.json().catch(() => ({}));
-      console.error('[send-verification-link] Brevo error:', brevoRes.status, JSON.stringify(err));
-      return resp({ error: 'Email send failed' }, 502, CORS);
-    }
-    console.log(`[send-verification-link] ✅ sent to ${verifiedEmail}, mk=${hasMarketingBonus} ref=${hasReferralBonus}`);
-    return resp({ ok: true, hasMarketingBonus, hasReferralBonus }, 200, CORS);
-  } catch (e) {
-    console.error('[send-verification-link] Brevo network:', e.message);
-    return resp({ error: 'Email send failed' }, 502, CORS);
-  }
-}
-
-function buildVerificationEmail(name, link, hasMarketing, hasReferral) {
-  const safeName = escHtml(name);
-  const safeLink = escHtml(link);
-
-  const bonuses = [];
-  if (hasMarketing) bonuses.push('+50 πόντοι καλωσορίσματος');
-  if (hasReferral)  bonuses.push('+100 πόντοι από την παραπομπή σου');
-
-  const hasAnyBonus = bonuses.length > 0;
-  const intro = hasAnyBonus
-    ? 'Είσαι ένα κλικ μακριά από τα bonuses σου! Επιβεβαίωσε το email για να ξεκλειδώσεις:'
-    : 'Επιβεβαίωσε το email σου για να ολοκληρώσεις την εγγραφή σου στο iPear Loyalty.';
-  const ctaLabel = hasAnyBonus ? 'Ξεκλείδωσε τα Bonuses →' : 'Επιβεβαίωση email →';
-
-  const bonusList = !hasAnyBonus ? '' : (
-    '<div style="background:#f8fbef;border-left:4px solid #8ae900;border-radius:10px;padding:18px 22px;margin:18px 0">' +
-    bonuses.map(t => `<div style="margin:6px 0;font-size:.95rem;color:#222;line-height:1.4"><span style="color:#6bb800;font-weight:900">✅</span>  ${escHtml(t)}</div>`).join('') +
-    '</div>'
-  );
-
-  return `<!DOCTYPE html>
-<html lang="el">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>iPear Loyalty — Επιβεβαίωση email</title>
-</head>
-<body style="margin:0;padding:0;background:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#222">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:32px 0">
-  <tr><td align="center">
-    <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.10)">
-      <tr>
-        <td style="background:linear-gradient(135deg,#6bb800 0%,#8ae900 100%);padding:36px 40px;text-align:center">
-          <div style="font-size:30px;font-weight:900;color:#0a0a0a;letter-spacing:-1px;line-height:1">🍐 iPear<span style="color:#fff">Loyalty</span></div>
-          <div style="font-size:11px;color:rgba(0,0,0,.55);margin-top:6px;text-transform:uppercase;letter-spacing:3px;font-weight:700">Loyalty Program</div>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:32px 40px 36px;line-height:1.55">
-          <h2 style="margin:0 0 12px;font-size:1.35rem;color:#111;font-weight:800">Γεια σου ${safeName}! 👋</h2>
-          <p style="margin:0;font-size:.96rem;color:#444">${intro}</p>
-          ${bonusList}
-          <div style="text-align:center;margin:30px 0 24px">
-            <a href="${safeLink}" style="display:inline-block;background:#8ae900;color:#0a0a0a;font-weight:900;font-size:1rem;padding:16px 38px;border-radius:11px;text-decoration:none;letter-spacing:.3px;box-shadow:0 4px 14px rgba(138,233,0,.35)">${ctaLabel}</a>
-          </div>
-          <p style="margin:0;font-size:.85rem;color:#666;text-align:center">Το link λήγει σε <strong>1 ώρα</strong>.</p>
-          <p style="margin:22px 0 0;font-size:.78rem;color:#999;border-top:1px solid #eee;padding-top:14px;text-align:center">Δεν εγγράφηκες στο iPear Loyalty; Αγνόησε αυτό το email — δεν θα γίνει καμία αλλαγή.</p>
-        </td>
-      </tr>
-      <tr>
-        <td style="background:#fafafa;padding:16px 40px;text-align:center;color:#999;font-size:.75rem">iPear · <a href="https://ipear.gr" style="color:#999;text-decoration:none">ipear.gr</a> · <a href="mailto:info@ipear.gr" style="color:#999;text-decoration:none">info@ipear.gr</a></td>
-      </tr>
-    </table>
-  </td></tr>
-</table>
-</body>
-</html>`;
-}
-
 function buildWelcomeEmail(name, points, appUrl) {
   const safeName = escHtml(name);
   const safeUrl  = appUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -1219,8 +990,12 @@ function buildWelcomeEmail(name, points, appUrl) {
           Ο λογαριασμός σου στο <strong>iPear Loyalty</strong> είναι έτοιμος.
         </p>
 
-        <!-- Points badge -->
-        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px">
+        <!-- Points badge — rendered ONLY when the customer earned a real
+             welcome bonus. Non-marketing signups hit /send-welcome with
+             points=0; rendering a giant "0" was actively misleading — a
+             customer who signed up with a referral code but no marketing
+             opt-in has 100 pts from /process-referral yet would see "0". -->
+        ${points > 0 ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px">
           <tr>
             <td style="background:#f0ffe0;border:2px solid #8ae900;border-radius:16px;
                        padding:24px;text-align:center">
@@ -1237,7 +1012,7 @@ function buildWelcomeEmail(name, points, appUrl) {
               </div>
             </td>
           </tr>
-        </table>
+        </table>` : ''}
 
         <p style="font-size:15px;color:#555;line-height:1.7;margin:0 0 28px;text-align:center">
           Μάζεψε πόντους με κάθε αγορά σου<br>
@@ -2461,324 +2236,6 @@ async function handleEmail(request, env, CORS) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  PUSH HANDLER (FCM V1 API)
-// ══════════════════════════════════════════════════════════════════════════
-
-async function handlePush(request, env, CORS) {
-  // Dual auth modes:
-  //   ADMIN_SECRET → broadcast: caller passes a `tokens` array, we push to all
-  //                  (marketing blasts from the admin dashboard).
-  //   idToken      → self-push: caller passes their Firebase ID token; we
-  //                  resolve their UID, look up their own fcmToken from
-  //                  Firestore, and push only to that. The body's `tokens`
-  //                  array is IGNORED in this branch so a logged-in customer
-  //                  can't aim the push at anyone else.
-  // The SPA's "🔔 enabled" confirmation push uses the idToken branch.
-  let body;
-  try { body = await readJsonCapped(request, 2 * 1024 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const authHeader = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  const isAdmin = !!authHeader && env.ADMIN_SECRET && (await timingSafeEqual(authHeader, env.ADMIN_SECRET));
-
-  let { tokens, title, message } = body;
-
-  if (!title?.trim())
-    return resp({ error: 'title is required' }, 400, CORS);
-
-  if (!isAdmin) {
-    // Non-admin caller MUST present a valid idToken AND the only token we
-    // accept to push to is the one stored on their own customer doc.
-    const idToken = (body.idToken || '').trim();
-    if (!idToken) return resp({ error: 'Unauthorized' }, 401, CORS);
-    if (!env.FIREBASE_API_KEY) return resp({ error: 'Server not configured' }, 503, CORS);
-
-    let callerUid;
-    try {
-      const vRes = await fetch(
-        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
-      );
-      const vData = await vRes.json();
-      callerUid = vData?.users?.[0]?.localId;
-      if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
-    } catch (e) {
-      console.error('[push] idToken verify failed:', e.message);
-      return resp({ error: 'Token verification failed' }, 401, CORS);
-    }
-
-    // Look up the caller's own fcmToken — this is the ONLY destination
-    // self-push can target.
-    try {
-      const fsAccessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-      const projectId = env.FCM_PROJECT_ID;
-      const custRes = await fetch(
-        `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_customers/${callerUid}`,
-        { headers: { 'Authorization': 'Bearer ' + fsAccessToken } }
-      );
-      if (!custRes.ok) return resp({ error: 'Customer not found' }, 404, CORS);
-      const cust = await custRes.json();
-      const ownToken = cust.fields?.fcmToken?.stringValue || '';
-      if (!ownToken) return resp({ error: 'No fcmToken on file' }, 400, CORS);
-      tokens = [ownToken];
-    } catch (e) {
-      console.error('[push] self-push lookup failed:', e.message);
-      return resp({ error: 'Lookup failed' }, 500, CORS);
-    }
-  }
-
-  if (!Array.isArray(tokens) || !tokens.length)
-    return resp({ error: 'tokens array is required' }, 400, CORS);
-  if (tokens.length > MAX_TOKENS)
-    return resp({ error: `Too many tokens (max ${MAX_TOKENS})` }, 400, CORS);
-
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY)
-    return resp({ error: 'FCM credentials not configured' }, 500, CORS);
-  if (!env.FCM_PROJECT_ID)
-    return resp({ error: 'FCM_PROJECT_ID env var is required' }, 500, CORS);
-
-  let accessToken;
-  try {
-    accessToken = await getFCMAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-  } catch(e) {
-    console.error('[FCM auth]', e.message);
-    return resp({ error: 'FCM auth failed' }, 500, CORS);
-  }
-
-  const fcmUrl = `https://fcm.googleapis.com/v1/projects/${env.FCM_PROJECT_ID}/messages:send`;
-  let sent = 0, failed = 0;
-
-  // Send in parallel batches of 10, using shared chunkArray helper
-  for (const chunk of chunkArray(tokens, 10)) {
-    const results = await Promise.allSettled(
-      chunk.map(token => sendSinglePush(fcmUrl, accessToken, token, title, message || '', env.APP_URL))
-    );
-    results.forEach(r => {
-      if (r.status === 'fulfilled' && r.value === true) sent++;
-      else { failed++; console.warn('[FCM] delivery failed for token in batch'); }
-    });
-  }
-
-  console.log(`[push] total=${tokens.length} sent=${sent} failed=${failed}`);
-  return resp({ success: true, sent, failed, total: tokens.length }, 200, CORS);
-}
-
-// ── DEBUG endpoint: test push delivery with full FCM response ──────────────
-async function handlePushDebug(request, env, CORS) {
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'FCM not configured' }, 503, CORS);
-
-  let _debugBody;
-  try { _debugBody = await readJsonCapped(request, 8 * 1024); } catch { _debugBody = {}; }
-
-  try {
-    // Use getAuthAccessToken (has Firestore scope) not getFCMAccessToken (FCM only)
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-    // Fetch all customers with fcmToken
-    const queryRes = await fetch(`${fsBase}:runQuery`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: 'ipear_customers' }],
-          select: { fields: [{ fieldPath: 'name' }, { fieldPath: 'fcmToken' }, { fieldPath: 'fcmUpdatedAt' }, { fieldPath: 'email' }] }
-        }
-      })
-    });
-    const queryStatus = queryRes.status;
-    const results = await queryRes.json();
-
-    // Also try direct list
-    const listRes = await fetch(`${fsBase}/ipear_customers?pageSize=5`, { headers: fsHeaders });
-    const listData = await listRes.json();
-    const listCount = listData.documents ? listData.documents.length : 0;
-    const listError = listData.error ? listData.error.message : null;
-    const customers = [];
-    if (Array.isArray(results)) {
-      for (const item of results) {
-        if (!item.document) continue;
-        const f = item.document.fields || {};
-        const token = f.fcmToken?.stringValue || '';
-        customers.push({
-          name: f.name?.stringValue || '—',
-          email: f.email?.stringValue || '',
-          hasToken: !!token,
-          tokenPrefix: token ? token.slice(0, 30) + '...' : '',
-          tokenLength: token.length,
-          fcmUpdatedAt: f.fcmUpdatedAt?.stringValue || '',
-        });
-      }
-    }
-
-    const withTokens = customers.filter(c => c.hasToken);
-
-    // Test send to specific customer (by name) or first with token
-    const sendToName = (_debugBody.sendToName || '').toLowerCase();
-
-    let testResult = null;
-    if (withTokens.length > 0) {
-      const targetDoc = sendToName
-        ? results.find(r => (r.document?.fields?.name?.stringValue || '').toLowerCase().includes(sendToName) && r.document?.fields?.fcmToken?.stringValue)
-        : results.find(r => r.document?.fields?.fcmToken?.stringValue);
-      const firstToken = targetDoc?.document?.fields?.fcmToken?.stringValue;
-      const targetName = targetDoc?.document?.fields?.name?.stringValue || '?';
-      if (firstToken) {
-        const fcmUrl = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
-        const fcmRes = await fetch(fcmUrl, {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: {
-              token: firstToken,
-              notification: { title: '🍐 Debug Test', body: 'Push notification debug — ' + new Date().toLocaleTimeString() },
-              webpush: {
-                headers: { Urgency: 'high' },
-                notification: { icon: `${env.APP_URL || 'https://loyalty.ipear.gr'}/icon-192.png` },
-                fcm_options: { link: `${env.APP_URL || 'https://loyalty.ipear.gr'}/customer.html` },
-              },
-            }
-          }),
-        });
-        const fcmBody = await fcmRes.json().catch(() => ({}));
-        testResult = {
-          sentTo: targetName,
-          httpStatus: fcmRes.status,
-          ok: fcmRes.ok,
-          response: fcmBody,
-          tokenUsed: firstToken.slice(0, 30) + '...',
-        };
-      }
-    }
-
-    return resp({
-      debug: { queryStatus, queryResultCount: Array.isArray(results) ? results.length : 0, listCount, listError, firstQueryItem: Array.isArray(results) ? JSON.stringify(results[0]).slice(0, 200) : null },
-      totalCustomers: customers.length,
-      withFcmToken: withTokens.length,
-      withoutToken: customers.length - withTokens.length,
-      customers: customers.map(c => ({ name: c.name, hasToken: c.hasToken, tokenLength: c.tokenLength, updatedAt: c.fcmUpdatedAt })),
-      testPushResult: testResult,
-    }, 200, CORS);
-
-  } catch(e) {
-    console.error('[push-debug] error:', e.message, e.stack);
-    return resp({ error: 'Internal error' }, 500, CORS);
-  }
-}
-
-async function sendSinglePush(fcmUrl, accessToken, token, title, body, appUrl) {
-  const baseUrl = appUrl || 'https://loyalty.ipear.gr';
-  try {
-    const res = await fetch(fcmUrl, {
-      method:  'POST',
-      headers: {
-        'Authorization': 'Bearer ' + accessToken,
-        'Content-Type':  'application/json',
-      },
-      body: JSON.stringify({
-        message: {
-          token,
-          notification: { title, body },
-          webpush: {
-            headers: { Urgency: 'high' },
-            notification: {
-              icon:  baseUrl + '/icon-192.png',
-              badge: baseUrl + '/icon-192.png',
-              requireInteraction: false,
-            },
-            fcm_options: { link: baseUrl + '/customer.html' },
-          },
-          data: { url: '/customer.html', tag: 'ipear-push' },
-        }
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const code = err?.error?.details?.[0]?.errorCode || err?.error?.message || res.status;
-      console.error('[FCM] send failed:', code, 'token:', token.slice(0, 20) + '...');
-      return false;
-    }
-    console.log('[FCM] ✅ sent to token:', token.slice(0, 20) + '...');
-    return true;
-  } catch(e) {
-    console.error('[FCM] exception:', e.message);
-    return false;
-  }
-}
-
-// ── FCM Service Account JWT + OAuth2 ────────────────────────────────────
-
-async function getFCMAccessToken(clientEmail, privateKeyPem) {
-  const jwt = await createJWT(clientEmail, privateKeyPem,
-    'https://www.googleapis.com/auth/firebase.messaging');
-
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body:    new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion:  jwt,
-    }),
-  });
-
-  const data = await res.json();
-  if (!data.access_token) throw new Error(data.error_description || JSON.stringify(data));
-  return data.access_token;
-}
-
-async function createJWT(clientEmail, privateKeyPem, scope) {
-  const pem = privateKeyPem
-    .replace(/^["'\s]+|["'\s]+$/g, '')   // strip surrounding quotes / whitespace
-    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
-    .replace(/-----END PRIVATE KEY-----/g, '')
-    .replace(/\\n/g, '')              // literal \n from JSON-escaped strings
-    .replace(/\n/g, '')               // actual newline characters
-    .replace(/\r/g, '')               // carriage returns
-    .replace(/\s/g, '')               // any remaining whitespace
-    .replace(/[^A-Za-z0-9+/=]/g, ''); // keep ONLY valid base64 characters
-
-  const binaryKey = Uint8Array.from(atob(pem), c => c.charCodeAt(0));
-
-  const key = await crypto.subtle.importKey(
-    'pkcs8',
-    binaryKey.buffer,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const now = Math.floor(Date.now() / 1000);
-
-  const b64url = obj =>
-    btoa(JSON.stringify(obj))
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-  const header  = b64url({ alg: 'RS256', typ: 'JWT' });
-  const payload = b64url({
-    iss:   clientEmail,
-    scope: scope || 'https://www.googleapis.com/auth/firebase.messaging',
-    aud:   'https://oauth2.googleapis.com/token',
-    iat:   now,
-    exp:   now + 3600,
-  });
-
-  const sigInput = `${header}.${payload}`;
-  const sigBuf   = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
-    key,
-    new TextEncoder().encode(sigInput)
-  );
-
-  const sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-  return `${sigInput}.${sig}`;
-}
-
-// ══════════════════════════════════════════════════════════════════════════
 //  PASSWORD RESET HANDLER (Firebase Admin + Brevo branded email)
 // ══════════════════════════════════════════════════════════════════════════
 //
@@ -3040,6 +2497,89 @@ async function handleCheckRegistration(request, env, CORS) {
 
   await delay;
   return resp({ exists, blocked }, 200, CORS);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  POST /check-referrer  { referrerCard: "IP-XXXXXX" }
+//
+//  Preflight existence check for a referral code. Called by submitRegister
+//  BEFORE /send-sms-otp so a customer who typed a valid-format but wrong
+//  card gets told immediately, instead of losing the +100 bonus silently
+//  via /process-referral's `invalid-referrer` branch (which locks the queue
+//  and never re-triggers).
+//
+//  Returns:
+//    { valid: true,  cap: false } → referrer exists, under cap
+//    { valid: true,  cap: true  } → referrer exists but at MAX_REFERRALS
+//    { valid: false }             → no such card (or referrer blocked)
+//    { valid: true,  degraded: true } → worker can't verify → fail OPEN
+//                                       so a config outage never blocks signup
+//  Rate-limited via the same /64 IPv6-collapsing bucket as check-registration.
+// ═══════════════════════════════════════════════════════════════════════════
+async function handleCheckReferrer(request, env, CORS) {
+  const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+  pruneRateBuckets();
+  { const _rl = await rateLimitOrBlock(env, clientIP, 'checkref', CHECK_REG_RATE_MAX, 900, CORS); if (_rl) return _rl; }
+
+  let body;
+  try { body = await readJsonCapped(request, 4 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+
+  const referrerCard = String(body.referrerCard || '').trim().toUpperCase();
+  if (!referrerCard) return resp({ error: 'referrerCard required' }, 400, CORS);
+  if (!/^IP-[A-Z0-9]{6}$/.test(referrerCard))
+    return resp({ error: 'Invalid card format' }, 400, CORS);
+
+  // Constant-time-ish delay (150–400 ms) so timing does not leak existence.
+  const delay = new Promise(r => setTimeout(r, 150 + Math.random() * 250));
+
+  try {
+    if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID) {
+      // Config outage → fail OPEN so signup is never blocked by our infra.
+      // /process-referral remains the authoritative check downstream.
+      await delay;
+      return resp({ valid: true, degraded: true }, 200, CORS);
+    }
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId   = env.FCM_PROJECT_ID;
+    const r = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'ipear_customers' }],
+          where: { fieldFilter: { field: { fieldPath: 'card' }, op: 'EQUAL', value: { stringValue: referrerCard } } },
+          select: { fields: [{ fieldPath: 'referralCount' }, { fieldPath: 'blocked' }] },
+          limit: 1
+        }
+      })
+    });
+    if (!r.ok) {
+      await delay;
+      return resp({ valid: true, degraded: true }, 200, CORS);
+    }
+    const rows = await r.json();
+    let valid = false, cap = false, blocked = false;
+    for (const row of rows) {
+      if (row && row.document) {
+        valid = true;
+        const f = row.document.fields || {};
+        const refCount = Number(f.referralCount?.integerValue || 0);
+        cap = refCount >= MAX_REFERRALS_PER_USER;
+        blocked = f.blocked?.booleanValue === true;
+      }
+    }
+    // Treat blocked referrer as invalid — no bonus should ever originate
+    // from a blocked account, and telling the customer "cap reached" would
+    // leak that the account is disabled.
+    if (blocked) valid = false;
+    await delay;
+    return resp({ valid, cap }, 200, CORS);
+  } catch (e) {
+    console.error('[check-referrer] lookup failed:', e.message);
+    await delay;
+    return resp({ valid: true, degraded: true }, 200, CORS);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3422,6 +2962,60 @@ async function handleProcessReferral(request, env, CORS) {
   }
 }
 
+// ── Service-account JWT signer (Firebase Admin SDK auth) ───────────────────
+// Signs an RS256 JWT with the service-account private key so getAuthAccessToken
+// can exchange it for an OAuth2 bearer token at oauth2.googleapis.com/token.
+// Used by every admin endpoint that touches Firestore, Firebase Auth, or FCM
+// scopes — NOT push-specific despite the FCM_* env var naming.
+async function createJWT(clientEmail, privateKeyPem, scope) {
+  const pem = privateKeyPem
+    .replace(/^["'\s]+|["'\s]+$/g, '')   // strip surrounding quotes / whitespace
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\\n/g, '')              // literal \n from JSON-escaped strings
+    .replace(/\n/g, '')               // actual newline characters
+    .replace(/\r/g, '')               // carriage returns
+    .replace(/\s/g, '')               // any remaining whitespace
+    .replace(/[^A-Za-z0-9+/=]/g, ''); // keep ONLY valid base64 characters
+
+  const binaryKey = Uint8Array.from(atob(pem), c => c.charCodeAt(0));
+
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    binaryKey.buffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const now = Math.floor(Date.now() / 1000);
+
+  const b64url = obj =>
+    btoa(JSON.stringify(obj))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const header  = b64url({ alg: 'RS256', typ: 'JWT' });
+  const payload = b64url({
+    iss:   clientEmail,
+    scope: scope || 'https://www.googleapis.com/auth/datastore',
+    aud:   'https://oauth2.googleapis.com/token',
+    iat:   now,
+    exp:   now + 3600,
+  });
+
+  const sigInput = `${header}.${payload}`;
+  const sigBuf   = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    key,
+    new TextEncoder().encode(sigInput)
+  );
+
+  const sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  return `${sigInput}.${sig}`;
+}
+
 // ── OAuth2 token with Identity Toolkit scope (for Auth Admin) ──────────────
 async function getAuthAccessToken(clientEmail, privateKeyPem) {
   const jwt = await createJWT(clientEmail, privateKeyPem,
@@ -3706,7 +3300,12 @@ async function handleHealthDeep(request, env, CORS) {
   try {
     const projectId = env.FCM_PROJECT_ID;
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const fsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_config/maintenance`;
+    // Point the probe at the REAL maintenance-mode doc that the customer app
+    // subscribes to (main.js _startMaintenanceListener → settings/system).
+    // Previously we hit `ipear_config/maintenance` which doesn't exist in this
+    // project; the 404-tolerant check still marked Firestore "ok" but a real
+    // outage vs a stray-path 404 became indistinguishable in the alerts.
+    const fsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/settings/system`;
     const fsResp = await fetch(fsUrl, {
       headers: { 'Authorization': 'Bearer ' + accessToken },
       signal: AbortSignal.timeout(12000),

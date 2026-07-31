@@ -20,7 +20,7 @@
 //  admin-auth.js mirrors them there on login, so no extra hook.
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from '../logger.js';
-import { tier, escHtml, escJs, tierFloor } from '../utils.js';
+import { tier, escHtml, escJs } from '../utils.js';
 import { authState } from './auth-state.js';
 import { toast, closeM } from './ui.js';
 import { publishLeaderboard as _publishLeaderboard } from './leaderboard.js';
@@ -76,7 +76,7 @@ export async function register() {
     const birthday = document.getElementById('rbday').value;
     const refCode  = refCodeRaw;
     const { id: newId } = await window._addDoc(window._col(db,'ipear_customers'),
-      { name,phone,card,email, birthday, points:0,totalPoints:0, blocked:false, referralProcessed:false, referralCount:0, fcmToken:'', referredBy:refCode||'', registeredStoreId:authState.storeId||null, registeredStoreName:authState.storeName, createdAt:new Date().toISOString() });
+      { name,phone,card,email, birthday, points:0,totalPoints:0, blocked:false, referralProcessed:false, referralCount:0, referredBy:refCode||'', registeredStoreId:authState.storeId||null, registeredStoreName:authState.storeName, createdAt:new Date().toISOString() });
     // Referral bonus: +100 for both (max 5 referrals per referrer)
     if (refCode) {
       const refSnap = await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('card','==',refCode)));
@@ -234,8 +234,7 @@ export async function renderCust(d) {
   document.getElementById('r-ticon').textContent=t.icon;
   document.getElementById('r-tname').textContent=t.name;
   if (t.next) {
-    const floor=tierFloor(tot);
-    const pct=Math.min(100,Math.round(((tot-floor)/(t.next-floor))*100));
+    const pct=Math.min(100,Math.round(((tot-t.floor)/(t.next-t.floor))*100));
     document.getElementById('r-tsub').textContent=`${tot.toLocaleString('el-GR')} / ${t.next.toLocaleString('el-GR')} για ${t.next===1000?'🥈 Silver':t.next===3000?'🥇 Gold':t.next===6000?'💎 Diamond':'👑 Platinum'}`;
     document.getElementById('r-prog').style.width=pct+'%';
   } else {
@@ -317,6 +316,50 @@ export async function blockCust() {
 // ══════════════════════════════════════
 //  DELETE (Firestore + cascade + Firebase Auth)
 // ══════════════════════════════════════
+
+// Opens the Worker config panel and awaits the admin filling in the missing
+// credentials + clicking "Αποθήκευση". Resolves true when both URL + Secret
+// are populated, false on the safety timeout (5 min) — caller aborts cleanly
+// in the false case so no partial state is ever written.
+function _promptWorkerSecret(missingUrlToo) {
+  return new Promise((resolve) => {
+    const panel     = document.getElementById('worker-cfg-panel');
+    const toggleBtn = document.getElementById('worker-cfg-toggle');
+    const secretEl  = document.getElementById('worker-secret');
+    const urlEl     = document.getElementById('worker-url');
+    const saveBtn   = document.querySelector('[data-action="saveWorkerConfig"]');
+    if (!panel || !secretEl || !saveBtn) { resolve(false); return; }
+
+    const label = missingUrlToo ? 'Worker URL + Secret' : 'Worker Secret';
+    toast(`⚠️ Λείπει: ${label}. Συμπλήρωσε και πάτησε Αποθήκευση — η διαγραφή θα συνεχίσει αυτόματα.`, 'error');
+
+    if (panel.style.display === 'none' && toggleBtn) toggleBtn.click();
+    // Panel-already-open path: toggleWorkerConfig only prefills on open, so
+    // if the admin previously cleared the URL field we'd surface empty fields.
+    // Re-prefill from localStorage explicitly.
+    if (urlEl && !urlEl.value) urlEl.value = localStorage.getItem('ipear_worker_url') || '';
+    panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => { try { (missingUrlToo && urlEl && !urlEl.value ? urlEl : secretEl).focus(); } catch(_) {} }, 400);
+
+    let done = false;
+    const finish = (ok) => { if (done) return; done = true; saveBtn.removeEventListener('click', onSave); clearTimeout(timer); resolve(ok); };
+
+    const onSave = () => {
+      // Runs BEFORE the document-level delegator that invokes saveWorkerConfig.
+      // Defer the check so setWorkerSecret has already fired.
+      setTimeout(() => {
+        const haveUrl = !!localStorage.getItem('ipear_worker_url');
+        const haveSec = !!_hooks.getWorkerSecret();
+        if (haveUrl && haveSec) finish(true);
+        // Otherwise leave the listener attached — validation toast from
+        // saveWorkerConfig already told the admin what's still missing.
+      }, 0);
+    };
+    saveBtn.addEventListener('click', onSave);
+    const timer = setTimeout(() => finish(false), 300000);
+  });
+}
+
 let _deleteCustBusy = false;
 export async function deleteCust() {
   if (_deleteCustBusy) return;
@@ -366,27 +409,26 @@ export async function deleteCust() {
     //   abort — Firestore stays intact and the customer remains functional.
     //   Worker uses Identity Toolkit admin API + email fallback for legacy
     //   accounts without a stored uid.
-    const workerUrl = localStorage.getItem('ipear_worker_url');
-    const workerSec = _hooks.getWorkerSecret();
+    let workerUrl = localStorage.getItem('ipear_worker_url');
+    let workerSec = _hooks.getWorkerSecret();
     if (!workerUrl || !workerSec) {
-      // The Worker Secret lives in memory only (HIGH-1: never persisted, so
-      // XSS can't exfiltrate it). Every fresh browser session it must be
-      // re-entered. Instead of just erroring, auto-open the config panel and
-      // scroll + focus the input so the admin sees exactly where to put it.
-      const missing = !workerUrl
-        ? 'Worker URL + Secret'
-        : 'Worker Secret (χάθηκε στο reload — δεν αποθηκεύεται για ασφάλεια)';
-      toast(`⚠️ Λείπει: ${missing}. Άνοιξα τις ρυθμίσεις — συμπλήρωσε και δοκίμασε ξανά.`, 'error');
-      try {
-        const panel = document.getElementById('worker-cfg-panel');
-        const secretEl = document.getElementById('worker-secret');
-        const toggleBtn = document.getElementById('worker-cfg-toggle');
-        if (panel && panel.style.display === 'none' && toggleBtn) toggleBtn.click();
-        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        if (secretEl) setTimeout(() => { try { secretEl.focus(); } catch(_) {} }, 400);
-      } catch(_) {}
-      _deleteCustBusy = false;
-      return;
+      // Graceful fallback: open the config panel, wait for the admin to
+      // save valid credentials, then continue the delete flow — no need
+      // to redo the double-confirmation. Aborts cleanly on cancel/timeout
+      // (no Firestore writes have happened yet, so this is safe).
+      const ok = await _promptWorkerSecret(!workerUrl);
+      if (!ok) {
+        toast('⚠️ Η διαγραφή ακυρώθηκε — Worker Secret απαραίτητο.', 'error');
+        _deleteCustBusy = false;
+        return;
+      }
+      workerUrl = localStorage.getItem('ipear_worker_url');
+      workerSec = _hooks.getWorkerSecret();
+      if (!workerUrl || !workerSec) {
+        toast('⚠️ Η διαγραφή ακυρώθηκε — Worker credentials ακόμα κενά.', 'error');
+        _deleteCustBusy = false;
+        return;
+      }
     }
     const endpoint = workerUrl.replace(/\/$/, '') + '/admin/delete-auth-user';
     const headers  = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + workerSec };
@@ -441,13 +483,6 @@ export async function deleteCust() {
       // Referral queue — keyed by UID
       for (const _uid of uidsToDel) {
         relCleanup.push(window._deleteDoc(window._doc(db,'ipear_referral_queue',_uid)).catch(() => {}));
-      }
-      // Notifications — query by customerUid (best-effort)
-      for (const _uid of uidsToDel) {
-        try {
-          const nQ = await window._getDocs(window._query(window._col(db,'ipear_notifications'),window._where('customerUid','==',_uid)));
-          nQ.forEach(d => relCleanup.push(window._deleteDoc(window._doc(db,'ipear_notifications',d.id))));
-        } catch(_) {}
       }
       // GDPR Art.17: Offer redemptions — query by customerId (auth UID)
       for (const _uid of uidsToDel) {
@@ -565,9 +600,8 @@ function _renderCustRows(rows) {
     const rowCls = data.blocked ? ' class="row-blocked"' : data.suspicious ? ' class="row-suspicious"' : '';
     const badge = data.blocked ? ' <span class="watchlist-badge wb-blocked">BLOCKED</span>'
                 : data.suspicious ? ' <span class="watchlist-badge wb-suspicious">SUSPECT</span>' : '';
-    const pushIcon = data.fcmToken ? ' <span class="push-bell" title="Push ενεργό" style="font-size:.7rem;opacity:.7">🔔</span>' : '<span class="push-bell"></span>';
     r+=`<tr${rowCls} data-uid="${id}">
-      <td><strong>${escHtml(data.card)}</strong></td><td>${escHtml(data.name)}${pushIcon}${badge}</td><td>${escHtml(data.phone)}</td>
+      <td><strong>${escHtml(data.card)}</strong></td><td>${escHtml(data.name)}${badge}</td><td>${escHtml(data.phone)}</td>
       <td>
         <strong style="color:#4caf50">${pts.toLocaleString('el-GR')}</strong>
         <div style="font-size:.72rem;color:var(--gray)">Σύνολο: ${tot.toLocaleString('el-GR')}</div>

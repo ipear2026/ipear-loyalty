@@ -86,15 +86,14 @@ export function getDb() {
 //  Kept (customer needs them for UI):
 //   • Identity / profile (name, phone, email, card, uid, birthday)
 //   • Financial state   (points, totalPoints, tier, lastTierCheck)
-//   • Push / consent    (fcmToken, marketingOptIn*, notificationsEnabled,
-//                        termsAcceptedAt)
+//   • Consent           (marketingOptIn*, termsAcceptedAt)
 //   • Lifecycle flags   (blocked, deletionRequested*, eshopCouponUsed,
 //                        referralCount, referralProcessed, createdAt)
 // ═══════════════════════════════════════════════════════════════════════════
 const _CUSTOMER_SAFE_FIELDS = [
   'name', 'phone', 'email', 'card', 'uid',
   'points', 'totalPoints', 'tier', 'lastTierCheck',
-  'birthday', 'fcmToken', 'blocked', 'createdAt',
+  'birthday', 'blocked', 'createdAt',
   'referralCount', 'referralProcessed', 'eshopCouponUsed',
   'marketingOptIn', 'marketingOptInAt', 'termsAcceptedAt',
   // marketingWelcomeProcessed / marketingWelcomeAt are owned by the Worker

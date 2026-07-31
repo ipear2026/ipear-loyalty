@@ -44,7 +44,7 @@ export async function loadStats() {
     ]);
     setCachedCustomers(csnap);
 
-    let given = 0, redeemed = 0, totalAvailPts = 0, pushCount = 0, blockedCount = 0, suspiciousCount = 0;
+    let given = 0, redeemed = 0, totalAvailPts = 0, blockedCount = 0, suspiciousCount = 0;
     const tc = { Bronze: 0, Silver: 0, Gold: 0, Diamond: 0, Platinum: 0 };
     const txByCustomer = {};
     const now = new Date();
@@ -59,7 +59,6 @@ export async function loadStats() {
       const t = tier(cd.totalPoints || cd.points || 0);
       tc[t.name]++;
       totalAvailPts += cd.points || 0;
-      if (cd.fcmToken) pushCount++;
       if (cd.blocked) blockedCount++;
       if (cd.suspicious) suspiciousCount++;
       if (cd.createdAt && new Date(cd.createdAt) >= monthStart) signupsThisMonth++;
@@ -86,7 +85,6 @@ export async function loadStats() {
     const liability = (totalAvailPts * 0.02).toFixed(0) + '€';
     const loyalCount = Object.values(txByCustomer).filter(n => n >= 3).length;
     const loyaltyRate = csnap.size > 0 ? (loyalCount / csnap.size * 100).toFixed(0) + '%' : '0%';
-    const pushPct = csnap.size > 0 ? Math.round(pushCount / csnap.size * 100) : 0;
     const active30 = active30Ids.size;
     const active30Pct = csnap.size > 0 ? Math.round(active30 / csnap.size * 100) : 0;
 
@@ -105,9 +103,6 @@ export async function loadStats() {
     document.getElementById('dash-loyalty-rate').textContent = 'Loyalty Rate: ' + loyaltyRate;
     document.getElementById('dash-active30').textContent = active30;
     document.getElementById('dash-active30-pct').textContent = active30Pct + '% της βάσης';
-    document.getElementById('dash-push-count').textContent = pushCount + '/' + csnap.size;
-    document.getElementById('dash-push-bar').style.width = pushPct + '%';
-    document.getElementById('dash-push-pct').textContent = pushPct + '% reachable';
     document.getElementById('dash-top-reward').textContent = topReward;
     document.getElementById('dash-top-reward-count').textContent = topRewardCount > 0 ? topRewardCount + ' εξαργυρώσεις' : 'Καμία ακόμα';
     document.getElementById('dash-blocked').textContent = blockedCount + (suspiciousCount ? ' / ' + suspiciousCount : '');
@@ -175,36 +170,6 @@ export async function loadStats() {
         </div>
         <div style="font-weight:900;font-size:1rem;color:${r.count >= 5 ? '#d4af37' : 'var(--green)'}">${r.count}<span style="font-weight:600;font-size:.72rem;color:var(--gray)">/${MAX_REFERRALS_PER_USER}</span></div>
       </li>`).join('');
-    }
-
-    // Push Notifications Table
-    const pushCustomers = [];
-    csnap.forEach(d => {
-      const cd = d.data();
-      if (cd.fcmToken) pushCustomers.push({ name: cd.name || '—', card: cd.card || '', phone: cd.phone || '' });
-    });
-    const pushEl = document.getElementById('push-customers-list');
-    if (!pushCustomers.length) {
-      pushEl.innerHTML = '<div style="color:var(--gray);font-size:.85rem;text-align:center;padding:14px">Κανένας πελάτης με ενεργές ειδοποιήσεις</div>';
-    } else {
-      pushEl.innerHTML = `
-        <table style="width:100%;border-collapse:collapse;font-size:.83rem">
-          <thead><tr style="border-bottom:2px solid var(--border)">
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">#</th>
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Πελάτης</th>
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Κάρτα</th>
-            <th style="text-align:left;padding:8px 10px;color:var(--gray);font-weight:600">Τηλέφωνο</th>
-          </tr></thead>
-          <tbody>${pushCustomers.map((c, i) => `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:8px 10px;color:var(--gray)">${i + 1}</td>
-              <td style="padding:8px 10px;font-weight:600">${escHtml(c.name)}</td>
-              <td style="padding:8px 10px;font-size:.8rem;color:var(--gray)">${escHtml(c.card)}</td>
-              <td style="padding:8px 10px;font-size:.8rem">${escHtml(c.phone)}</td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-        <div style="font-size:.75rem;color:var(--gray);margin-top:8px;text-align:right">🔔 ${pushCustomers.length} / ${csnap.size} πελάτες με push ενεργό</div>`;
     }
 
     _onSnapshot(csnap, tsnap);

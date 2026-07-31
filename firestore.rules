@@ -178,7 +178,7 @@ service cloud.firestore {
             request.resource.data.keys().hasOnly([
               'uid','email','name','phone','card','points','totalPoints',
               'birthday','referredBy','blocked','referralProcessed',
-              'referralCount','fcmToken','marketingOptIn','marketingOptInAt',
+              'referralCount','marketingOptIn','marketingOptInAt',
               'termsAcceptedAt','createdAt'
             ]) &&
             request.resource.data.points == 0 &&
@@ -203,7 +203,7 @@ service cloud.firestore {
             request.resource.data.keys().hasOnly([
               'uid','email','name','phone','card','points','totalPoints',
               'birthday','referredBy','blocked','referralProcessed',
-              'referralCount','fcmToken','marketingOptIn','marketingOptInAt',
+              'referralCount','marketingOptIn','marketingOptInAt',
               'termsAcceptedAt','createdAt','_migratedFrom',
               'tier','notificationsEnabled','lastTierCheck','eshopCouponUsed'
             ]) &&
@@ -235,8 +235,7 @@ service cloud.firestore {
         (ownsCustomer(resource.data) && !touchesFinancial() &&
          (!('name'     in request.resource.data) || (request.resource.data.name     is string && request.resource.data.name.size()     <= 100)) &&
          (!('phone'    in request.resource.data) || (request.resource.data.phone    is string && request.resource.data.phone.size()    <= 20))  &&
-         (!('birthday' in request.resource.data) || (request.resource.data.birthday is string && request.resource.data.birthday.size() <= 10))  &&
-         (!('fcmToken' in request.resource.data) || (request.resource.data.fcmToken is string && request.resource.data.fcmToken.size() <= 500))
+         (!('birthday' in request.resource.data) || (request.resource.data.birthday is string && request.resource.data.birthday.size() <= 10))
         )
         ||
         (isAuth() &&
@@ -494,15 +493,6 @@ service cloud.firestore {
         request.resource.data.referrerCard != request.resource.data.newCustomerCard;
 
       allow read, update, delete: if isAdmin();
-    }
-
-    // ═════════════════════════════════════════════════════════════════════
-    //  ipear_notifications — admin-pushed notifications
-    // ═════════════════════════════════════════════════════════════════════
-    match /ipear_notifications/{nId} {
-      allow read:  if isAdmin() ||
-        (isAuth() && resource.data.customerUid == request.auth.uid);
-      allow write: if isAdmin();
     }
 
     // ═════════════════════════════════════════════════════════════════════

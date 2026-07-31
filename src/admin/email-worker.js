@@ -94,7 +94,7 @@ export async function checkWorkerHealth() {
       const data = await r.json();
       dot.className = 'health-dot ok';
       txt.textContent = 'Worker ✓';
-      txt.title = 'Brevo: ' + (data.brevo ? '✓' : '✗') + ' | FCM: ' + (data.fcm ? '✓' : '✗');
+      txt.title = 'Brevo: ' + (data.brevo ? '✓' : '✗');
     } else {
       dot.className = 'health-dot err';
       txt.textContent = 'Worker ✗';

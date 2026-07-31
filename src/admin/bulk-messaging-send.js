@@ -125,7 +125,9 @@ export async function sendSMSBulk() {
         const t = tier(c.totalPoints || c.points || 0);
         if (t.name !== target) return;
       }
-      recipients.push({ phone, name: c.name || '' });
+      // Bulk SMS on the worker uses ONE shared content string — no per-recipient
+      // substitution — so `name` here would be dead payload. Send phone only.
+      recipients.push({ phone });
     });
 
     if (!recipients.length) {

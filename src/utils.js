@@ -212,7 +212,5 @@ export function escJs(s) {
   return JSON.stringify(String(s ?? '')).slice(1, -1);
 }
 
-// ════════════════════════════════════════
-//  TIER FLOOR (admin + tablet DRY)
-// ════════════════════════════════════════
-export function tierFloor(t) { return t>=10000?10000:t>=6000?6000:t>=3000?3000:t>=1000?1000:0; }
+// tierFloor removed — the `floor` field is now returned by tier() itself,
+// so callers use `tier(tot).floor` instead of duplicating the ladder.

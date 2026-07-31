@@ -12,14 +12,8 @@ import {
   _haptic, _animateNumber,
 } from './utils.js';
 import { _t } from './i18n.js';
-import { _setPushUI, _syncPushState, _dismissPushOnboard, _acceptPushOnboard, registerServiceWorker } from './push-notifications.js';
+import { registerServiceWorker } from './sw-registration.js';
 import './firebase-init.js';
-// Customer-only push handlers (window._enablePush / _disablePush / etc).
-// MUST be imported AFTER firebase-init.js so that window._messaging is
-// already exposed when customer-push.js's handlers run. Side-effect import:
-// the file binds window._* globals at module load. Never imported by
-// admin-main.js or tablet-main.js — push is a customer-flow concern.
-import './customer/customer-push.js';
 import {
   renderHomeRewards, renderRewardsList,
   startRewardsListener, stopRewardsListener, getActiveRewards,
@@ -1241,8 +1235,6 @@ document.addEventListener('keydown', (e) => {
   if (os && os.classList.contains('show')) { closeOfferSheet(); return; }
   const ov = document.getElementById('redeem-overlay');
   if (ov && ov.style.display === 'flex') { cancelRedemption(); return; }
-  const po = document.getElementById('push-onboard');
-  if (po && po.style.display === 'flex') { _dismissPushOnboard(); return; }
 });
 
 // ════════════════════════════════════════
@@ -1342,14 +1334,6 @@ export async function startApp() {
   startLiveListener();
   startRewardsListener();
   _startMaintenanceListener();
-  _startEmailVerifyFlow();
-
-  if ('Notification' in window && Notification.permission !== 'denied') {
-    const pushSection = document.getElementById('push-section');
-    if (pushSection) pushSection.style.display = 'block';
-    const pushActive = Notification.permission === 'granted' && !!c.fcmToken;
-    _setPushUI(pushActive);
-  }
 
   if (c.birthday) {
     const bday = new Date(c.birthday + 'T00:00:00');
@@ -1396,142 +1380,13 @@ async function _retryPendingBonuses(c) {
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  EMAIL-VERIFY BANNER + POLLING
-// ════════════════════════════════════════════════════════════════════════
-//
-// Dual-verification model (paired with SMS OTP already done at signup):
-//   • SMS OTP confirms phone → gates customer doc creation.
-//   • Email verification confirms inbox → gates +50/+100 bonuses
-//     (server-side CRIT-1 fix on /send-welcome and /process-referral).
-//
-// This function shows a persistent top banner whenever the signed-in user
-// has emailVerified=false. Polls authUser.reload() every 30s; when the user
-// flips to verified, the banner is removed, a success toast is shown, and
-// /send-welcome + /process-referral are re-triggered so any pending bonuses
-// finally land.
-//
-// Also auto-detects the return from Firebase's verify page: if URL contains
-// `?verified=1` (the continueUrl we asked Firebase to redirect to), we run
-// one immediate reload + bonus retrigger before settling into the 30s loop.
-let _emailVerifyTimer = null;
-let _emailVerifyLastResend = 0;
-const _EMAIL_VERIFY_RESEND_COOLDOWN_MS = 60_000;
-const _EMAIL_VERIFY_POLL_MS = 30_000;
-
-function _startEmailVerifyFlow() {
-  // Email verification removed — SMS OTP at signup is the sole verification.
-  // Bonuses are credited immediately by the Worker on /send-welcome and
-  // /process-referral calls fired from _finishRegistration. No polling needed.
-}
-
-function _stopEmailVerifyPolling() {
-  if (_emailVerifyTimer) { clearInterval(_emailVerifyTimer); _emailVerifyTimer = null; }
-}
-
-async function _checkEmailVerified(fastPath = false) {
-  const authUser = window._auth?.currentUser;
-  if (!authUser) { _stopEmailVerifyPolling(); return; }
-  try {
-    await authUser.reload();
-  } catch (e) {
-    logger.warn('[verify-poll] reload failed:', e?.message || e);
-    return;
-  }
-  if (authUser.emailVerified !== true) return;
-
-  // ✅ Verified — celebrate, retrigger bonuses, stop polling.
-  _stopEmailVerifyPolling();
-  _hideEmailVerifyBanner();
-  showToast('🎉 Email επιβεβαιώθηκε! Τα bonuses ενεργοποιούνται…', 'green');
-
-  // Retrigger Worker bonuses now that the token will pass emailVerified gate.
-  try {
-    const idToken = await authUser.getIdToken(true);
-    const name = state.foundCustomer?.name || authUser.displayName || '';
-    const marketingOptIn = !!state.foundCustomer?.marketingOptIn;
-    // /send-welcome — idempotent via marketingWelcomeProcessed
-    fetch(_WORKER_URL + '/send-welcome', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken, name, marketingOptIn }),
-    }).catch(() => {});
-    // /process-referral — idempotent via referralProcessed flag in queue doc
-    fetch(_WORKER_URL + '/process-referral', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken }),
-    }).catch(() => {});
-  } catch (e) {
-    logger.warn('[verify-poll] bonus retrigger failed:', e?.message || e);
-  }
-
-  if (fastPath) {
-    // Came back via ?verified=1 — give a longer toast trail.
-    setTimeout(() => showToast('🎁 Έλεγξε το ιστορικό για τους πόντους που μόλις προστέθηκαν!', 'green'), 2500);
-  }
-}
-
-function _showEmailVerifyBanner() {
-  // Banner removed by request — verification polling keeps running silently so
-  // that the +50/+100 bonuses still trigger when the user clicks the email link.
-  // Resend button is available in the profile tab if we add one later.
-}
-
-function _hideEmailVerifyBanner() {
-  const el = document.getElementById('email-verify-banner');
-  if (el) el.remove();
-  document.body.style.paddingTop = '';
-}
-
-async function _resendVerifyEmail() {
-  const btn = document.getElementById('email-verify-resend');
-  const now = Date.now();
-  if (now - _emailVerifyLastResend < _EMAIL_VERIFY_RESEND_COOLDOWN_MS) {
-    const sec = Math.ceil((_EMAIL_VERIFY_RESEND_COOLDOWN_MS - (now - _emailVerifyLastResend)) / 1000);
-    showToast(`⏳ Δοκίμασε ξανά σε ${sec}s.`, 'orange');
-    return;
-  }
-  _emailVerifyLastResend = now;
-  if (btn) { btn.disabled = true; btn.style.opacity = '.6'; btn.textContent = 'Αποστολή…'; }
-
-  try {
-    const authUser = window._auth?.currentUser;
-    if (!authUser) throw new Error('not signed in');
-    const idToken = await authUser.getIdToken(true);
-    const res = await fetch(_WORKER_URL + '/send-verification-link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (data.alreadyVerified) {
-      _hideEmailVerifyBanner();
-      _stopEmailVerifyPolling();
-      showToast('✅ Το email σου είναι ήδη επιβεβαιωμένο!', 'green');
-      return;
-    }
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    showToast('📨 Στάλθηκε! Έλεγξε το inbox σου (και τον φάκελο spam).', 'green');
-  } catch (e) {
-    logger.warn('[verify-resend] error:', e?.message || e);
-    showToast('❌ Αποτυχία αποστολής. Δοκίμασε σε λίγο.', 'red');
-    _emailVerifyLastResend = 0; // allow immediate retry on hard failure
-  } finally {
-    if (btn) {
-      setTimeout(() => {
-        btn.disabled = false; btn.style.opacity = '1'; btn.textContent = 'Στείλε ξανά';
-      }, 2000);
-    }
-  }
-}
-
 // ════════════════════════════════════════
-//  PWA INSTALL
+//  STANDALONE RUNTIME DETECTION
+//  Install-prompt UI removed — we no longer solicit "Add to Home Screen".
+//  These helpers stay because users who ALREADY installed the app before
+//  the strip still open it in standalone mode, and iOS Safari's viewport
+//  handling (bottom-nav pinning in _pinNav below) needs to know.
 // ════════════════════════════════════════
-let _deferredPrompt = null;
-const _pwaKey = 'ipear_pwa_dismissed';
-
 function _isIOS() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent);
 }
@@ -1573,53 +1428,10 @@ if (_isStandalone()) {
   }, {passive:true});
 }
 
-window.addEventListener('beforeinstallprompt', e => {
-  e.preventDefault();
-  _deferredPrompt = e;
-  const ib = document.getElementById('install-app-section');
-  if (ib && !_isStandalone()) ib.style.display = '';
-});
-
-function _showPWABanner(type) {
-  const banner = document.getElementById('pwa-banner');
-  document.getElementById('pwa-ios').style.display     = type === 'ios'     ? '' : 'none';
-  document.getElementById('pwa-android').style.display = type === 'android' ? '' : 'none';
-  banner.style.display = 'block';
-}
-
-function dismissPWA() {
-  document.getElementById('pwa-banner').style.display = 'none';
-  localStorage.setItem(_pwaKey, '1');
-}
-
-async function triggerInstall() {
-  if (!_deferredPrompt) return;
-  _deferredPrompt.prompt();
-  const { outcome } = await _deferredPrompt.userChoice;
-  if (outcome === 'accepted') {
-    dismissPWA();
-    const ib = document.getElementById('install-app-section');
-    if (ib) ib.style.display = 'none';
-  }
-  _deferredPrompt = null;
-}
-
-function _installApp() {
-  if (_deferredPrompt) {
-    triggerInstall();
-  } else if (_isIOS()) {
-    _showPWABanner('ios');
-  }
-}
-
 // ════════════════════════════════════════
 //  DOMContentLoaded
 // ════════════════════════════════════════
 {
-  if (_isIOS() && !_isStandalone()) {
-    const ib = document.getElementById('install-app-section');
-    if (ib) ib.style.display = '';
-  }
   const dayEl  = document.getElementById('reg-bday-d');
   const yearEl = document.getElementById('reg-bday-y');
   if (dayEl) {
@@ -1855,9 +1667,4 @@ window._expandLeaderboard = _expandLeaderboard;
 window._collapseLb = _collapseLb;
 window._toggleHistory = _toggleHistory;
 window.loadHistoryMore = loadHistoryMore;
-window._dismissPushOnboard = _dismissPushOnboard;
-window._acceptPushOnboard = _acceptPushOnboard;
-window._installApp = _installApp;
-window.dismissPWA = dismissPWA;
-window.triggerInstall = triggerInstall;
 window.generateQR = generateQR;

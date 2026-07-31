@@ -41,7 +41,6 @@ import {
   getWorkerSecret as _getWorkerSecret,
   setWorkerSecret as _setWorkerSecret,
 } from './admin/worker-secret.js';
-import { fillPushTpl, sendPushNotification } from './admin/push-fcm.js';
 import {
   toggleWorkerConfig,
   saveWorkerConfig,
@@ -62,7 +61,6 @@ import {
   openOfferModal,
   openOfferEdit,
   saveOffer,
-  sendOfferPush,
   toggleOffer,
   deleteOffer,
 } from './admin/offers.js';
@@ -90,10 +88,10 @@ import {
   rejectOffer,
 } from './admin/approvals.js';
 import {
-  initPushListener,
-  startPushListener as _startPushListener,
-  stopPushListener,
-} from './admin/push-listener.js';
+  initCustomerLiveSync,
+  startCustomerLiveSync as _startCustomerLiveSync,
+  stopCustomerLiveSync,
+} from './admin/customer-live-sync.js';
 import { exportCSV } from './admin/csv-export.js';
 import { startMaintenanceListener, stopMaintenanceListener, toggleKillSwitch } from './admin/kill-switch.js';
 import {
@@ -119,8 +117,8 @@ import {
   sendSMSBulk,
 } from './admin/bulk-messaging-send.js';
 
-// Wire push-listener: keep the customers-crud table cache in sync.
-initPushListener({
+// Wire customer live-sync: keep the customers-crud table cache in sync.
+initCustomerLiveSync({
   onCustomerChange: (id, data) => updateCachedCustomerRow(id, data),
 });
 
@@ -237,14 +235,14 @@ initAdminAuth({
   onLoginComplete: () => {
     configureSystemHealth({ onDataChanged: loadStats });
     configureStats({ onSnapshot: renderSegments });
-    loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startPushListener();
+    loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startCustomerLiveSync();
     processReferralQueue(); loadKpiOverview(); startMaintenanceListener(); checkWorkerHealth();
     loadDeletionRequests();
   },
   onLogout: () => {
     // Stop real-time listeners (prevent leak + stale re-login)
     stopApprovalListener();
-    stopPushListener();
+    stopCustomerLiveSync();
     stopMaintenanceListener();
     // Wipe admin-main's per-customer scope + the cached segment table
     cid = null; cdata = null; msgCh = '';
@@ -255,7 +253,7 @@ initAdminAuth({
     showTab('search');
   },
   keepAliveRefresh: () => {
-    loadStats(); loadTx(); loadOffers(); startApprovalListener(); _startPushListener();
+    loadStats(); loadTx(); loadOffers(); startApprovalListener(); _startCustomerLiveSync();
     loadKpiOverview(); checkWorkerHealth();
   },
 });
@@ -375,7 +373,6 @@ window.msBack = msBack;
 window.mvBack = mvBack;
 window.fillTpl = fillTpl;
 window.fillEmailTpl = fillEmailTpl;
-window.fillPushTpl = fillPushTpl;
 window.fillSmsBulkTpl = fillSmsBulkTpl;
 window.sendCustom = sendCustom;
 window.sendSMSIndividual = sendSMSIndividual;
@@ -386,7 +383,6 @@ window.sendSMSBulk = sendSMSBulk;
 window.sendEmailBulk = sendEmailBulk;
 window.previewSmsBulk = previewSmsBulk;
 window.previewEmailBulk = previewEmailBulk;
-window.sendPushNotification = sendPushNotification;
 window.sEmail = sEmail;
 window.sSMS = sSMS;
 window.sViber = sViber;
@@ -408,7 +404,6 @@ window.openRewardEdit = openRewardEdit;
 window.saveReward = saveReward;
 window.toggleReward = toggleReward;
 window.deleteReward = deleteReward;
-window.sendOfferPush = sendOfferPush;
 window.previewOfferImage = previewOfferImage;
 window.removeOfferImage = removeOfferImage;
 window.previewRewardImage = previewRewardImage;

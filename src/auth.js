@@ -2,7 +2,6 @@ import { logger } from './logger.js';
 import { state } from './state.js';
 import { showToast, _trackEvent, _WORKER_URL } from './utils.js';
 import { _t } from './i18n.js';
-import { _showPushOnboarding } from './push-notifications.js';
 // Q-2 fix: static import for synchronous cleanup on logout. Circular import
 // is safe here because logout() runs long after both modules have loaded.
 import {
@@ -22,7 +21,7 @@ const _CACHE_KEY = 'ipear_customer_cache';
 
 // HIGH-2 (Pen-Test 2026-06-24): minimal cache surface for instant-paint UX.
 // Pre-fix the cache stored the WHOLE customer doc in plain JSON — including
-// PII (phone, email, birthday), the fcmToken, and admin-only flags from
+// PII (phone, email, birthday), and admin-only flags from
 // HIGH-1 (suspicious, _migratedFrom). Now we persist only the 5 fields the
 // splash → home transition needs, plus a schema version (_v) so old
 // "polluted" caches from previous sessions get invalidated on next read.
@@ -256,16 +255,27 @@ export function setupReferralAutoFill() {
       setTimeout(() => {
         const regRef = document.getElementById('reg-ref');
         if (regRef && !regRef.value) regRef.value = ref;
-        showScreen('s-register');
+        _showRegisterScreenWired();
       }, 300);
     });
     setTimeout(() => {
       const regRef = document.getElementById('reg-ref');
       if (regRef && !regRef.value) regRef.value = ref;
       if (!_loginShown) return;
-      showScreen('s-register');
+      _showRegisterScreenWired();
     }, 2500);
   } catch(e) { logger.warn('[referral-autofill]', e); }
+}
+
+// Shared entry helper: any code path that lands on the register screen must
+// go through here so the readiness (button-state) + refCode auto-format
+// listeners are attached. Before this existed, setupReferralAutoFill jumped
+// straight to showScreen('s-register') and neither listener was ever bound —
+// the CTA stayed green regardless of empty required fields.
+function _showRegisterScreenWired() {
+  _bindRegisterReadinessOnce();
+  _updateRegisterButtonState();
+  showScreen('s-register');
 }
 
 export function _getSavedAccount() {
@@ -441,7 +451,75 @@ export function openRegister() {
   ['reg-bday-d','reg-bday-m','reg-bday-y'].forEach(id => { const el=document.getElementById(id); if(el) el.selectedIndex=0; });
   ['reg-terms','reg-marketing'].forEach(id => { const el=document.getElementById(id); if(el) el.checked=false; });
   document.getElementById('reg-err').innerHTML = '';
+  _bindRegisterReadinessOnce();
+  _updateRegisterButtonState();
   showScreen('s-register');
+}
+
+// UX: register CTA stays visually muted until the customer has actually
+// completed the mandatory fields AND accepted the terms — then it flips to
+// the brand-green ready state so the "click here" signal only fires when the
+// click will actually succeed. Button remains clickable throughout so
+// submitRegister can still surface the specific missing-field error.
+let _regReadinessBound = false;
+function _bindRegisterReadinessOnce() {
+  if (_regReadinessBound) return;
+  const inputs = ['reg-name','reg-phone','reg-email','reg-pass1','reg-pass2'];
+  inputs.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', _updateRegisterButtonState);
+  });
+  const terms = document.getElementById('reg-terms');
+  if (terms) terms.addEventListener('change', _updateRegisterButtonState);
+
+  // UX: referral field auto-formats to IP-XXXXXX as the customer types.
+  // Once "IP" is on the field the dash appears on its own, non-alphanumeric
+  // chars are stripped, everything is uppercased, and the input is capped at
+  // 9 chars (IP- + 6). Handles paste, backspace, and mid-string edits.
+  const refEl = document.getElementById('reg-ref');
+  if (refEl) {
+    refEl.addEventListener('input', () => {
+      // Preserve caret position so mid-string edits don't jump the cursor
+      // to the end (e.g. user backspaces character 5 of a full code).
+      const priorLen = refEl.value.length;
+      const priorSel = refEl.selectionStart ?? priorLen;
+
+      let v = refEl.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (v.length >= 2 && v.startsWith('IP')) {
+        v = 'IP-' + v.slice(2);
+      }
+      if (v.length > 9) v = v.slice(0, 9);
+      refEl.value = v;
+
+      const delta = v.length - priorLen;
+      const newSel = Math.max(0, Math.min(v.length, priorSel + delta));
+      try { refEl.setSelectionRange(newSel, newSel); } catch (_) {}
+    });
+  }
+
+  _regReadinessBound = true;
+}
+
+function _updateRegisterButtonState() {
+  const btn = document.getElementById('reg-btn');
+  if (!btn) return;
+  // Mirror the required-field predicates from submitRegister so the button
+  // flips exactly when a submit would pass validation. Referral code, birthday
+  // and marketing opt-in stay optional (marketing checkbox is a bonus, not
+  // a gate).
+  const name  = (document.getElementById('reg-name')?.value  || '').trim();
+  const phone = (document.getElementById('reg-phone')?.value || '').replace(/[\s\-()]/g,'');
+  const email = (document.getElementById('reg-email')?.value || '').trim().toLowerCase();
+  const p1    = document.getElementById('reg-pass1')?.value || '';
+  const p2    = document.getElementById('reg-pass2')?.value || '';
+  const terms = !!document.getElementById('reg-terms')?.checked;
+  const ready =
+    name.length > 0 && name.length <= 100 &&
+    /^6\d{9}$/.test(phone) &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
+    p1.length >= 6 && p1 === p2 &&
+    terms;
+  btn.classList.toggle('is-pending', !ready);
 }
 
 // Timeout wrapper for the critical registration writes. Firestore SDK
@@ -468,6 +546,11 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
   //   - /process-referral credits +100 referral bonus (to both parties)
   const customerDocId = firebaseUID;
   const _now = new Date().toISOString();
+  // Defense-in-depth: submitRegister validates refCode up-front, but any
+  // stale/legacy _regData path (or a direct future caller) must not be
+  // able to smuggle a malformed code through into referredBy — the
+  // Firestore rule would 403 the whole create.
+  const safeRefCode = (refCode && /^IP-[A-Z0-9]{6}$/.test(refCode)) ? refCode : '';
   try {
     await _withDeadline(
       window._setDoc(window._doc(window._db,'ipear_customers', customerDocId), {
@@ -475,11 +558,10 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
         uid: firebaseUID || '',
         points: 0, totalPoints: 0,
         birthday: birthday || '',
-        referredBy: refCode || '',
+        referredBy: safeRefCode,
         blocked: false,
         referralProcessed: false,
         referralCount: 0,
-        fcmToken: '',
         marketingOptIn: !!marketingOptIn,
         marketingOptInAt: marketingOptIn ? _now : '',
         termsAcceptedAt: _now,
@@ -517,7 +599,7 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
     throw wrapped;
   }
 
-  if (refCode) {
+  if (safeRefCode) {
     (async () => {
       try {
         await window._setDoc(window._doc(window._db,'ipear_referral_queue', firebaseUID), {
@@ -526,7 +608,7 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
           newCustomerEmail: email || '',
           newCustomerCard: card,
           newCustomerName: name,
-          referrerCard:    refCode,
+          referrerCard:    safeRefCode,
           processed:       false,
           createdAt:       new Date().toISOString()
         });
@@ -536,7 +618,15 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ idToken })
         }).then(r => r.json()).then(d => {
-          if (!d.ok) logger.warn('[referral] worker error:', d.error || 'unknown');
+          // Silent-fail hardening: /process-referral returns HTTP 200 with
+          // ok:true for BOTH the successful-credit path AND the
+          // invalid-referrer / no-queue-entry termination branches. The old
+          // handler only checked !d.ok, so those termination branches never
+          // surfaced anything and the customer thought they got the bonus.
+          if (!d.ok) {
+            logger.warn('[referral] worker error:', d.error || 'unknown');
+            return;
+          }
           if (d.reason === 'referral-limit-reached') {
             if (state.foundCustomer) {
               state.foundCustomer.points = Math.max(0, (state.foundCustomer.points || 0) - 100);
@@ -544,17 +634,41 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
             }
             _refreshPointsUI();
             showToast('⚠️ Ο κωδικός παραπομπής έχει εξαντληθεί', 'red');
-          } else {
-            if (typeof loadHistory === 'function') setTimeout(loadHistory, 500);
+            return;
           }
+          if (d.reason === 'invalid-referrer') {
+            // Preflight check-referrer should have caught this, but a race
+            // (referrer got deleted between preflight and here) or a
+            // degraded preflight response could let it through.
+            logger.warn('[referral] invalid referrer at commit time — bonus skipped');
+            showToast('⚠️ Ο κωδικός παραπομπής δεν βρέθηκε — το bonus των 100 πόντων δεν πιστώθηκε', 'red');
+            return;
+          }
+          if (d.reason === 'no-queue-entry') {
+            // Retry raced ahead of the queue setDoc. Not fatal — the IIFE's
+            // own subsequent call will find the queue and credit. Log for
+            // visibility only.
+            logger.warn('[referral] queue not yet visible on first attempt (retry race)');
+            return;
+          }
+          if (d.reason === 'already-processed') return;
+          if (typeof loadHistory === 'function') setTimeout(loadHistory, 500);
         }).catch(e => logger.warn('[referral] worker call failed:', e.message));
-      } catch(e) { logger.warn('[referral] queue/worker error:', e.message); }
+      } catch(e) {
+        // Queue setDoc rejected (rules mismatch, App Check, network) — the
+        // customer has referredBy on their doc but no queue entry, so every
+        // future /process-referral will hit no-queue-entry forever. Log
+        // loudly and tell the customer the +100 didn't land so support can
+        // credit manually if needed.
+        logger.error('[referral] queue create FAILED — bonus lost:', e?.code || '', e?.message || e);
+        showToast('⚠️ Το bonus των 100 πόντων παραπομπής δεν καταχωρήθηκε — επικοινώνησε με το κατάστημα', 'red');
+      }
     })();
   }
 
   // Local mirror starts at 0; the worker will increment via Firestore and the
   // app's snapshot listener picks up the new balance for the UI.
-  state.foundCustomer = { id: customerDocId, name, phone, email, card, uid: firebaseUID, points: 0, totalPoints: 0, birthday, fcmToken: '', referralCount: 0 };
+  state.foundCustomer = { id: customerDocId, name, phone, email, card, uid: firebaseUID, points: 0, totalPoints: 0, birthday, referralCount: 0 };
   localStorage.setItem(_REM_KEY, JSON.stringify({ email, name }));
   ['reg-name','reg-phone','reg-email','reg-pass1','reg-pass2','reg-bday-d','reg-bday-m','reg-bday-y','reg-ref'].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
 
@@ -579,11 +693,7 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
   _transitionToApp();
   showToast('🍐 Καλώς ήρθες στο iPear Loyalty', 'green');
   if (marketingOptIn) setTimeout(() => showToast('🎁 +50 πόντοι bonus', 'green'), 1200);
-  if (refCode) setTimeout(() => showToast('🎁 +100 πόντοι από παραπομπή', 'green'), marketingOptIn ? 3000 : 1800);
-
-  if ('Notification' in window && Notification.permission === 'default') {
-    setTimeout(_showPushOnboarding, 3500);
-  }
+  if (safeRefCode) setTimeout(() => showToast('🎁 +100 πόντοι από παραπομπή', 'green'), marketingOptIn ? 3000 : 1800);
 }
 
 export async function submitRegister() {
@@ -614,8 +724,59 @@ export async function submitRegister() {
   const by = document.getElementById('reg-bday-y')?.value || '';
   const birthday = (bd && bm && by) ? `${by}-${bm.padStart(2,'0')}-${bd.padStart(2,'0')}` : '';
   const refCode  = (document.getElementById('reg-ref')?.value || '').trim().toUpperCase();
+  // Firestore rule (firestore.rules Path A) rejects any referredBy that is
+  // neither '' nor matches IP-[A-Z0-9]{6}. Without this check, a malformed
+  // referral code from the user propagates all the way to setDoc, blows up
+  // with permission-denied, Auth is rolled back, and the customer sees the
+  // generic "Δεν ολοκληρώθηκε η εγγραφή" toast. Validate up-front so we
+  // never burn an SMS on a signup we know will fail.
+  if (refCode && !/^IP-[A-Z0-9]{6}$/.test(refCode)) {
+    err.textContent = '❌ Ο κωδικός παραπομπής είναι λάθος ή δεν υπάρχει';
+    document.getElementById('reg-ref')?.focus();
+    return;
+  }
 
   btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+
+  // Layer 2 (referral existence): call the worker's /check-referrer BEFORE
+  // sending SMS. If the code is well-formed but doesn't match any real
+  // customer, /process-referral would silently mark the queue as
+  // 'invalid-referrer' AFTER the customer has already committed to signup
+  // — the +100 bonus vanishes and the retry loop can never heal it.
+  // Failing here saves the SMS credit AND surfaces the typo before the
+  // customer invests effort in the OTP step.
+  if (refCode) {
+    try {
+      const cr = await fetch(_WORKER_URL + '/check-referrer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ referrerCard: refCode })
+      });
+      if (cr.ok) {
+        const cd = await cr.json();
+        // degraded === true means the worker couldn't verify → let it pass
+        // and let /process-referral be the authoritative check downstream.
+        if (cd.degraded !== true) {
+          if (cd.valid !== true) {
+            err.textContent = '❌ Ο κωδικός παραπομπής είναι λάθος ή δεν υπάρχει';
+            document.getElementById('reg-ref')?.focus();
+            btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
+          }
+          if (cd.cap === true) {
+            err.textContent = '⚠️ Αυτός ο κωδικός παραπομπής έχει εξαντληθεί (φτάσαμε το όριο). Άφησέ τον κενό ή γράψε άλλον.';
+            document.getElementById('reg-ref')?.focus();
+            btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
+          }
+        }
+      }
+      // 4xx/5xx from the check → don't block signup. Referral just won't
+      // get validated up-front, and /process-referral's invalid-referrer
+      // path will still close the queue cleanly if the code is wrong.
+    } catch (_) {
+      // Network drop → same reasoning: don't block signup, let the
+      // authoritative check happen downstream.
+    }
+  }
 
   if (window.DEMO) {
     try {

@@ -1,4 +1,3 @@
-import { showToast, _WORKER_URL } from './utils.js';
 // state.foundCustomer is customer-only — no longer imported here. The four
 // push handlers that used to live in this file moved to src/customer/
 // customer-push.js (Sprint 2 Epic 2.2, 2026-06-23). The DEMO push stubs
@@ -22,12 +21,6 @@ import {
   sendPasswordResetEmail, sendEmailVerification, signOut, deleteUser,
   setPersistence, browserLocalPersistence, browserSessionPersistence,
 } from 'firebase/auth';
-import {
-  // getToken moved to src/customer/customer-push.js along with the push
-  // handlers it powered. Keep getMessaging + onMessage here for the
-  // incoming-message toast wiring + exposing _messaging to customer code.
-  getMessaging, onMessage, isSupported as fcmIsSupported,
-} from 'firebase/messaging';
 import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
 
 // Build-time env only. No production-key fallbacks: a missing or placeholder
@@ -45,20 +38,10 @@ export const firebaseConfig = {
 // imported as ES named export — index.html reads window global directly).
 window.CUSTOMER_BUILD_TAG = 'customer-20260615-v55';
 
-export const VAPID_KEY = import.meta.env.VITE_FCM_VAPID_KEY ?? '';
-
 // E2E-FIX: capture silent promise rejections for diagnostics
 window.addEventListener('unhandledrejection', (ev) => {
   logger.warn('[unhandled-rejection]', ev.reason?.message || ev.reason);
 });
-
-// Safety fallback: ensure _togglePush always exists on window (overridden below)
-if (!window._togglePush) {
-  window._togglePush = () => {
-    if (typeof window._enablePush === 'function') window._enablePush();
-    else window.toast && window.toast('⚠️ Ειδοποιήσεις μη διαθέσιμες','red');
-  };
-}
 
 const IS_DEMO = !firebaseConfig.apiKey
   || firebaseConfig.apiKey === 'YOUR_API_KEY'
@@ -148,11 +131,6 @@ if (IS_DEMO) {
   window._sendEmailVerif = async () => {};
   window._deleteAuthUser = async () => {};
   window._getDoc = async () => ({ exists: () => false, data: () => ({}) });
-  window._enablePush = async () => showToast('🔔 Push notifications: demo mode','green');
-  window._disablePush = async () => showToast('🔕 Push disabled: demo mode','green');
-  // DEMO toggle: state-free routing. Real toggle logic lives in
-  // customer-push.js — it overrides this assignment when main.js loads.
-  window._togglePush = () => window._enablePush();
   // S-2 fix: demo stub takes string mode, persistence constants no longer exposed
   window._setPersistenceMode = async () => {};
   window.dispatchEvent(new Event('firebase-ready'));
@@ -233,32 +211,6 @@ if (IS_DEMO) {
       logger.log('[app-check] ✅ initialized');
     } catch(e) { logger.warn('[app-check] init failed:', e.message); }
   }
-
-  // ── FCM Push Notifications ────────────────────────────────────────────
-  let _messaging = null;
-  try {
-    const _fcmOk = await fcmIsSupported();
-    if (_fcmOk) {
-      _messaging = getMessaging(app);
-    } else {
-      logger.warn('[fcm] Push not supported on this browser');
-    }
-  } catch(e) { logger.warn('[fcm] messaging init failed:', e.message); }
-
-  if (_messaging) {
-    onMessage(_messaging, payload => {
-      const n = payload.notification || {};
-      showToast(`🔔 ${n.title||'iPear'}: ${n.body||''}`, 'green');
-    });
-  }
-
-  // Expose the Messaging instance so customer-side code (src/customer/
-  // customer-push.js) can call getToken() against it without re-importing
-  // firebase/messaging. Customer-push.js is loaded by main.js and owns the
-  // window._enablePush / _disablePush / _togglePush handlers.
-  // Tablet + admin never touch this — _messaging stays null is fine on those
-  // surfaces because customer-push.js is never imported there.
-  window._messaging = _messaging;
 
   // Wait for Firebase Auth to restore persisted session from IndexedDB
   await new Promise(resolve => {

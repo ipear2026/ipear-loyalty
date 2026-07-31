@@ -198,40 +198,6 @@ self.addEventListener('message', e => {
   }
 });
 
-// ── FCM Push Notifications (handled in main SW for iOS Safari compatibility) ─
-// When a push message arrives while the app is in background/closed,
-// show a system notification.
-self.addEventListener('push', e => {
-  if (!e.data) return;
-  let payload;
-  try { payload = e.data.json(); } catch(_) { return; }
-
-  const notif = payload.notification || {};
-  const data  = payload.data || {};
-
-  const title = notif.title || data.title || 'iPear Loyalty';
-  const body  = notif.body  || data.body  || '';
-
-  e.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      icon:  '/icon-192.png',
-      badge: '/icon-192.png',
-      tag:   data.tag || 'ipear-push',
-      data:  data,
-    })
-  );
-});
-
-// ── Notification click → open customer app ──────────────────────────────────
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  const url = '/customer.html';
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-      const existing = list.find(c => c.url.includes('customer'));
-      if (existing) return existing.focus().catch(() => clients.openWindow(url));
-      return clients.openWindow(url);
-    })
-  );
-});
+// Push + notification-click handlers were removed when the app dropped push
+// notifications (2026-07-31). Everything above (shell cache, offline page,
+// SKIP_WAITING auto-update) stays — that's the core PWA offline UX.

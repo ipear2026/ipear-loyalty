@@ -268,12 +268,6 @@
         <div class="dash-kpi-sub" id="dash-active30-pct">—</div>
       </div>
       <div class="dash-kpi">
-        <div class="dash-kpi-val" id="dash-push-count" style="color:#8ae900">—</div>
-        <div class="dash-kpi-lbl">🔔 Push Reach</div>
-        <div class="push-reach-bar"><div class="push-reach-fill" id="dash-push-bar" style="width:0%"></div></div>
-        <div class="dash-kpi-sub" id="dash-push-pct">—</div>
-      </div>
-      <div class="dash-kpi">
         <div class="dash-kpi-val" id="dash-top-reward">—</div>
         <div class="dash-kpi-lbl">Top Reward</div>
         <div class="dash-kpi-sub" id="dash-top-reward-count">—</div>
@@ -299,14 +293,6 @@
         <ul class="top-referrers-list" id="kpi-top-referrers" style="max-height:320px;overflow-y:auto">
           <li style="color:var(--gray);font-size:.85rem;justify-content:center">⏳ Φόρτωση...</li>
         </ul>
-      </div>
-    </div>
-
-    <!-- Push Notifications Status -->
-    <div class="card" style="margin-bottom:18px;padding:18px">
-      <h2 style="font-size:.95rem;margin-bottom:12px"><span class="ico" style="width:28px;height:28px;font-size:.8rem">🔔</span> Push Notifications — Ενεργοί Πελάτες</h2>
-      <div id="push-customers-list" style="max-height:350px;overflow-y:auto">
-        <div style="color:var(--gray);font-size:.85rem;text-align:center;padding:14px">⏳ Φόρτωση...</div>
       </div>
     </div>
 
@@ -485,12 +471,6 @@
     <div class="card" style="margin-bottom:18px">
       <h2><span class="ico">💰</span> Κόστος Επικοινωνιών</h2>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
-        <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:12px;padding:14px 16px;text-align:center">
-          <div style="font-size:1.6rem;margin-bottom:4px">🔔</div>
-          <div style="font-weight:800;font-size:.95rem;color:var(--green-dark)">Push</div>
-          <div style="font-size:1.3rem;font-weight:900;color:var(--green);margin:4px 0">ΔΩΡΕΑΝ</div>
-          <div style="font-size:.72rem;color:var(--gray);line-height:1.4">Απεριόριστα μηνύματα<br>μέσω FCM (Google)</div>
-        </div>
         <div style="background:#f0f4ff;border:1px solid #a0b4ff;border-radius:12px;padding:14px 16px;text-align:center">
           <div style="font-size:1.6rem;margin-bottom:4px">📧</div>
           <div style="font-weight:800;font-size:.95rem;color:#3a50b0">Email</div>
@@ -511,7 +491,7 @@
         </div>
       </div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:.78rem;color:var(--gray)">💡 <strong>Σύσταση:</strong> Push για καθημερινά, Email για σημαντικά, SMS μόνο για επείγοντα.</span>
+        <span style="font-size:.78rem;color:var(--gray)">💡 <strong>Σύσταση:</strong> Email για σημαντικά, SMS μόνο για επείγοντα.</span>
       </div>
     </div>
 
@@ -600,43 +580,6 @@
       </button>
       <div id="email-progress" style="margin-top:10px;font-size:.84rem;color:var(--gray);display:none">⏳ Φόρτωση...</div>
       <div id="email-result" style="margin-top:12px"></div>
-    </div>
-
-    <!-- PUSH NOTIFICATIONS -->
-    <div class="card" style="margin-bottom:18px">
-      <h2><span class="ico">🔔</span> Push Notifications — Άμεση Αποστολή</h2>
-      <p style="color:var(--gray);font-size:.85rem;line-height:1.6;margin-bottom:16px">
-        Στείλε push notification απευθείας στις συσκευές των πελατών που έχουν ενεργοποιήσει τις ειδοποιήσεις.
-        Δεν χρειάζεται SMS — εμφανίζεται κατευθείαν στην οθόνη τους.
-      </p>
-
-      <!-- Info: uses Cloudflare Worker (no server key needed here) -->
-      <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:10px;padding:13px 16px;margin-bottom:16px;font-size:.82rem;color:#333;line-height:1.7">
-        ✅ Χρησιμοποιεί τον <strong>Cloudflare Worker</strong> σου (FCM V1 API). Δεν χρειάζεται server key εδώ — αρκεί το Worker URL από τις ρυθμίσεις Email παραπάνω.
-      </div>
-
-      <!-- Compose push -->
-      <div class="fg" style="margin-bottom:10px">
-        <label>Τίτλος Push</label>
-        <input type="text" id="push-title" placeholder="π.χ. 🎁 Νέα Προσφορά iPear!" maxlength="80">
-      </div>
-      <div class="fg" style="margin-bottom:10px">
-        <label>Μήνυμα</label>
-        <textarea id="push-body" rows="3" placeholder="π.χ. Έχεις 500 πόντους! Έλα να τους εξαργυρώσεις μέχρι το τέλος του μήνα. 🍐" style="resize:vertical"></textarea>
-      </div>
-
-      <!-- Quick templates -->
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
-        <button class="chip" data-action="fillPushTpl" data-arg="promo">🎁 Προσφορά</button>
-        <button class="chip" data-action="fillPushTpl" data-arg="points">📊 Πόντοι</button>
-        <button class="chip" data-action="fillPushTpl" data-arg="bday">🎂 Γενέθλια</button>
-        <button class="chip" data-action="fillPushTpl" data-arg="new">✨ Νέο Προϊόν</button>
-      </div>
-
-      <button class="btn btn-green btn-full" id="send-push-btn" data-action="sendPushNotification" style="font-size:1rem;padding:14px">
-        🔔 Αποστολή Push Notification
-      </button>
-      <div id="push-result" style="margin-top:12px"></div>
     </div>
 
     <!-- BULK SMS (Brevo API) -->
@@ -1108,26 +1051,6 @@
     <div class="modal-act">
       <button class="btn btn-green" data-action="saveOffer">✅ Αποθήκευση</button>
       <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
-    </div>
-  </div>
-</div>
-
-<!-- PUSH AFTER OFFER MODAL -->
-<div class="modal-bg" id="m-offer-push" role="dialog" aria-modal="true" aria-label="Push ειδοποίηση προσφοράς">
-  <div class="modal" style="max-width:400px;text-align:center">
-    <div style="font-size:2.5rem;margin-bottom:12px">🔔</div>
-    <h3 style="margin-bottom:8px">Αποστολή Push Notification;</h3>
-    <p style="font-size:.88rem;color:var(--gray);line-height:1.6;margin-bottom:6px">Η προσφορά αποθηκεύτηκε επιτυχώς!</p>
-    <p style="font-size:.84rem;color:var(--gray);line-height:1.5;margin-bottom:20px">Θέλεις να ειδοποιήσεις <strong>όλους τους πελάτες</strong> με push notification για τη νέα προσφορά;</p>
-    <div id="offer-push-preview" style="background:var(--light);border:1px solid var(--border);border-radius:11px;padding:14px;text-align:left;margin-bottom:18px">
-      <div style="font-size:.72rem;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:6px">Προεπισκόπηση</div>
-      <div style="font-weight:800;font-size:.92rem" id="offer-push-title"></div>
-      <div style="font-size:.82rem;color:var(--gray);margin-top:3px" id="offer-push-body"></div>
-    </div>
-    <div id="offer-push-result" style="margin-bottom:12px"></div>
-    <div class="modal-act" style="justify-content:center;gap:10px">
-      <button class="btn btn-outline" data-action="closeM">Όχι, ευχαριστώ</button>
-      <button class="btn btn-green" id="offer-push-send-btn" data-action="sendOfferPush">🔔 Αποστολή</button>
     </div>
   </div>
 </div>

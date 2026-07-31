@@ -155,7 +155,9 @@ export function adminLogout() {
   authState.authenticated = false;
   authState.storeId = null;
   authState.storeName = '—';
-  // Clear sessionStorage (worker secret lives only for this tab session)
+  // Wipe worker secret from localStorage (persistent across tab/browser
+  // restarts by design — see worker-secret.js). Logout is the ONE place
+  // that flushes it, so shared devices don't leak the admin secret.
   _clearWorkerSecret();
   localStorage.removeItem('ipear_worker_url');
   // Clear UI: customer result

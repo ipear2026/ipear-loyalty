@@ -1,12 +1,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  ADMIN — Offers CRUD + new-offer push notification flow
+//  ADMIN — Offers CRUD
 //  Renders the offers list, opens the create/edit modal (with image upload
-//  + compression to base64 ≤900px / 0.78 quality), toggles active state,
-//  and on new-offer creation prompts to broadcast a push via the Worker.
+//  + compression to base64 ≤900px / 0.78 quality), toggles active state.
 // ═══════════════════════════════════════════════════════════════════════════
 import { escHtml, escJs } from '../utils.js';
 import { toast, closeM } from './ui.js';
-import { getWorkerSecret } from './worker-secret.js';
 import { authState } from './auth-state.js';
 
 const DB = () => window._db;
@@ -220,7 +218,6 @@ export async function saveOffer() {
       updatedAt: new Date().toISOString(),
     };
     const editId = document.getElementById('offer-edit-id').value;
-    const isNew = !editId;
     if (editId) {
       await window._updateDoc(window._doc(DB(), 'ipear_offers', editId), data);
       toast('✅ Η προσφορά ενημερώθηκε!', 'success');
@@ -231,90 +228,11 @@ export async function saveOffer() {
     }
     closeM();
     loadOffers();
-
-    // Offer is new + active → ask admin if they want to push-notify all customers
-    if (isNew && data.active) {
-      _pendingOfferPush = { title: data.title, desc: data.description, emoji: data.emoji || '🎁' };
-      document.getElementById('offer-push-title').textContent = (data.emoji || '🎁') + ' ' + data.title;
-      document.getElementById('offer-push-body').textContent = data.description;
-      document.getElementById('offer-push-result').innerHTML = '';
-      document.getElementById('offer-push-send-btn').disabled = false;
-      document.getElementById('offer-push-send-btn').textContent = '🔔 Αποστολή';
-      document.getElementById('m-offer-push').classList.add('show');
-    }
   } catch (e) {
     toast('❌ ' + e.message, 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '✅ Αποθήκευση';
-  }
-}
-
-// ── Push notification for new offer ────────────────────────────────────────
-let _pendingOfferPush = null;
-let _offerPushBusy = false;
-
-export async function sendOfferPush() {
-  if (!_pendingOfferPush || _offerPushBusy) return;
-  _offerPushBusy = true;
-  const workerUrl = localStorage.getItem('ipear_worker_url');
-  const secret = getWorkerSecret();
-  if (!workerUrl || !secret) {
-    toast('⚠️ Ορίστε πρώτα τον Worker URL στις Ειδοποιήσεις!', 'error');
-    closeM();
-    _offerPushBusy = false;
-    return;
-  }
-
-  const btn = document.getElementById('offer-push-send-btn');
-  const res = document.getElementById('offer-push-result');
-  btn.disabled = true;
-  btn.textContent = '⏳ Αποστολή...';
-  res.innerHTML = '';
-
-  try {
-    const snap = await window._getDocs(window._col(DB(), 'ipear_customers'));
-    const tokens = [];
-    snap.forEach((d) => {
-      const t = d.data().fcmToken;
-      if (t) tokens.push(t);
-    });
-
-    if (!tokens.length) {
-      res.innerHTML =
-        '<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:12px;font-size:.84rem;color:#856404">⚠️ Κανένας πελάτης δεν έχει ενεργοποιήσει notifications ακόμα.</div>';
-      btn.disabled = false;
-      btn.textContent = '🔔 Αποστολή';
-      return;
-    }
-
-    const title = (_pendingOfferPush.emoji || '🎁') + ' ' + _pendingOfferPush.title;
-    const message = _pendingOfferPush.desc;
-
-    const pushUrl = workerUrl.replace(/\/$/, '') + '/push';
-    const r = await fetch(pushUrl, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + secret, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tokens, title, message }),
-    });
-    const data = await r.json().catch(() => ({}));
-
-    if (r.ok && data.success) {
-      res.innerHTML = `<div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:12px;font-size:.84rem;color:#3a6e00">
-        ✅ Push στάλθηκε σε <strong>${data.sent}</strong> συσκευές!
-      </div>`;
-      btn.textContent = '✅ Εστάλη!';
-      setTimeout(closeM, 2000);
-    } else {
-      throw new Error(data.error || 'Worker error ' + r.status);
-    }
-  } catch (e) {
-    res.innerHTML = `<div style="background:#f8d7da;border:1px solid #f5c2c7;border-radius:9px;padding:12px;font-size:.84rem;color:#842029">❌ ${escHtml(e.message)}</div>`;
-    btn.disabled = false;
-    btn.textContent = '🔔 Δοκίμασε ξανά';
-  } finally {
-    _pendingOfferPush = null;
-    _offerPushBusy = false;
   }
 }
 

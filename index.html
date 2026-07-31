@@ -7,10 +7,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <title>iPear Loyalty</title>
 
-<!-- PWA manifest -->
-<link rel="manifest" href="manifest-customer.json">
-
-<!-- iOS PWA -->
+<!-- Legacy iOS meta tags left in — harmless without a manifest, still let
+     users who ALREADY added the app to Home Screen keep their launch icon
+     and status-bar styling. No new install prompts are triggered. -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="iPear Loyalty">
@@ -352,7 +351,7 @@
     <div style="margin-bottom:14px">
       <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:.78rem;color:var(--gr);line-height:1.5">
         <input type="checkbox" id="reg-marketing" style="margin-top:3px;min-width:18px;min-height:18px;accent-color:var(--g)">
-        <span>Θέλω να λαμβάνω προσφορές μέσω SMS, email ή push. <strong style="color:var(--g)">Κέρδισε +50 Bonus Πόντους τώρα!</strong></span>
+        <span>Θέλω να λαμβάνω προσφορές μέσω SMS ή email. <strong style="color:var(--g)">Κέρδισε +50 Bonus Πόντους τώρα!</strong></span>
       </label>
     </div>
     <div class="err-msg" id="reg-err"></div>
@@ -616,30 +615,6 @@
           </div>
         </div>
 
-        <div class="prof-section" id="push-section" style="display:none">
-          <div class="prof-sec-title">🔔 Ειδοποιήσεις</div>
-          <p style="font-size:.82rem;color:var(--grl);line-height:1.6;margin-bottom:12px">
-            Ενεργοποίησε τις ειδοποιήσεις για να λαμβάνεις προσφορές, bonus πόντους και ενημερώσεις κατευθείαν στην οθόνη σου.
-          </p>
-          <button id="push-btn" data-push-state="off" onclick="window._togglePush&&window._togglePush()" style="
-            width:100%;padding:13px;background:linear-gradient(135deg,#6bb800,#8ae900);
-            color:#111111;font-weight:700;font-size:.9rem;border:none;border-radius:8px;
-            cursor:pointer;letter-spacing:.2px;transition:background .2s,color .2s
-          ">🔔 Ενεργοποίηση Push Notifications</button>
-        </div>
-
-        <div class="prof-section" id="install-app-section" style="display:none">
-          <div class="prof-sec-title">📱 Εγκατάσταση</div>
-          <p style="font-size:.82rem;color:var(--grl);line-height:1.6;margin-bottom:12px">
-            Πρόσθεσε το iPear Loyalty στην αρχική οθόνη σου για γρήγορη πρόσβαση χωρίς browser.
-          </p>
-          <button id="install-app-btn" onclick="_installApp()" style="
-            width:100%;padding:13px;background:linear-gradient(135deg,#6bb800,#8ae900);
-            color:#111111;font-weight:700;font-size:.9rem;border:none;border-radius:8px;
-            cursor:pointer;letter-spacing:.2px;display:flex;align-items:center;justify-content:center;gap:8px
-          ">📱 Εγκατάσταση Εφαρμογής</button>
-        </div>
-
         <a href="https://g.page/r/YOUR_REVIEW_LINK" target="_blank" rel="noopener noreferrer" id="google-review-cta" style="
           display:flex;align-items:center;gap:14px;
           margin-bottom:16px;padding:16px 18px;
@@ -707,83 +682,6 @@
   </nav>
 
 </div><!-- /s-app -->
-
-<!-- ═══ PUSH ONBOARDING OVERLAY (post-registration) ═══ -->
-<div id="push-onboard" style="
-  display:none;position:fixed;inset:0;z-index:9998;
-  background:rgba(0,0,0,.55);backdrop-filter:blur(4px);
-  align-items:center;justify-content:center;padding:24px;
-  font-family:'Zona Pro',sans-serif;
-">
-  <div style="
-    background:#fff;border-radius:12px;padding:28px 24px;max-width:340px;width:100%;
-    text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.15);animation:slideUp .35s cubic-bezier(.4,0,.2,1)
-  ">
-    <div style="font-size:2.8rem;margin-bottom:8px">🔔</div>
-    <div style="font-weight:900;font-size:1.1rem;color:#111111;margin-bottom:8px">Ειδοποιήσεις</div>
-    <p style="font-size:.84rem;color:#666;line-height:1.6;margin-bottom:20px">
-      Θέλεις να λαμβάνεις ειδοποιήσεις για προσφορές, bonus πόντους και νέα από το iPear;
-    </p>
-    <button onclick="_acceptPushOnboard()" style="
-      width:100%;padding:14px;background:linear-gradient(135deg,#6bb800,#8ae900);
-      color:#111111;font-weight:700;font-size:.95rem;border:none;border-radius:8px;
-      cursor:pointer;margin-bottom:10px;font-family:inherit
-    ">Ναι, ενεργοποίηση!</button>
-    <button onclick="_dismissPushOnboard()" style="
-      width:100%;padding:12px;background:none;border:1px solid #ddd;border-radius:8px;
-      color:#999;font-weight:600;font-size:.85rem;cursor:pointer;font-family:inherit
-    ">Όχι τώρα</button>
-  </div>
-</div>
-
-<!-- ═══ PWA INSTALL BANNER ═══ -->
-<div id="pwa-banner" style="
-  display:none; position:fixed; bottom:0; left:0; right:0; z-index:9999;
-  background:#fff; border-top:1px solid #e8e8e8;
-  box-shadow:0 -8px 32px rgba(0,0,0,.12);
-  padding:16px 20px calc(16px + env(safe-area-inset-bottom,0px));
-  font-family:'Zona Pro',sans-serif;
-  animation: slideUp .35s cubic-bezier(.4,0,.2,1);
-">
-  <button class="pb-close" onclick="dismissPWA()" aria-label="Κλείσιμο" style="position:absolute;top:12px;right:16px;background:none;border:none;font-size:1.3rem;color:#999;cursor:pointer;padding:4px;line-height:1">✕</button>
-  <div style="display:flex; align-items:center; gap:14px; margin-bottom:14px">
-    <img src="icon-192.png" alt="iPear" style="width:52px;height:52px;border-radius:10px;flex-shrink:0">
-    <div>
-      <div style="font-weight:900;font-size:1rem;color:#111111">iPear Loyalty</div>
-      <div style="font-size:.78rem;color:#767676;margin-top:2px">Εγκατάστησε το app στο κινητό σου</div>
-    </div>
-  </div>
-
-  <!-- iOS instructions -->
-  <div id="pwa-ios" style="display:none;background:#f5f5f5;border-radius:8px;padding:14px 16px">
-    <div style="font-size:.82rem;font-weight:700;color:#111111;margin-bottom:10px">📲 Πώς να το προσθέσεις:</div>
-    <div style="display:flex;flex-direction:column;gap:8px">
-      <div style="display:flex;align-items:center;gap:10px;font-size:.8rem;color:#333">
-        <span style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:4px 8px;font-size:.75rem;font-weight:700;white-space:nowrap">1</span>
-        Πάτα το κουμπί
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="2.5" style="flex-shrink:0"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
-        <strong>Share</strong> στο Safari
-      </div>
-      <div style="display:flex;align-items:center;gap:10px;font-size:.8rem;color:#333">
-        <span style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:4px 8px;font-size:.75rem;font-weight:700;white-space:nowrap">2</span>
-        Επίλεξε <strong>«Προσθήκη στην Αρχική Οθόνη»</strong>
-      </div>
-      <div style="display:flex;align-items:center;gap:10px;font-size:.8rem;color:#333">
-        <span style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:4px 8px;font-size:.75rem;font-weight:700;white-space:nowrap">3</span>
-        Πάτα <strong>«Προσθήκη»</strong> — έτοιμο! ✅
-      </div>
-    </div>
-  </div>
-
-  <!-- Android / Chrome install button -->
-  <div id="pwa-android" style="display:none">
-    <button id="pwa-install-btn" onclick="triggerInstall()"
-      style="width:100%;padding:15px;background:#8ae900;color:#111111;border:none;border-radius:8px;font-family:inherit;font-weight:700;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Εγκατάσταση App
-    </button>
-  </div>
-</div>
 
 <!-- ═══ ES MODULE ENTRY POINT ═══ -->
 <script type="module" src="/src/main.js"></script>

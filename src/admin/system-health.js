@@ -21,7 +21,6 @@ const SECONDARY_ORPHAN_COLLECTIONS = [
   { col: 'ipear_redemptions',       fields: ['customerId', 'customerUid'], label: '🎟️ Pending εκπτώσεις' },
   { col: 'ipear_referral_queue',    fields: ['newCustomerId', 'newCustomerUid'], label: '🤝 Referral queue' },
   { col: 'ipear_offer_redemptions', fields: ['customerId', 'customerDocId'], label: '🎁 Offer redemptions' },
-  { col: 'ipear_notifications',     fields: ['customerUid'], label: '🔔 Notifications' },
   { col: 'ipear_birthday_claims',   fields: ['customerUid', 'customerId'], label: '🎂 Birthday claims' },
 ];
 
@@ -268,14 +267,13 @@ export async function runSystemHealthCheck() {
       getDocs(collection(db, 'ipear_transactions')),
     ]);
     const custIds = new Set();
-    let _noPts = 0, noName = 0, noCard = 0, pushCount = 0, negPts = 0;
+    let _noPts = 0, noName = 0, noCard = 0, negPts = 0;
     csnap.forEach(d => {
       custIds.add(d.id);
       const c = d.data();
       if (!c.name) noName++;
       if (!c.card) noCard++;
       if ((c.points || 0) < 0) negPts++;
-      if (c.fcmToken) pushCount++;
       if ((c.points || 0) === 0 && (c.totalPoints || 0) === 0) _noPts++;
     });
 
@@ -305,7 +303,7 @@ export async function runSystemHealthCheck() {
     }
 
     pass('📊 Στατιστικά Βάσης',
-      'Πελάτες: ' + csnap.size + ' · Συναλλαγές: ' + tsnap.size + ' · Push: ' + pushCount + '/' + csnap.size + ' · Χωρίς αγορά: ' + ghosts);
+      'Πελάτες: ' + csnap.size + ' · Συναλλαγές: ' + tsnap.size + ' · Χωρίς αγορά: ' + ghosts);
 
     if (noName) warn('👤 Ελλιπή Στοιχεία', noName + ' πελάτες χωρίς όνομα');
     if (noCard) warn('🪪 Ελλιπή Στοιχεία', noCard + ' πελάτες χωρίς κάρτα');

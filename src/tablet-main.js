@@ -4,7 +4,7 @@ import { logger } from './logger.js';
 //  Shared core: firebase-init.js (Firebase refs), utils.js (tier, _parseExpiryMs, focus trap)
 // ═══════════════════════════════════════════════════════════════════════════
 import './firebase-init.js';
-import { tier, _parseExpiryMs, _trapFocus, _releaseFocus, escHtml, tierFloor } from './utils.js';
+import { tier, _parseExpiryMs, _trapFocus, _releaseFocus, escHtml } from './utils.js';
 
 const TABLET_BUILD_TAG = 'tablet-20260611-a11y2';
 window.TABLET_BUILD_TAG = TABLET_BUILD_TAG;
@@ -624,8 +624,7 @@ function renderCustomer(d) {
   document.getElementById('r-tname').textContent = t.name;
 
   if (t.next) {
-    const floor = tierFloor(tot);
-    const pct   = Math.min(100, Math.round(((tot - floor) / (t.next - floor)) * 100));
+    const pct   = Math.min(100, Math.round(((tot - t.floor) / (t.next - t.floor)) * 100));
     const nName = t.next === 1000 ? '🥈 Silver' : t.next === 3000 ? '🥇 Gold' : t.next === 6000 ? '💎 Diamond' : '👑 Platinum';
     document.getElementById('r-tsub').textContent = `${tot.toLocaleString('el-GR')} / ${t.next.toLocaleString('el-GR')} πόντοι για ${nName}`;
     document.getElementById('r-prog').style.width = pct + '%';

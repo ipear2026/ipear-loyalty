@@ -376,9 +376,15 @@ body{margin:0;min-height:100%;min-height:100dvh;min-height:-webkit-fill-availabl
 .field{width:100%;padding:14px 16px;background:#f8f8f8;border:1px solid var(--bd);border-radius:8px;color:var(--bk);font-family:var(--font);font-size:1rem;font-weight:500;outline:none;transition:border-color .2s,box-shadow .2s,background .2s;margin-bottom:12px}
 .field:focus{border-color:var(--g);background:#fff;box-shadow:0 0 0 2px rgba(138,233,0,.12)}
 .field::placeholder{color:var(--grl);font-weight:400}
-.btn-main{width:100%;padding:15px;background:#8ae900;color:#111111;border:none;border-radius:8px;font-family:var(--font);font-weight:700;font-size:1rem;cursor:pointer;transition:background .2s,transform .15s,box-shadow .2s;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 2px 8px rgba(138,233,0,.18)}
+.btn-main{width:100%;padding:15px;background:#8ae900;color:#111111;border:none;border-radius:8px;font-family:var(--font);font-weight:700;font-size:1rem;cursor:pointer;transition:background .2s,color .2s,transform .15s,box-shadow .2s;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 2px 8px rgba(138,233,0,.18)}
 .btn-main:hover{background:#6bb800;transform:translateY(-2px);box-shadow:0 4px 14px rgba(107,184,0,.25)}
 .btn-main:active{transform:scale(.98) translateY(0);box-shadow:0 1px 4px rgba(107,184,0,.15)}
+/* Not-yet-ready state: form still missing required fields (or terms not
+   accepted). Kept clickable so submitRegister can surface the exact reason,
+   but visually muted so the CTA doesn't advertise readiness before it's real. */
+.btn-main.is-pending{background:#e5e5e5;color:#888;box-shadow:none}
+.btn-main.is-pending:hover{background:#dcdcdc;color:#666;transform:none;box-shadow:none}
+.btn-main.is-pending:active{transform:none;box-shadow:none}
 
 /* ── Unified interaction states ────────────────────────────────────────────
  * Single source of truth for disabled + focus-visible across every button,
