@@ -23,8 +23,10 @@
 //  POST /bulk-sms        → μαζική αποστολή SMS (Brevo) — requires ADMIN_SECRET
 // Push endpoints (/push, /push-debug) removed 2026-07-31 — app dropped push notifications.
 //  POST /admin/redeem-attempt → brute-force guard for redemption approval — requires ADMIN_SECRET
-//  POST /woo-add-points    → WooCommerce integration: add loyalty points on order — requires ADMIN_SECRET
-//  POST /woo-refund-points → WooCommerce: clawback loyalty points on order refund — requires ADMIN_SECRET
+//  POST /woo-add-points    → LEGACY: add points by orderTotal — kept for current plugin. Prefer /woo-credit-order.
+//  POST /woo-refund-points → LEGACY: clawback by orderTotal — kept for current plugin. Prefer /woo-refund-order.
+//  POST /woo-credit-order  → PHASE L1: integer-cent credit + Firestore ledger idempotency. ADMIN_SECRET.
+//  POST /woo-refund-order  → PHASE L1: integer-cent refund with FSM (credited→refunded→re-credited). ADMIN_SECRET.
 //  POST /woo-get-user      → WooCommerce: fetch customer points/name by email — requires ADMIN_SECRET
 //  POST /woo-create-coupon  → Create real WooCommerce coupon for e-shop offer redemption — requires ADMIN_SECRET
 //  POST /woo-sync-tier      → Sync VIP tier to WooCommerce user meta — public, Firebase ID token auth, rate-limited
@@ -43,6 +45,12 @@ import { normalizeGreekSMS } from './src/worker/lib/sms.js';
 import {
   makeRedeemRateKey, makeFailKey, makeBlockKey,
 } from './src/worker/lib/redeem-keys.js';
+// Phase L1: WooCommerce points integrity (integer-cent math + Firestore ledger
+// as authoritative idempotency store, KV as 90-day fast-path only).
+// Legacy /woo-add-points and /woo-refund-points remain for the currently
+// deployed plugin; new endpoints /woo-credit-order and /woo-refund-order
+// use the ledger doc `ipear_woo_events/{siteHash}__{orderId}`.
+import { handleWooCreditOrder, handleWooRefundOrder } from './src/worker/lib/woo-integrity.js';
 
 const MAX_RECIPIENTS = 5000;
 const MAX_TOKENS     = 5000;
@@ -330,6 +338,46 @@ export default {
     //  tooling. timingSafeEqual prevents secret-comparison side channels.
     if (path === '/erp/lookup-by-phone') return handleErpLookup(request, env, CORS);
     if (path === '/erp/ping')            return handleErpPing(request, env, CORS);
+
+    // ── PHASE L1 · WooCommerce integrity endpoints ────────────────────────
+    //
+    //  Routed BEFORE the ADMIN_SECRET gate because they authenticate with
+    //  their OWN dedicated secret (env.WOO_LOYALTY_SECRET) — different
+    //  audience (the WooCommerce plugin at ipear.gr), different blast radius,
+    //  and rotatable without disturbing any admin tooling. The handlers'
+    //  verifyWooSecret() step performs the actual timing-safe check. A
+    //  request bearing ADMIN_SECRET reaches these handlers and is REJECTED
+    //  with 401 unless it also matches WOO_LOYALTY_SECRET. See tests:
+    //  tests/woo-integrity.test.js §'auth isolation'.
+    if (path === '/woo-credit-order')  return handleWooCreditOrder(request, env, CORS, ctx, {
+      resp, readJson: readJsonCapped, getAccessToken: getAuthAccessToken,
+      timingSafeEqual, rebuildLeaderboard: _rebuildLeaderboard,
+    });
+    if (path === '/woo-refund-order')  return handleWooRefundOrder(request, env, CORS, ctx, {
+      resp, readJson: readJsonCapped, getAccessToken: getAuthAccessToken,
+      timingSafeEqual,
+    });
+
+    // ── PHASE L1 · Legacy loyalty mutation kill-switch (env-gated) ────────
+    //
+    //  Phase D of the zero-downtime cutover: once the new plugin is deployed
+    //  and no callers of /woo-add-points or /woo-refund-points remain, set
+    //  env var LOYALTY_LEGACY_MUTATION_DISABLED="true" and redeploy. The
+    //  legacy mutation endpoints then return 410 Gone even for callers who
+    //  still hold a valid ADMIN_SECRET. This eliminates ADMIN_SECRET as a
+    //  possible loyalty-mutation vector, delivering the full secret split.
+    //
+    //  Flag is checked BEFORE the ADMIN_SECRET gate so a 200 can never
+    //  be reached via the legacy path once tripped. Read-only /woo-get-user
+    //  is NOT killed — it only fetches customer data, no mutation.
+    if (env.LOYALTY_LEGACY_MUTATION_DISABLED === 'true' &&
+        (path === '/woo-add-points' || path === '/woo-refund-points')) {
+      return resp({
+        error: 'gone',
+        reason: 'legacy-mutation-endpoints-removed',
+        migrate_to: path === '/woo-add-points' ? '/woo-credit-order' : '/woo-refund-order',
+      }, 410, CORS);
+    }
 
     // All other endpoints require ADMIN_SECRET
     const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');

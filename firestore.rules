@@ -555,6 +555,20 @@ service cloud.firestore {
     }
 
     // ═════════════════════════════════════════════════════════════════════
+    //  ipear_woo_events — Phase L1 authoritative WooCommerce credit/refund
+    //  ledger. Written EXCLUSIVELY by the Cloudflare Worker via service
+    //  account. Client access is fully denied until a dedicated hardened
+    //  admin UI exists. Opening `read: if isAdmin()` NOW would expose the
+    //  ledger to admin web tokens BEFORE a purpose-built view is in place;
+    //  when we later need admin visibility we add either a dedicated
+    //  hardened screen with claim-based auth, or a signed server-generated
+    //  view URL (like /admin/export-download), never a blanket admin read.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_woo_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
     //  Default deny — every path not explicitly allowed above is blocked.
     // ═════════════════════════════════════════════════════════════════════
     match /{document=**} {

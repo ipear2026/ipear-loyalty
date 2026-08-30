@@ -1,12 +1,15 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
-// v71 (2026-07-30): removed legacy kill-switch code (no functional change).
-const CACHE_VER = 'ipear-loyalty-20260730-v71';
+// v72 (2026-08-29): SHELL precache filenames corrected — customer.html was
+// served via 302 redirect (opaque cache.addAll failure on install), and
+// manifest-customer.json never existed in the vite build. Replaced with the
+// actual dist filenames (index.html, manifest.json). See tests/sw-precache.test.js.
+const CACHE_VER = 'ipear-loyalty-20260829-v72';
 
 const SHELL = [
-  'customer.html',
+  'index.html',
   'snd-success.mp3',
   'snd-error.mp3',
-  'manifest-customer.json',
+  'manifest.json',
   'icon-192.png',
   'icon-512.png',
   'fonts/zonapro-regular-webfont.woff2',
