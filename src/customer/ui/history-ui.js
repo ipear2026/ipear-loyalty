@@ -32,6 +32,64 @@ const HIST_PAGE_SIZE = 20;
 const HIST_INITIAL_VISIBLE = 5;
 const _HISTORY_MIN_GAP_MS = 800;
 
+// ══════════════════════════════════════════════════════════════════════════
+//  Direction resolver — authoritative transaction-type classification.
+//
+//  Rules (in order):
+//    1. If tx.type is in the POSITIVE set → sign='positive', magnitude=|points|
+//    2. If tx.type is in the NEGATIVE set → sign='negative', magnitude=|points|
+//    3. Otherwise (unknown / legacy) → preserve the raw numeric direction:
+//         points > 0 → positive
+//         points < 0 → negative
+//         points = 0 → zero (no sign shown)
+//
+//  Why explicit sets rather than a blanket "not-add → negative" rule:
+//    a) The Worker's /woo-refund-order writes { type:'subtract', points:+N }.
+//       Without an explicit 'subtract' branch, the old renderer's fallback
+//       (`points > 0 ? 'add' : 'redeem'`) mis-classified reversals as credits
+//       — the exact bug reported for order #12809.
+//    b) A blanket rule risks flipping an unknown FUTURE positive type (e.g.
+//       an admin bonus) into a red '-'. Unknown types keep their raw sign
+//       so new backend features render sanely by default.
+//    c) Balances are not touched — this only affects presentation.
+// ══════════════════════════════════════════════════════════════════════════
+export const POSITIVE_TX_TYPES = Object.freeze(new Set([
+  'add',           // WooCommerce credit + generic admin add + legacy /woo-add-points
+  'referral',      // Referral bonus
+]));
+export const NEGATIVE_TX_TYPES = Object.freeze(new Set([
+  'subtract',        // Worker /woo-refund-order (positive magnitude by convention)
+  'refund_clawback', // Legacy /woo-refund-points (negative points historically)
+  'redeem',          // Reward redemption (negative points historically)
+  'expire',          // Points expiration
+  'tier_downgrade',  // Tier downgrade adjustment
+]));
+
+export function resolveTxDirection(tx) {
+  const t = String(tx && tx.type != null ? tx.type : '');
+  const raw = Number(tx && tx.points);
+  const pts = Number.isFinite(raw) ? raw : 0;
+  const mag = Math.abs(pts);
+  // Zero-magnitude wins over the type set: even a known-positive/-negative
+  // type must not render "+0" or "-0" — it renders as "0" with no sign.
+  if (mag === 0)                          return { sign: 'zero',     magnitude: 0 };
+  if (POSITIVE_TX_TYPES.has(t))           return { sign: 'positive', magnitude: mag };
+  if (NEGATIVE_TX_TYPES.has(t))           return { sign: 'negative', magnitude: mag };
+  // Unknown / legacy — preserve raw numeric direction.
+  if (pts > 0)                            return { sign: 'positive', magnitude: pts };
+  return                                         { sign: 'negative', magnitude: -pts };
+}
+
+// Small formatter helper (broken out so it's testable in isolation).
+// Uses ASCII '-' for consistency with the rest of the UI and existing tests.
+export function formatTxAmount(tx) {
+  const dir = resolveTxDirection(tx);
+  const abs = dir.magnitude.toLocaleString('el-GR');
+  if (dir.sign === 'positive') return `+${abs}`;
+  if (dir.sign === 'negative') return `-${abs}`;
+  return abs;   // zero — no sign
+}
+
 let _historyBusy = false;
 let _historyLastRunAt = 0;
 let _historyTxs = [];
@@ -180,9 +238,17 @@ function _renderHistory(el) {
   let html = _historyTxs.map((tx, i) => {
     const dt = new Date(tx.date);
     const ds = dt.toLocaleDateString('el-GR') + ' ' + dt.toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' });
-    let ico, lbl, cls;
+    // Direction is derived from the authoritative type via resolveTxDirection —
+    // never from a title string, and no longer from a raw-sign fallback for
+    // known types. Unknown/legacy types still fall back to raw sign inside
+    // the resolver so future backend additions render sanely by default.
+    const dir = resolveTxDirection(tx);
+    const cls = dir.sign === 'positive' ? 'add' : (dir.sign === 'negative' ? 'redeem' : 'neutral');
+    // Icons stay bound to the semantic type so known transactions keep their
+    // familiar glyph; the sign/color path is now driven entirely by dir.
+    let ico, lbl;
     if (tx.type === 'add') {
-      ico = '🛒'; cls = 'add'; lbl = tx.category || 'Αγορά';
+      ico = '🛒'; lbl = tx.category || 'Αγορά';
     } else if (tx.type === 'redeem') {
       // Prefer the reward's own title (`tx.label`) — dynamic catalog rewards
       // like "Καλώδιο Baseus" are physical items, not euro discounts, so the
@@ -191,23 +257,27 @@ function _renderHistory(el) {
       // The legacy manual-redeem paths (tablet-main.js:754, admin
       // customer-points.js:185) don't store a label — for those we still
       // fall back to the generic euro-discount format.
-      ico = '💶'; cls = 'redeem';
+      ico = '💶';
       lbl = tx.label
         ? `🎁 ${tx.label}`
         : `Έκπτωση ${tx.discount || ''}€`;
     } else if (tx.type === 'expire') {
-      ico = '⏳'; cls = 'redeem'; lbl = '⏳ Εκπνοή Πόντων';
+      ico = '⏳'; lbl = '⏳ Εκπνοή Πόντων';
     } else if (tx.type === 'tier_downgrade') {
-      ico = '📉'; cls = 'redeem'; lbl = tx.note || 'Tier Downgrade';
+      ico = '📉'; lbl = tx.note || 'Tier Downgrade';
     } else if (tx.type === 'referral' || tx.category?.includes('Referral')) {
-      ico = '🎁'; cls = 'add'; lbl = tx.category || '🎁 Referral Bonus';
+      ico = '🎁'; lbl = tx.category || '🎁 Referral Bonus';
+    } else if (tx.type === 'subtract' || tx.type === 'refund_clawback') {
+      // WooCommerce reversal (either from /woo-refund-order or the legacy
+      // /woo-refund-points path). Icon is a return arrow; label falls back
+      // to the stored category (usually already prefixed with '↩︎').
+      ico = '↩︎'; lbl = tx.category || tx.note || 'Επιστροφή';
     } else {
-      ico = tx.points > 0 ? '🛒' : '💶';
-      cls = tx.points > 0 ? 'add' : 'redeem';
+      ico = dir.sign === 'positive' ? '🛒' : (dir.sign === 'negative' ? '💶' : '📄');
       lbl = tx.category || tx.note || 'Συναλλαγή';
     }
-    const txPts = Number(tx.points) || 0;
-    const ptsSign = txPts > 0 ? '+' : '';
+    const displaySign = dir.sign === 'positive' ? '+' : (dir.sign === 'negative' ? '-' : '');
+    const displayAmount = dir.magnitude.toLocaleString('el-GR');
     const storeTag = (tx.storeName && tx.storeName !== '—')
       ? `<span style="display:inline-block;margin-top:2px;font-size:.65rem;background:rgba(138,233,0,.18);color:#3a6e00;border-radius:6px;padding:1px 6px;font-weight:700">${esc(tx.storeName)}</span>`
       : '';
@@ -215,7 +285,7 @@ function _renderHistory(el) {
     return `<div class="hist-item hist-type-${cls} hist-row" data-hist-idx="${i}" ${hiddenStyle}>
       <div class="hist-ico ${cls}">${ico}</div>
       <div class="hist-body"><div class="hist-name">${esc(lbl)}</div><div class="hist-date">${ds} ${storeTag}</div></div>
-      <div class="hist-pts ${cls}">${ptsSign}${txPts.toLocaleString('el-GR')}</div>
+      <div class="hist-pts ${cls}">${displaySign}${displayAmount}</div>
     </div>`;
   }).join('');
 
