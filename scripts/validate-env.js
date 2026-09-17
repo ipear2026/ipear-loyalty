@@ -110,6 +110,77 @@ if (failures.length > 0) {
   ]);
 }
 
+// ── L2.3A App-Check guard (added 2026-08-31) ─────────────────────────────
+// The four L2.3A callables in functions/index.js declare
+// `enforceAppCheck: true`. If VITE_APP_CHECK_DISABLED=1 slips into .env,
+// initializeAppCheck() gets skipped client-side (see firebase-init.js
+// lines 201-207), no App-Check tokens are minted, and every callable
+// returns `unauthenticated` — the tablet UI misleadingly says "Session
+// expired". Root-cause history: L2.3A hotfix incident, 2026-08-31.
+//
+// Rule: if any callable in functions/index.js requires App Check, the
+// client must not disable App Check init. Fail-closed at build time.
+const APPCHECK_DISABLED_FLAG = String(env.VITE_APP_CHECK_DISABLED ?? '').trim() === '1';
+const APPCHECK_KEY_MISSING = !env.VITE_APP_CHECK_KEY || /X{4,}/i.test(env.VITE_APP_CHECK_KEY);
+const FUNCTIONS_INDEX = join(ROOT, 'functions', 'index.js');
+let callablesEnforceAppCheck = false;
+if (existsSync(FUNCTIONS_INDEX)) {
+  const src = readFileSync(FUNCTIONS_INDEX, 'utf8');
+  callablesEnforceAppCheck = /enforceAppCheck\s*:\s*true/.test(src);
+}
+if (callablesEnforceAppCheck && process.env.IPEAR_ALLOW_APPCHECK_DISABLED !== '1') {
+  const appCheckFailures = [];
+  if (APPCHECK_DISABLED_FLAG) {
+    appCheckFailures.push(
+      'VITE_APP_CHECK_DISABLED=1 in .env, but functions/index.js has ' +
+      '`enforceAppCheck: true` on at least one callable. ' +
+      'Every callable request will return `unauthenticated` because the ' +
+      'client will not mint App Check tokens. Set VITE_APP_CHECK_DISABLED=0.',
+    );
+  }
+  if (APPCHECK_KEY_MISSING) {
+    appCheckFailures.push(
+      'VITE_APP_CHECK_KEY is missing or looks like a placeholder. ' +
+      'Callables that require App Check will fail — obtain the reCAPTCHA ' +
+      'v3 site key from Firebase Console → App Check → Web apps.',
+    );
+  }
+  if (appCheckFailures.length) {
+    fail([
+      '🚨 APP-CHECK MISCONFIGURATION — ABORTING BUILD',
+      '',
+      ...appCheckFailures.map((f) => '  • ' + f),
+      '',
+      'How to fix:',
+      '  1. Ensure the web app is registered under Firebase Console → App Check',
+      '     with the reCAPTCHA v3 provider AND the site key matches ' +
+      'VITE_APP_CHECK_KEY.',
+      '  2. Set VITE_APP_CHECK_DISABLED=0 in .env (or remove the line).',
+      '  3. Re-run the build.',
+      '',
+      'CI/local bypass (test-only builds where callables are not called):',
+      '  IPEAR_ALLOW_APPCHECK_DISABLED=1 npm run build',
+    ]);
+  }
+}
+
+// ── L2.4-B: Google Sign-In feature-flag validator (added 2026-09-01) ─────
+// Enforce that VITE_GOOGLE_SIGNIN_ENABLED is EXACTLY "0" or "1". Anything
+// else — unset, empty, "true", "false", "yes", stray whitespace — must
+// coerce to "0" downstream, and validate-env prints a warning so a
+// misconfigured value cannot silently ship as "on".
+//
+// The runtime gate in src/customer/google-signin.js re-validates on the
+// client side; this guard is the build-time safety net so a typo like
+// `VITE_GOOGLE_SIGNIN_ENABLED=Yes` cannot ever pass through to production.
+const gRaw = env.VITE_GOOGLE_SIGNIN_ENABLED;
+if (gRaw !== undefined && gRaw !== '' && gRaw !== '0' && gRaw !== '1') {
+  console.warn(
+    '⚠️  validate-env: VITE_GOOGLE_SIGNIN_ENABLED="' + gRaw + '" is invalid — ' +
+    'must be exactly "0" or "1". Coercing to "0" (Google Sign-In disabled).'
+  );
+}
+
 console.log('✅ validate-env: all critical Firebase config present and looks real.');
 
 function fail(lines) {

@@ -52,39 +52,33 @@ service cloud.firestore {
       );
     }
 
-    // Admin = `admin: true` custom claim on the ID token (fast — no Firestore
-    // read) OR, transitionally, UID present in the `ipear_admins/{uid}`
-    // whitelist doc.
-    //
-    // MEDIUM-3: the claim is the primary path now. functions/index.js's
-    // syncAdminClaim trigger mirrors ipear_admins/{uid} create/delete into
-    // the claim, and backfillAdminClaims (callable) seeds existing admins.
-    // Until every admin has re-logged-in to pick up the new claim, the
-    // exists() fallback keeps the existing flow working. The fallback is
-    // safe to delete after the migration window (all admins re-authed).
+    // L2.3A HARDENING (2026-08-30):
+    // Admin is now ONLY the `admin: true` custom claim. The transitional
+    // ipear_admins/{uid} doc fallback and the hardcoded email allow-list
+    // (J-3 P0) are BOTH removed. All admins must have the claim before this
+    // ruleset is deployed — see deploy plan (extended syncAdminClaim
+    // provisions role+storeId claims; backfillAdminClaims backfills existing
+    // ipear_admins docs; refresh tokens are revoked so admins re-login and
+    // pick up the fresh token). Tablet users are covered by isTablet() below
+    // and get a strictly narrower rule set — they never satisfy isAdmin().
     function isAdmin() {
-      // Tri-path admin check:
-      //   (a) custom claim admin==true (canonical path post-syncAdminClaim)
-      //   (b) ipear_admins/{uid} doc exists (legacy whitelist, transitional)
-      //   (c) hardcoded email allow-list rescue path — REQUIRES
-      //       email_verified == true. Without this gate any attacker can
-      //       register a fresh Firebase Auth account using one of these
-      //       emails (Firebase Auth does not own the email until verified)
-      //       and instantly become admin. Mirrors the verification model in
-      //       isVerifiedAuth() / ownsCustomer() (line 88).
-      //
-      // SECURITY HISTORY:
-      //   • 2026-06-23 audit (P0): the email_verified gate had been dropped
-      //     when e2e@ipear.gr was added to the list to unblock a Playwright
-      //     test. Both regressions reverted here. E2E admin coverage should
-      //     instead use a custom claim seeded by the test harness (path (a))
-      //     so production allow-list stays minimal + verified-only.
-      return isAuth() && (
-        request.auth.token.admin == true ||
-        exists(/databases/$(database)/documents/ipear_admins/$(request.auth.uid)) ||
-        (request.auth.token.email_verified == true &&
-         request.auth.token.email in ['admin@ipear.gr', 'tablet@ipear.gr', 'ipear2026@gmail.com'])
-      );
+      return isAuth() && request.auth.token.admin == true;
+    }
+
+    // L2.3A: tablet role — separate custom claim. Set by extended
+    // syncAdminClaim from ipear_admins.role == 'tablet'. Tablet claim also
+    // carries a canonical storeId (from ipear_admins.storeid). A tablet
+    // NEVER has admin==true; the two roles are mutually exclusive in the
+    // syncAdminClaim provisioning.
+    function isTablet() {
+      return isAuth() &&
+             request.auth.token.role == 'tablet' &&
+             request.auth.token.storeId is string &&
+             request.auth.token.storeId.size() > 0;
+    }
+
+    function tabletStoreId() {
+      return request.auth.token.storeId;
     }
 
     // Self-ownership of a customer doc (uid field OR matching email).
@@ -566,6 +560,42 @@ service cloud.firestore {
     // ═════════════════════════════════════════════════════════════════════
     match /ipear_woo_events/{eventId} {
       allow read, write: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  L2.3A: ipear_redemption_requests — tablet→admin approval queue.
+    //
+    //  Documents are written EXCLUSIVELY server-side by the admin SDK from
+    //  the createRedemptionRequest / approveRedemption / rejectRedemption
+    //  callable Cloud Functions. The tablet client never writes here;
+    //  the admin client never writes here either. This is the safety
+    //  keystone of the L2.3A approval flow.
+    //
+    //  Read policy:
+    //    • Admin (claim admin==true): read the entire queue.
+    //    • Tablet: read ONLY documents where BOTH
+    //         tabletActorUid == request.auth.uid   (own request only)
+    //         storeId       == request.auth.token.storeId  (own store)
+    //      i.e. one tablet CANNOT read another tablet's request even in the
+    //      same store, and CANNOT read any request from another store.
+    //
+    //  All state transitions (pending→approved / rejected / expired) go
+    //  through the callable functions, which perform:
+    //    • admin-claim auth check,
+    //    • deterministic-id idempotency (approveRedemption ledger id is a
+    //      pure function of requestId, so a retry is a no-op),
+    //    • atomic Firestore runTransaction over customer + redemption +
+    //      ledger + audit + request status.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_redemption_requests/{requestId} {
+      allow read: if isAdmin() ||
+        (isTablet() &&
+         resource.data.tabletActorUid == request.auth.uid &&
+         resource.data.storeId == tabletStoreId());
+
+      // Client writes fully denied. Only the admin SDK (via callable CFs)
+      // can create, update, or delete request documents.
+      allow create, update, delete: if false;
     }
 
     // ═════════════════════════════════════════════════════════════════════

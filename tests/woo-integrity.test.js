@@ -1146,3 +1146,275 @@ describe('8 · Secret never leaked in errors', () => {
     expect(await r.text()).not.toMatch(/(secret|SECRET)=[^&\s]+/);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  9 · Firestore REST commit-schema validation
+//
+//  The permissive fake used elsewhere accepts any string as the write name
+//  because it only substring-matches. Production Firestore REST rejects any
+//  Write.update.name that is NOT the RELATIVE resource form
+//  'projects/{project}/databases/{database}/documents/{path}' with
+//  HTTP 400 INVALID_ARGUMENT and a fieldViolation on writes[i].update.name.
+//
+//  These tests use a STRICT fake that validates every write against the
+//  documented schema (google.firestore.v1.Document.name) BEFORE storing it.
+//  Any deviation surfaces as a real 400 that the credit/refund handler then
+//  bubbles up, catching the exact class of bug that lay behind the live
+//  order #12809 failure ('commit → 400' with no writes applied).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Firestore Write.update.name pattern.
+// Ref: https://cloud.google.com/firestore/docs/reference/rest/v1/Write
+//      https://cloud.google.com/firestore/docs/reference/rest/v1/projects.databases.documents/commit
+const FS_DOC_NAME_RE = /^projects\/[^\/?#]+\/databases\/[^\/?#]+\/documents\/[^?#]+$/;
+
+function makeStrictFirestoreFake(seed = {}) {
+  const state = {
+    customers: seed.customers || {},
+    ledger:    seed.ledger || null,
+    txns:      {},
+    commits:   [],
+    rejections: [],   // records any 400 the fake emitted
+  };
+
+  function decodeFields(fs) {
+    const out = {};
+    for (const [k, v] of Object.entries(fs || {})) {
+      if ('integerValue' in v) out[k] = Number(v.integerValue);
+      else if ('stringValue' in v) out[k] = v.stringValue;
+      else if ('booleanValue' in v) out[k] = v.booleanValue;
+      else if ('nullValue'    in v) out[k] = null;
+      else out[k] = v;
+    }
+    return out;
+  }
+  function encFields(obj) {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v === null || v === undefined) out[k] = { nullValue: null };
+      else if (typeof v === 'number' && Number.isInteger(v)) out[k] = { integerValue: String(v) };
+      else if (typeof v === 'number') out[k] = { doubleValue: v };
+      else if (typeof v === 'boolean') out[k] = { booleanValue: v };
+      else if (typeof v === 'string') out[k] = { stringValue: v };
+      else out[k] = v;
+    }
+    return out;
+  }
+
+  function fs400(msg, field) {
+    state.rejections.push({ field, msg });
+    return new Response(JSON.stringify({
+      error: {
+        code: 400, status: 'INVALID_ARGUMENT', message: msg,
+        details: [{ '@type': 'type.googleapis.com/google.rpc.BadRequest',
+          fieldViolations: [{ field, description: msg }] }],
+      },
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  async function handle(url, opts = {}) {
+    const u = String(url);
+    const method = (opts.method || 'GET').toUpperCase();
+
+    if (u.endsWith(':runQuery')) {
+      const body = JSON.parse(opts.body);
+      const wanted = body.structuredQuery?.where?.fieldFilter?.value?.stringValue;
+      const hit = Object.entries(state.customers).find(([, c]) => c.email === wanted);
+      if (!hit) return json([]);
+      const [uid, doc] = hit;
+      return json([{ document: {
+        name: `projects/test-project/databases/(default)/documents/ipear_customers/${uid}`,
+        fields: encFields(doc),
+      }}]);
+    }
+    if (u.endsWith(':beginTransaction')) {
+      return json({ transaction: 'STRICT_TXN_' + Math.random().toString(36).slice(2, 10) });
+    }
+    if (u.endsWith(':rollback')) return json({});
+
+    if (u.endsWith(':commit')) {
+      const body = JSON.parse(opts.body);
+      for (let i = 0; i < (body.writes || []).length; i++) {
+        const w = body.writes[i];
+        const name = w?.update?.name;
+        if (typeof name !== 'string' || name.length === 0) {
+          return fs400('Missing or empty document name.', `writes[${i}].update.name`);
+        }
+        if (!FS_DOC_NAME_RE.test(name)) {
+          return fs400(
+            "Invalid resource name '" + name.slice(0, 80) + "…'. " +
+            "Document name must be in the format 'projects/{project_id}/databases/{database_id}/documents/{document_path}'.",
+            `writes[${i}].update.name`,
+          );
+        }
+        // Integer values in Firestore REST must be strings, not numbers.
+        const fields = w.update.fields || {};
+        for (const [fk, fv] of Object.entries(fields)) {
+          if (fv && 'integerValue' in fv && typeof fv.integerValue !== 'string') {
+            return fs400('integerValue must be a string.', `writes[${i}].update.fields.${fk}.integerValue`);
+          }
+        }
+      }
+      // Apply writes to fake state (all writes valid).
+      for (const w of body.writes) {
+        const name = w.update.name;
+        if (name.includes('/ipear_customers/')) {
+          const uid = name.split('/').pop();
+          state.customers[uid] = { ...state.customers[uid], ...decodeFields(w.update.fields) };
+        } else if (name.includes('/ipear_woo_events/')) {
+          state.ledger = { name, ...decodeFields(w.update.fields) };
+        } else if (name.includes('/ipear_transactions/')) {
+          state.txns[name] = decodeFields(w.update.fields);
+        }
+      }
+      state.commits.push(body);
+      return json({ commitTime: '2026-09-04T10:00:00Z' });
+    }
+
+    if (method === 'GET') {
+      if (u.includes('/ipear_woo_events/')) {
+        if (!state.ledger) return new Response('{}', { status: 404 });
+        return json({ name: state.ledger.name, fields: encFields(state.ledger) });
+      }
+      if (u.includes('/ipear_customers/')) {
+        const uid = u.split('?')[0].split('/').pop();
+        const doc = state.customers[uid];
+        if (!doc) return new Response('{}', { status: 404 });
+        return json({
+          name: `projects/test-project/databases/(default)/documents/ipear_customers/${uid}`,
+          fields: encFields(doc),
+        });
+      }
+    }
+    return new Response('unexpected ' + u, { status: 500 });
+  }
+
+  return { fetch: (url, opts) => handle(url, opts), get state() { return state; } };
+}
+
+describe('9 · Firestore REST commit schema (regression for the #12809 400)', () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = origFetch; });
+
+  it('credit path: every writes[i].update.name is the RELATIVE resource form (no full URL) — commit returns 200, not 400', async () => {
+    const fake = makeStrictFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 100 } },
+    });
+    globalThis.fetch = fake.fetch;
+    const r = await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    // Would return 500 (Internal error) if any write name violated the schema.
+    expect(fake.state.rejections).toEqual([]);
+    expect(r.status).toBe(200);
+    // Prove every applied write.name matches the strict REST pattern.
+    const names = fake.state.commits.flatMap(c => c.writes.map(w => w.update.name));
+    expect(names.length).toBeGreaterThan(0);
+    for (const n of names) expect(n).toMatch(FS_DOC_NAME_RE);
+    // And prove none of them starts with 'https://' (the pre-fix bug).
+    for (const n of names) expect(n.startsWith('https://')).toBe(false);
+  });
+
+  it('credit path: ledger write name shape is exactly projects/.../documents/ipear_woo_events/{siteHash}__{orderId}', async () => {
+    const fake = makeStrictFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 100 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    const ledgerWrite = fake.state.commits[0].writes.find(w => w.update.name.includes('/ipear_woo_events/'));
+    expect(ledgerWrite).toBeDefined();
+    expect(ledgerWrite.update.name).toMatch(
+      /^projects\/test-project\/databases\/\(default\)\/documents\/ipear_woo_events\/[a-f0-9]{12}__1234$/
+    );
+  });
+
+  it('credit path: audit write name shape is exactly projects/.../documents/ipear_transactions/wooc__{ledgerId}__{sanitized-nonce}', async () => {
+    const fake = makeStrictFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 100 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    const auditWrite = fake.state.commits[0].writes.find(w => w.update.name.includes('/ipear_transactions/'));
+    expect(auditWrite).toBeDefined();
+    expect(auditWrite.update.name).toMatch(
+      /^projects\/test-project\/databases\/\(default\)\/documents\/ipear_transactions\/wooc__[a-f0-9]{12}__1234__credit-1234-4560$/
+    );
+  });
+
+  it('credit path: integer point values are serialized as string (Firestore rejects raw numbers)', async () => {
+    const fake = makeStrictFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 100 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    expect(fake.state.rejections).toEqual([]);
+    const custWrite = fake.state.commits[0].writes.find(w => w.update.name.includes('/ipear_customers/'));
+    expect(typeof custWrite.update.fields.points.integerValue).toBe('string');
+    expect(typeof custWrite.update.fields.totalPoints.integerValue).toBe('string');
+  });
+
+  it('refund-before-credit path: pre-credit-recorded write name uses the RELATIVE resource form (no full URL)', async () => {
+    // No ledger yet — refund arrives first → pre_credit branch fires (only 1 write).
+    const fake = makeStrictFirestoreFake({});
+    globalThis.fetch = fake.fetch;
+    const r = await handleWooRefundOrder(makeReq('/woo-refund-order', validRefund()), mockEnv(), CORS, null, makeDeps());
+    expect(fake.state.rejections).toEqual([]);
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body.idemState).toBe('pre-credit-recorded');
+    // Exactly one write, and its name is the RELATIVE resource form.
+    expect(fake.state.commits).toHaveLength(1);
+    expect(fake.state.commits[0].writes).toHaveLength(1);
+    const name = fake.state.commits[0].writes[0].update.name;
+    expect(name).toMatch(FS_DOC_NAME_RE);
+    expect(name.startsWith('https://')).toBe(false);
+    expect(name).toMatch(
+      /^projects\/test-project\/databases\/\(default\)\/documents\/ipear_woo_events\/[a-f0-9]{12}__1234$/
+    );
+  });
+
+  it('refund path: every writes[i].update.name is the RELATIVE resource form — commit returns 200, not 400', async () => {
+    // Seed a credited ledger so a refund is applicable.
+    const fake = makeStrictFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 456, totalPoints: 456 } },
+      ledger: {
+        name: 'projects/test-project/databases/(default)/documents/ipear_woo_events/a1b2c3d4e5f6__1234',
+        siteHash: 'a1b2c3d4e5f6', orderId: '1234',
+        customerUid: 'USER1', customerEmail: 'test@example.com',
+        state: STATE.CREDITED, version: 1, pointsPerEuro: 10,
+        grossEligibleCents: 4560, preCreditRefundedCentsAtCredit: 0,
+        creditedEligibleCents: 4560, originalPointsAwarded: 456,
+        cumPostCreditRefundedCents: 0, alreadyReversedPoints: 0,
+        preCreditRefunds: [], creditNonce: 'credit-1234-4560',
+        creditAt: '2026-09-01T00:00:00Z', refunds: [],
+        createdAt: '2026-09-01T00:00:00Z', lastEventAt: '2026-09-01T00:00:00Z',
+      },
+    });
+    globalThis.fetch = fake.fetch;
+    const r = await handleWooRefundOrder(makeReq('/woo-refund-order', validRefund()), mockEnv(), CORS, null, makeDeps());
+    expect(fake.state.rejections).toEqual([]);
+    expect(r.status).toBe(200);
+    const names = fake.state.commits.flatMap(c => c.writes.map(w => w.update.name));
+    for (const n of names) {
+      expect(n).toMatch(FS_DOC_NAME_RE);
+      expect(n.startsWith('https://')).toBe(false);
+    }
+  });
+
+  it('meta: the strict fake correctly rejects a URL-form name (proves the guard is armed)', async () => {
+    const fake = makeStrictFirestoreFake({});
+    // Manually issue a commit with a bad name to confirm the fake really enforces the schema.
+    const r = await fake.fetch(
+      'https://firestore.googleapis.com/v1/projects/test-project/databases/(default)/documents:commit',
+      { method: 'POST', body: JSON.stringify({
+        writes: [{ update: {
+          name: 'https://firestore.googleapis.com/v1/projects/x/databases/(default)/documents/foo/bar',
+          fields: {},
+        }}],
+      })},
+    );
+    expect(r.status).toBe(400);
+    const body = await r.json();
+    expect(body.error.status).toBe('INVALID_ARGUMENT');
+    expect(body.error.details[0].fieldViolations[0].field).toBe('writes[0].update.name');
+    expect(fake.state.rejections).toHaveLength(1);
+  });
+});

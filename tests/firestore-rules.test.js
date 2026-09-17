@@ -167,7 +167,7 @@ describe('ipear_rewards: READ access', () => {
   it('ADMIN (whitelist) CAN read inactive draft rewards', async () => {
     await seedReward('reward-draft', { cost: 9000, discount: 50, isActive: false });
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(getDoc(doc(admin.firestore(), 'ipear_rewards', 'reward-draft')));
   });
 });
@@ -212,7 +212,7 @@ describe('ipear_rewards: WRITE access', () => {
 
   it('ADMIN (whitelist doc) CAN create a reward', async () => {
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(setDoc(
       doc(admin.firestore(), 'ipear_rewards', 'new-reward'),
       validRewardPayload
@@ -238,7 +238,7 @@ describe('ipear_rewards: WRITE access', () => {
   it('ADMIN CAN update an existing reward (toggle isActive)', async () => {
     await seedReward('reward-a', { cost: 1000, discount: 5, isActive: true });
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(setDoc(
       doc(admin.firestore(), 'ipear_rewards', 'reward-a'),
       { ...validRewardPayload, isActive: false }
@@ -248,7 +248,7 @@ describe('ipear_rewards: WRITE access', () => {
   it('ADMIN CAN delete a reward', async () => {
     await seedReward('reward-a', { cost: 1000, discount: 5, isActive: true });
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(deleteDoc(doc(admin.firestore(), 'ipear_rewards', 'reward-a')));
   });
 });

@@ -34,7 +34,8 @@ import {
   submitPhone, submitCreatePass, goToPhone,
   openForgotPass, submitForgotPass, backToLogin,
   openRegister, submitRegister, submitOTP, resendOTP, cancelOTP,
-  logout, requestAccountDeletion
+  logout, requestAccountDeletion,
+  resendEmailVerification, handleAuthActionReturn
 } from './auth.js';
 
 // ════════════════════════════════════════
@@ -678,7 +679,6 @@ export function switchTab(name) {
   if (name==='card')    generateQR();
   if (name==='profile') {
     loadLeaderboard();
-    _syncPushState();
     // Refresh transactions every time the user opens their profile — worker-
     // driven credits (referral, marketing) land asynchronously and don't
     // trigger _animateLivePointsChange when the first snapshot already shows
@@ -836,7 +836,6 @@ function _customerKeepAlive() {
     startOffersListener();
     startRewardsListener();
     try { loadLeaderboard(); } catch(_) {}
-    try { _syncPushState(); } catch(_) {}
   } catch(e) { logger.warn('[keepalive] error:', e); }
 }
 
@@ -1649,6 +1648,13 @@ window.submitRegister = submitRegister;
 window.submitOTP = submitOTP;
 window.resendOTP = resendOTP;
 window.cancelOTP = cancelOTP;
+// L2.4-A exports
+window.resendEmailVerification = resendEmailVerification;
+// Fire once on boot to consume any reset/verify return-parameters left in
+// the URL by the Firebase-hosted action widget. Handler is idempotent and
+// tolerant of missing DOM elements.
+handleAuthActionReturn();
+
 window.togglePassVis = togglePassVis;
 window.openOfferSheet = openOfferSheet;
 window.closeOfferSheet = closeOfferSheet;

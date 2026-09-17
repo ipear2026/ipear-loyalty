@@ -21,7 +21,7 @@ import {
   sendPasswordResetEmail, sendEmailVerification, signOut, deleteUser,
   setPersistence, browserLocalPersistence, browserSessionPersistence,
 } from 'firebase/auth';
-import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
+import { initializeAppCheck, ReCaptchaV3Provider, getToken as _getAppCheckToken } from 'firebase/app-check';
 
 // Build-time env only. No production-key fallbacks: a missing or placeholder
 // VITE_FB_API_KEY routes the app into DEMO mode (see IS_DEMO below) instead of
@@ -129,6 +129,7 @@ if (IS_DEMO) {
   window._signOut = async () => {};
   window._onSnapshot = (_ref, _cb) => () => {};
   window._sendEmailVerif = async () => {};
+  window._reloadUser = async () => {};
   window._deleteAuthUser = async () => {};
   window._getDoc = async () => ({ exists: () => false, data: () => ({}) });
   // S-2 fix: demo stub takes string mode, persistence constants no longer exposed
@@ -169,6 +170,11 @@ if (IS_DEMO) {
   window._sendPassReset = sendPasswordResetEmail;
   window._signOut = () => signOut(auth);
   window._sendEmailVerif = (user) => user ? sendEmailVerification(user) : Promise.resolve();
+  // L2.4-A: needed by the ?verifyOk=1 handler so the client can force-refresh
+  // the User object before deciding whether emailVerified is true. Without a
+  // reload, the client-side flag remains stale (reflects the ID token issued
+  // before the user clicked the verification link).
+  window._reloadUser = (user) => user ? user.reload() : Promise.resolve();
   window._deleteAuthUser = (user) => deleteUser(user);
   // S-2 fix: closure-scoped persistence constants. Expose a single string-mode
   // entry point only; persistence objects no longer reachable from DevTools.
@@ -198,18 +204,85 @@ if (IS_DEMO) {
   // VITE_APP_CHECK_DISABLED=0 (or unsetting it). Firestore reads/writes
   // are not gated on App Check at the rules level — the only protection
   // we lose is the "monitor mode" telemetry until this is resolved.
+  // App Check status is exposed via `window._appCheckReady()` so downstream
+  // callable dispatchers (admin approvals, tablet callables) can BLOCK on a
+  // proven-mintable token before firing a financial callable. Rationale:
+  // the 2026-08-31 21:58 UTC incident — a stale admin tab kept dispatching
+  // approveRedemption with `X-Firebase-AppCheck: MISSING` because init had
+  // been skipped silently in an earlier bundle generation; the framework
+  // returned 401 pre-handler. Never expose the token value itself; expose
+  // only a boolean readiness state + a masked error code on failure.
   const _AC_KEY = import.meta.env.VITE_APP_CHECK_KEY ?? '';
   const _AC_DISABLED = String(import.meta.env.VITE_APP_CHECK_DISABLED ?? '').trim() === '1';
   const _AC_KEY_LOOKS_REAL = _AC_KEY && _AC_KEY.length > 30 && !/X{4,}/.test(_AC_KEY);
+  const _READY_TIMEOUT_MS = 10_000;
+  let _appCheckInstance = null;
+  const _readyPromise = new Promise((resolve) => {
+    window.__appCheckResolveReady = resolve;
+  });
+  window._appCheckStatus = 'initializing';
+  window._appCheckError  = null;
+  // Public readiness API: resolves on success within timeout, rejects otherwise.
+  // Never resolves with a token value — only with 'ready'.
+  window._appCheckReady = function _appCheckReady(timeoutMs = _READY_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+      if (window._appCheckStatus === 'ready') return resolve('ready');
+      if (window._appCheckStatus === 'failed' || window._appCheckStatus === 'skipped') {
+        return reject(new Error('appcheck-not-ready:' + window._appCheckStatus));
+      }
+      let done = false;
+      const t = setTimeout(() => {
+        if (done) return;
+        done = true;
+        reject(new Error('appcheck-timeout'));
+      }, timeoutMs);
+      _readyPromise.then((s) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        s === 'ready' ? resolve('ready') : reject(new Error('appcheck-not-ready:' + s));
+      });
+    });
+  };
+  const _markFailed = (reason) => {
+    if (window._appCheckStatus === 'ready') return; // don't downgrade
+    window._appCheckStatus = 'failed';
+    window._appCheckError  = String(reason || '').slice(0, 60); // masked
+    try { window.__appCheckResolveReady?.('failed'); } catch (_) {}
+  };
   if (_AC_DISABLED) {
+    window._appCheckStatus = 'skipped';
+    window._appCheckError  = 'disabled-by-env';
+    try { window.__appCheckResolveReady?.('skipped'); } catch (_) {}
     logger.log('[app-check] ⏭️ skipped (VITE_APP_CHECK_DISABLED=1)');
   } else if (!_AC_KEY_LOOKS_REAL) {
+    window._appCheckStatus = 'skipped';
+    window._appCheckError  = 'key-missing-or-placeholder';
+    try { window.__appCheckResolveReady?.('skipped'); } catch (_) {}
     logger.log('[app-check] ⏭️ skipped (VITE_APP_CHECK_KEY missing or placeholder)');
   } else {
     try {
-      initializeAppCheck(app, { provider: new ReCaptchaV3Provider(_AC_KEY), isTokenAutoRefreshEnabled: true });
+      _appCheckInstance = initializeAppCheck(app, { provider: new ReCaptchaV3Provider(_AC_KEY), isTokenAutoRefreshEnabled: true });
       logger.log('[app-check] ✅ initialized');
-    } catch(e) { logger.warn('[app-check] init failed:', e.message); }
+      // Verify a token can actually be minted — an initialized SDK is not the
+      // same as a working exchange. `getToken(inst, false)` uses cache when
+      // available; a rejection here means the exchange failed at some point.
+      // We DO NOT store the token value anywhere; we only observe success.
+      (async () => {
+        try {
+          await _getAppCheckToken(_appCheckInstance, /*forceRefresh*/ false);
+          window._appCheckStatus = 'ready';
+          window._appCheckError  = null;
+          try { window.__appCheckResolveReady?.('ready'); } catch (_) {}
+        } catch (e) {
+          _markFailed(e?.code || e?.message || 'token-verify-failed');
+          logger.warn('[app-check] token verify failed:', String(e?.code || e?.message || '').slice(0,60));
+        }
+      })();
+    } catch(e) {
+      _markFailed(e?.message || e?.code || 'init-failed');
+      logger.warn('[app-check] init failed:', String(e?.message || '').slice(0,60));
+    }
   }
 
   // Wait for Firebase Auth to restore persisted session from IndexedDB

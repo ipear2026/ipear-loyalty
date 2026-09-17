@@ -87,6 +87,14 @@ import {
   approveOffer,
   rejectOffer,
 } from './admin/approvals.js';
+// L2.3A: new unified approval queue (Tablet → Admin flow).
+// The listener starts after auth completes; it renders into
+// #l23a-approvals-list (see admin.html), independent of the legacy
+// ipear_offer_redemptions queue in ./admin/approvals.js above.
+import {
+  startL23aApprovalListener,
+  stopL23aApprovalListener,
+} from './admin/l23a-approvals-ui.js';
 import {
   initCustomerLiveSync,
   startCustomerLiveSync as _startCustomerLiveSync,
@@ -235,13 +243,14 @@ initAdminAuth({
   onLoginComplete: () => {
     configureSystemHealth({ onDataChanged: loadStats });
     configureStats({ onSnapshot: renderSegments });
-    loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); _startCustomerLiveSync();
+    loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); startL23aApprovalListener({}); _startCustomerLiveSync();
     processReferralQueue(); loadKpiOverview(); startMaintenanceListener(); checkWorkerHealth();
     loadDeletionRequests();
   },
   onLogout: () => {
     // Stop real-time listeners (prevent leak + stale re-login)
     stopApprovalListener();
+    stopL23aApprovalListener();
     stopCustomerLiveSync();
     stopMaintenanceListener();
     // Wipe admin-main's per-customer scope + the cached segment table
@@ -253,7 +262,7 @@ initAdminAuth({
     showTab('search');
   },
   keepAliveRefresh: () => {
-    loadStats(); loadTx(); loadOffers(); startApprovalListener(); _startCustomerLiveSync();
+    loadStats(); loadTx(); loadOffers(); startApprovalListener(); startL23aApprovalListener({}); _startCustomerLiveSync();
     loadKpiOverview(); checkWorkerHealth();
   },
 });

@@ -462,6 +462,16 @@
       <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Οι προσφορές που περιμένουν έγκριση από το tablet εμφανίζονται εδώ σε πραγματικό χρόνο.</p>
       <div id="approvals-list"><div class="empty"><span class="e">✅</span>Δεν υπάρχουν εκκρεμείς εγκρίσεις</div></div>
     </div>
+
+    <!-- L2.3A: unified Tablet → Admin approval queue -->
+    <div class="card" style="margin-top:18px">
+      <h2>
+        <span class="ico">🧾</span> Αιτήματα Ταμπλέτας (L2.3A)
+        <span id="l23a-approvals-badge" style="display:none;background:#ff3b30;color:#fff;font-size:.7rem;font-weight:900;border-radius:12px;padding:2px 8px;margin-left:8px">0</span>
+      </h2>
+      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Κάθε QR scan του tablet δημιουργεί ένα pending request στο <code>ipear_redemption_requests</code>. Το Admin εγκρίνει ή απορρίπτει μέσω callable Cloud Function — το tablet δεν αλλάζει πόντους απευθείας.</p>
+      <div id="l23a-approvals-list"><div class="empty" style="opacity:.6;padding:16px;text-align:center">Δεν υπάρχουν εκκρεμή αιτήματα</div></div>
+    </div>
   </div>
 
   <!-- ── MARKETING TAB (Ειδοποιήσεις + Προσφορές) ── -->

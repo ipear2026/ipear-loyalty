@@ -386,53 +386,46 @@ export async function submitForgotPass() {
     err.textContent = `⏳ Δοκίμασε ξανά σε ${sec}s.`; return;
   }
   btn.disabled = true; btn.innerHTML = '<div class="spin"></div>';
+  // L2.4-A: neutral response for ANY syntactically valid email — hit or miss.
+  //   • No pre-worker Firestore lookup (previously leaked account-existence
+  //     and legacy-no-password state via distinct error strings).
+  //   • No client fallback to window._sendPassReset — a worker outage must
+  //     surface as the same neutral confirmation, not a different code path
+  //     that might succeed for existing accounts and fail differently for
+  //     unknowns. Worker's /reset-password already returns identical
+  //     {success:true} for EMAIL_NOT_FOUND and for hits.
+  //   • Bounded 30s timeout so the button can never stick spinning.
+  const NEUTRAL_MSG = 'Αν υπάρχει λογαριασμός με αυτό το email, θα λάβεις οδηγίες επαναφοράς.';
+  let deadline;
   try {
-    let customerDoc = null;
-    let firestoreAvailable = true;
-    try {
-      const snap = await window._getDocs(
-        window._query(window._col(window._db,'ipear_customers'), window._where('email','==',email))
-      );
-      if (!snap.empty) {
-        snap.forEach(d => { if (!customerDoc) customerDoc = { id: d.id, ...d.data() }; });
-      }
-    } catch(_) {
-      firestoreAvailable = false;
-    }
-
-    if (firestoreAvailable && customerDoc === null) {
-      err.textContent = '❌ Δεν βρέθηκε λογαριασμός με αυτό το email.';
-      btn.disabled = false; btn.innerHTML = 'Αποστολή →';
-      return;
-    }
-
-    if (firestoreAvailable && customerDoc && !customerDoc.uid) {
-      err.innerHTML = '⚠️ Δεν έχεις ορίσει κωδικό ακόμα.<br><span style="font-weight:400">Κάνε <a href="#" onclick="showScreen(\'s-phone\');backToLogin();return false" style="color:var(--gd)">Σύνδεση</a> και πάτα <strong>Είσοδος →</strong> για να δημιουργήσεις κωδικό.</span>';
-      btn.disabled = false; btn.innerHTML = 'Αποστολή →';
-      return;
-    }
-
-    let branded = false;
-    try {
-      const res = await fetch(_WORKER_URL + '/reset-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, name: customerDoc?.name || '' }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success) branded = true;
-    } catch(_) {}
-
-    if (!branded) {
-      await window._sendPassReset(window._auth, email);
-    }
-
-    document.getElementById('forgot-ok').style.display = 'block';
-    document.getElementById('forgot-email').value = '';
-    localStorage.setItem(_fpKey, Date.now().toString());
-  } catch(e) {
-    err.textContent = '❌ ' + (e.message || e.code || 'Σφάλμα. Δοκίμασε ξανά.');
+    const ctrl = new AbortController();
+    deadline = setTimeout(() => ctrl.abort(), 30_000);
+    // The client passes the app's own continueUrl so the Firebase-hosted
+    // widget bounces the customer back to loyalty.ipear.gr with ?resetOk=1
+    // for the return-toast handler (see _handleAuthActionReturn).
+    await fetch(_WORKER_URL + '/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email,
+        continueUrl: 'https://loyalty.ipear.gr/?resetOk=1',
+      }),
+      signal: ctrl.signal,
+    }).catch(() => { /* neutral: never leak worker/network failures */ });
+  } finally {
+    if (deadline) clearTimeout(deadline);
   }
+  // ALWAYS show the same neutral confirmation, regardless of hit/miss/error.
+  // Client-side cooldown stamped only after the dispatch so a rapid re-submit
+  // gets the countdown warning; it is a UX guard, not a security control.
+  const okEl = document.getElementById('forgot-ok');
+  if (okEl) {
+    okEl.textContent = NEUTRAL_MSG;
+    okEl.style.display = 'block';
+  }
+  const emailEl = document.getElementById('forgot-email');
+  if (emailEl) emailEl.value = '';
+  localStorage.setItem(_fpKey, Date.now().toString());
   btn.disabled = false; btn.innerHTML = 'Αποστολή →';
 }
 
@@ -1176,38 +1169,26 @@ export async function submitPhone() {
     document.getElementById('auth-pass').value = '';
     _transitionToApp();
   } catch(e) {
-    const isNotFound    = e.code === 'auth/user-not-found';
-    const isWrong       = e.code === 'auth/wrong-password';
-    const isInvalidCred = e.code === 'auth/invalid-credential' || e.code === 'auth/invalid-login-credentials';
-    if (isNotFound || isInvalidCred) {
-      try {
-        const checkRes = await fetch(_WORKER_URL + '/check-registration', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email })
-        });
-        if (checkRes.ok) {
-          const d = await checkRes.json();
-          if (d.exists && !d.blocked) {
-            if (isInvalidCred) {
-              err.textContent = '❌ Λάθος κωδικός.';
-              btn.disabled=false; btn.innerHTML='Είσοδος →'; return;
-            }
-            state.foundCustomer = { email, id: null, name: '' };
-            document.getElementById('auth-step2-sub').textContent = 'Ορίσε τον κωδικό σου για πρώτη σύνδεση.';
-            document.getElementById('auth-step1').style.display = 'none';
-            document.getElementById('auth-step2').style.display = '';
-            document.getElementById('auth-step2-err').textContent = '';
-            document.getElementById('auth-newpass1').focus();
-            btn.disabled=false; btn.innerHTML='Είσοδος →'; return;
-          }
-        }
-      } catch(_) {}
-      err.textContent = '❌ Δεν βρέθηκε λογαριασμός με αυτό το email.';
-    } else if (isWrong) {
-      err.textContent = '❌ Λάθος κωδικός.';
+    // L2.4-A: neutral, single credential-error message. Firebase Auth's
+    // v10 SDK returns `auth/invalid-credential` for both wrong-password and
+    // unknown-email (Email Enumeration Protection). Older codes are mapped
+    // to the same string so the customer cannot distinguish the two.
+    const code = e?.code || '';
+    const isCredError =
+      code === 'auth/invalid-credential' ||
+      code === 'auth/invalid-login-credentials' ||
+      code === 'auth/user-not-found' ||
+      code === 'auth/wrong-password';
+    if (isCredError) {
+      err.textContent = 'Ο συνδυασμός email και κωδικού δεν είναι έγκυρος.';
+    } else if (code === 'auth/too-many-requests') {
+      err.textContent = 'Πολλές αποτυχημένες προσπάθειες. Δοκίμασε ξανά σε λίγο.';
+    } else if (code === 'auth/network-request-failed') {
+      err.textContent = 'Χωρίς σύνδεση — δοκίμασε ξανά όταν είσαι online.';
     } else {
-      err.textContent = '❌ ' + (e.message || e.code || 'Σφάλμα σύνδεσης.');
+      // Non-credential, non-network errors — surface the code only, never
+      // any provider or existence-revealing message.
+      err.textContent = 'Δεν ολοκληρώθηκε η σύνδεση. Δοκίμασε ξανά.';
     }
   }
   btn.disabled = false; btn.innerHTML = 'Είσοδος →';
@@ -1290,6 +1271,124 @@ export function logout() {
   document.getElementById('phone-err').textContent = '';
   showScreen('s-phone');
   _initCheckboxStyle();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  L2.4-A · Resend email verification (server-authoritative)
+//
+//  The Worker's POST /resend-verification is the ONLY path a client is
+//  allowed to trigger. Rate limits, link generation, and Brevo delivery all
+//  live server-side. The client:
+//    • sends the Firebase ID token in the Authorization header only
+//      (never body, never query, never localStorage, never logged),
+//    • honours a 60s local button cooldown as UX (not the security control),
+//    • bounds the request at 30s so the button can never permanently spin,
+//    • disables the button synchronously before any await to prevent
+//      duplicate submissions,
+//    • displays the same neutral copy for every outcome — success, worker
+//      error, network error, already-verified — so the response cannot be
+//      used to enumerate account state.
+// ════════════════════════════════════════════════════════════════════════════
+const _RESEND_COOLDOWN_MS = 60_000;
+let _resendBusy = false;
+const _RESEND_LAST_KEY = '_rv_last';
+
+export async function resendEmailVerification() {
+  if (_resendBusy) return;
+  const btn = document.getElementById('resend-verify-btn');
+  const status = document.getElementById('resend-verify-status');
+  const NEUTRAL = 'Αν χρειάζεται επαλήθευση, στείλαμε νέο email. Έλεγξε και τα ανεπιθύμητα.';
+
+  const last = parseInt(localStorage.getItem(_RESEND_LAST_KEY) || '0', 10);
+  const wait = _RESEND_COOLDOWN_MS - (Date.now() - last);
+  if (wait > 0) {
+    if (status) {
+      status.textContent = `⏳ Δοκίμασε ξανά σε ${Math.ceil(wait / 1000)}s.`;
+      status.setAttribute('aria-live', 'polite');
+    }
+    return;
+  }
+
+  _resendBusy = true;
+  if (btn) { btn.disabled = true; }
+
+  let idToken = null;
+  try {
+    const u = window._auth?.currentUser;
+    if (u && typeof u.getIdToken === 'function') idToken = await u.getIdToken(false);
+  } catch (_) { /* neutral response below */ }
+
+  let deadline;
+  try {
+    const ctrl = new AbortController();
+    deadline = setTimeout(() => ctrl.abort(), 30_000);
+    if (idToken) {
+      await fetch(_WORKER_URL + '/resend-verification', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + idToken,
+        },
+        // Empty body — worker derives uid + email from the verified token.
+        body: '{}',
+        signal: ctrl.signal,
+      }).catch(() => { /* neutral: never leak worker/network failures */ });
+    }
+  } finally {
+    if (deadline) clearTimeout(deadline);
+    _resendBusy = false;
+    if (btn) { btn.disabled = false; }
+    if (status) {
+      status.textContent = NEUTRAL;
+      status.setAttribute('aria-live', 'polite');
+    }
+    localStorage.setItem(_RESEND_LAST_KEY, String(Date.now()));
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  L2.4-A · Return handler for the Firebase-hosted action widget
+//
+//  When Firebase redirects the customer back to
+//    https://loyalty.ipear.gr/?resetOk=1   (after password reset)
+//    https://loyalty.ipear.gr/?verifyOk=1  (after email verification)
+//  the client:
+//    1. Shows a neutral, single-locale Greek toast.
+//    2. Removes the query parameter via history.replaceState so a share of
+//       the URL cannot mistakenly display the toast to a different user.
+//    3. For verifyOk: reloads the current Firebase user before deciding
+//       whether the email is verified (the ID token issued before the click
+//       is stale; user.reload() forces a re-fetch).
+//    4. Treats the parameter as post-action UX only, NOT security evidence.
+//       No claim is written and no state is elevated on the strength of
+//       someone manually typing the query string — the actual reset/verify
+//       success was proven inside Firebase's hosted widget, we're only
+//       displaying the confirmation.
+// ════════════════════════════════════════════════════════════════════════════
+export async function handleAuthActionReturn() {
+  try {
+    const params = new URLSearchParams(location.search || '');
+    const hasReset  = params.get('resetOk')  === '1';
+    const hasVerify = params.get('verifyOk') === '1';
+    if (!hasReset && !hasVerify) return;
+
+    // Strip the params from the URL regardless of what we do next.
+    params.delete('resetOk'); params.delete('verifyOk');
+    const q = params.toString();
+    const clean = location.pathname + (q ? '?' + q : '') + location.hash;
+    try { history.replaceState({}, '', clean); } catch (_) { /* browser guard */ }
+
+    if (hasReset) {
+      showToast('✅ Ο κωδικός σου ενημερώθηκε. Σύνδεσε με τον νέο κωδικό.', 'green');
+    }
+    if (hasVerify) {
+      try { if (window._reloadUser) await window._reloadUser(window._auth?.currentUser); }
+      catch (_) { /* neutral — do not surface reload failures */ }
+      showToast('✅ Το email σου επαληθεύτηκε.', 'green');
+    }
+  } catch (_) {
+    // Never crash boot on a query-param handler.
+  }
 }
 
 // ════════════════════════════════════════

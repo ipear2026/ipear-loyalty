@@ -480,6 +480,10 @@ export async function handleWooCreditOrder(request, env, CORS, ctx, deps) {
   const accessToken = await getAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
   const projectId = env.FCM_PROJECT_ID;
   const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+  // Firestore REST Write.update.name MUST be the RELATIVE resource form
+  // (projects/{p}/databases/{db}/documents/{path}), NOT a URL. A URL-form
+  // name causes the whole :commit to be rejected atomically with HTTP 400.
+  const docBase = `projects/${projectId}/databases/(default)/documents`;
   const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
 
   // Customer resolution — done outside transaction (runQuery is not a
@@ -569,7 +573,8 @@ export async function handleWooCreditOrder(request, env, CORS, ctx, deps) {
       };
 
       // Deterministic audit doc name — retry with same nonce maps to same doc.
-      const auditName = `${fsBase}/ipear_transactions/${auditCreditDocId(ledgerId, nonce)}`;
+      // Built from docBase (relative form) — Firestore rejects URL-form names.
+      const auditName = `${docBase}/ipear_transactions/${auditCreditDocId(ledgerId, nonce)}`;
 
       const writes = [];
       // Only mutate customer if there is a real delta (zero-net skips this).
@@ -584,7 +589,7 @@ export async function handleWooCreditOrder(request, env, CORS, ctx, deps) {
       }
       writes.push({
         update: {
-          name: `${fsBase}/ipear_woo_events/${ledgerId}`,
+          name: `${docBase}/ipear_woo_events/${ledgerId}`,
           fields: wrapMap(newLedger).fields,
         },
       });
@@ -674,6 +679,8 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
   const accessToken = await getAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
   const projectId = env.FCM_PROJECT_ID;
   const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+  // Firestore REST Write.update.name MUST be relative — see credit handler.
+  const docBase = `projects/${projectId}/databases/(default)/documents`;
   const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
 
   let lastErr;
@@ -729,7 +736,7 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
         };
         await fsCommit(fsBase, fsHeaders, txn, [{
           update: {
-            name: `${fsBase}/ipear_woo_events/${ledgerId}`,
+            name: `${docBase}/ipear_woo_events/${ledgerId}`,
             fields: wrapMap(newLedger).fields,
           },
         }]);
@@ -781,7 +788,7 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
         lastEventAt:           now,
       };
 
-      const auditName = `${fsBase}/ipear_transactions/${auditRefundDocId(ledgerId, refundId)}`;
+      const auditName = `${docBase}/ipear_transactions/${auditRefundDocId(ledgerId, refundId)}`;
       const writes = [];
       if (decision.pointsDelta !== 0) {
         writes.push({
@@ -794,7 +801,7 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
       }
       writes.push({
         update: {
-          name: `${fsBase}/ipear_woo_events/${ledgerId}`,
+          name: `${docBase}/ipear_woo_events/${ledgerId}`,
           fields: wrapMap(newLedger).fields,
         },
       });

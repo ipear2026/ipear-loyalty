@@ -258,6 +258,7 @@
       <button class="btn-main" id="phone-btn" onclick="submitPhone()">Είσοδος →</button>
       <div class="err-msg" id="phone-err"></div>
       <button type="button" onclick="openForgotPass()" class="link-btn-secondary">Ξέχασα τον κωδικό μου</button>
+
       <div style="border-top:1px solid var(--bd);margin-top:14px;padding-top:14px;text-align:center">
         <span style="font-size:.82rem;color:var(--grl);font-weight:600">Νέος χρήστης;</span>
         <button type="button" onclick="openRegister()" style="background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;padding:4px 8px;text-decoration:underline">Δημιουργία λογαριασμού →</button>
@@ -636,6 +637,17 @@
           </div>
           <div style="flex-shrink:0;font-size:1.1rem;color:#f9a825">→</div>
         </a>
+
+        <!-- L2.4-A: server-authoritative resend-verification. Button always
+             visible; the Worker gates on token verification + rate-limits
+             per-UID + hashed-email. Neutral response regardless of whether
+             the account already has emailVerified=true. -->
+        <button class="logout-btn" id="resend-verify-btn"
+                style="color:#0a0a0a;border-color:#8ae900;margin-top:8px;background:#f0ffe0"
+                aria-label="Στείλε ξανά email επαλήθευσης"
+                onclick="resendEmailVerification()">✉️ Στείλε ξανά email επαλήθευσης</button>
+        <div id="resend-verify-status" role="status" aria-live="polite"
+             style="font-size:.82rem;color:#666;text-align:center;margin-top:6px;min-height:1.2em"></div>
 
         <button class="logout-btn" id="logout-btn" onclick="logout()">Αποσύνδεση</button>
         <button class="logout-btn" style="color:#ff3b30;border-color:#ff3b30;margin-top:8px" onclick="requestAccountDeletion()">🗑 Διαγραφή Λογαριασμού</button>

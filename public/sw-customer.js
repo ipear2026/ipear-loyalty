@@ -1,9 +1,15 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
+// v73 (2026-09-01): retire caches for all previously deployed asset
+// generations. Rationale: the 21:58 UTC "frozen approval" incident was
+// caused by stale admin tabs holding the pre-key-rotation `firebase-init-*`
+// chunk (App Check init skipped → `X-Firebase-AppCheck: MISSING` on every
+// callable). Bumping CACHE_VER forces the SW to delete the old cache on
+// activate; installs the new set on next visit. No change to fetch strategy.
 // v72 (2026-08-29): SHELL precache filenames corrected — customer.html was
 // served via 302 redirect (opaque cache.addAll failure on install), and
 // manifest-customer.json never existed in the vite build. Replaced with the
 // actual dist filenames (index.html, manifest.json). See tests/sw-precache.test.js.
-const CACHE_VER = 'ipear-loyalty-20260829-v72';
+const CACHE_VER = 'ipear-loyalty-20260901-v73';
 
 const SHELL = [
   'index.html',

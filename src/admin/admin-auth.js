@@ -61,13 +61,37 @@ export async function _completeAdminAuth(user) {
   authState.storeId = null;
   authState.storeName = '—';
 
-  const adminRef  = window._doc(window._db, 'ipear_admins', user.uid);
-  const adminSnap = await window._getDoc(adminRef);
-  if (!window.DEMO && !adminSnap.exists()) {
-    await window._adminSignOut().catch(() => {});
-    throw new Error('not-admin');
+  // L2.3A: canonical admin contract = `admin: true` custom claim, matching
+  // Firestore rules' isAdmin(). Force a token refresh so a freshly-provisioned
+  // admin picks up the claim without waiting for the ~1h token TTL. The
+  // ipear_admins/{uid} doc is still consulted for storeId metadata but is no
+  // longer the auth gate — that authority now lives in the ID token claim
+  // and matches the rules exactly.
+  let adminDocData = null;
+  if (!window.DEMO) {
+    let tok = null;
+    try { tok = await user.getIdTokenResult(true); } catch (_) {}
+    const claims = tok?.claims || {};
+    if (claims.admin !== true) {
+      await window._adminSignOut().catch(() => {});
+      throw new Error('not-admin');
+    }
+    // Best-effort storeId lookup — rules allow reading /ipear_admins/<self>
+    // (uid == self), and if it's missing we still trust the claim.
+    try {
+      const adminRef = window._doc(window._db, 'ipear_admins', user.uid);
+      const adminSnap = await window._getDoc(adminRef);
+      if (adminSnap.exists()) adminDocData = adminSnap.data() || null;
+    } catch (_) {}
+    // Prefer the claim's storeId over the doc's storeid — claims are the
+    // canonical source; the doc is metadata that syncAdminClaim mirrors from.
+    authState.storeId =
+      (typeof claims.storeId === 'string' && claims.storeId) ||
+      adminDocData?.storeid ||
+      null;
+  } else {
+    authState.storeId = null;
   }
-  authState.storeId = adminSnap.data()?.storeid || null;
 
   if (authState.storeId) {
     try {

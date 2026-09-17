@@ -26,6 +26,12 @@ export {
   onSnapshot, runTransaction,
 } from 'firebase/firestore';
 
+/** Get the initialized Firebase Auth instance. Throws if Firebase not yet ready. */
+export function getAuth() {
+  if (!window._auth) throw new Error('[services/firebase] Auth not initialized — wait for "firebase-ready" event');
+  return window._auth;
+}
+
 /** Get the initialized Firestore instance. Throws if Firebase not yet ready. */
 export function getDb() {
   if (!window._db) throw new Error('[services/firebase] Firestore not initialized — wait for "firebase-ready" event');

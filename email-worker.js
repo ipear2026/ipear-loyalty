@@ -317,6 +317,8 @@ export default {
 
     // Public endpoints (no ADMIN_SECRET needed, rate-limited)
     if (path === '/reset-password') return handleResetPassword(request, env, CORS);
+    // L2.4-A: server-authoritative email-verification resend
+    if (path === '/resend-verification') return handleResendVerification(request, env, CORS);
     if (path === '/check-registration') return handleCheckRegistration(request, env, CORS);
     if (path === '/check-referrer') return handleCheckReferrer(request, env, CORS);
     if (path === '/process-referral') return handleProcessReferral(request, env, CORS);
@@ -2344,19 +2346,31 @@ async function handleResetPassword(request, env, CORS) {
           requestType: 'PASSWORD_RESET',
           email,
           returnOobLink: true,
+          // L2.4-A: authorized continue URL. Firebase validates continueUrl
+          // against Authorized Domains configured in Firebase Console
+          // (loyalty.ipear.gr must be present). Only allow-listed https
+          // origins the client explicitly requested; ignore anything else.
+          continueUrl: _safeContinueUrl(body.continueUrl, 'reset'),
         }),
       }
     );
 
+    // L2.4-A: fully-neutral response. ANY branch that does not deliver an
+    // email must return the identical {success:true, message:...} body so
+    // an attacker with a raw HTTP client cannot differentiate hit/miss/
+    // Brevo-failure/EMAIL_NOT_FOUND. Previously, EMAIL_NOT_FOUND was
+    // neutralised but "no oobLink" and "Invalid reset link" leaked via
+    // HTTP 500 responses. Firebase Email Enumeration Protection returns
+    // HTTP 200 with no oobLink for unknown addresses — a distinguishable
+    // enumeration channel until fully collapsed here.
+    const NEUTRAL_RESET_BODY = { success: true, message: 'If the email exists, a reset link was sent.' };
+
     if (!fbRes.ok) {
       const err = await fbRes.json().catch(() => ({}));
       const code = err?.error?.message || 'UNKNOWN';
-      console.error('[Firebase Admin reset] status:', fbRes.status, 'code:', code, 'full:', JSON.stringify(err));
-      // Don't reveal whether the email exists (security best practice)
-      if (code === 'EMAIL_NOT_FOUND' || code.includes('EMAIL_NOT_FOUND')) {
-        return resp({ success: true, message: 'If the email exists, a reset link was sent.' }, 200, CORS);
-      }
-      return resp({ error: 'Failed to generate reset link' }, 500, CORS);
+      // Log only status + code label — never the request payload or email.
+      console.error('[Firebase Admin reset] status:', fbRes.status, 'code:', code);
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
     const fbData = await fbRes.json();
@@ -2364,7 +2378,7 @@ async function handleResetPassword(request, env, CORS) {
 
     if (!resetLink) {
       console.error('[Firebase Admin reset] No oobLink in response');
-      return resp({ error: 'No reset link generated' }, 500, CORS);
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
     // Validate the reset link is a legitimate HTTPS URL before embedding in email
@@ -2374,8 +2388,8 @@ async function handleResetPassword(request, env, CORS) {
       if (parsed.protocol !== 'https:') throw new Error('not https');
       safeResetLink = resetLink;
     } catch(_) {
-      console.error('[Firebase Admin reset] Invalid or non-HTTPS oobLink');
-      return resp({ error: 'Invalid reset link generated' }, 500, CORS);
+      console.error('[Firebase Admin reset] Invalid or non-HTTPS oobLink shape');
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
     // Step 3: Send branded email via Brevo
@@ -2401,17 +2415,22 @@ async function handleResetPassword(request, env, CORS) {
     });
 
     if (!brevoRes.ok) {
-      const err = await brevoRes.json().catch(() => ({}));
-      console.error('[Brevo reset email]', brevoRes.status, err?.message || '');
-      return resp({ error: 'Failed to send reset email' }, 500, CORS);
+      // L2.4-A: neutralised. Brevo delivery failure MUST NOT differ from
+      // hit/miss on the wire. Log status only; return neutral 200.
+      console.error('[Brevo reset email] status:', brevoRes.status);
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
-    // Use same message whether email was found or not (prevents user enumeration)
-    return resp({ success: true, message: 'If the email exists, a reset link was sent.' }, 200, CORS);
+    // Same neutral message whether hit or miss.
+    return resp(NEUTRAL_RESET_BODY, 200, CORS);
 
   } catch(e) {
-    console.error('[reset-password] catch:', e.message, e.stack);
-    return resp({ error: 'Internal error' }, 500, CORS);
+    // L2.4-A: neutralised. Any unexpected internal exception returns the
+    // same 200 body — the outer error path was previously the last
+    // enumeration channel on this route. Log message only; no stack (may
+    // include email/oobLink fragments).
+    console.error('[reset-password] catch:', e?.message || 'unknown');
+    return resp({ success: true, message: 'If the email exists, a reset link was sent.' }, 200, CORS);
   }
 }
 
@@ -3961,6 +3980,246 @@ function buildHtmlEmail(message) {
       </td>
     </tr>
 
+  </table>
+  </td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  L2.4-A · Continue-URL allowlist for Firebase-hosted action widgets.
+// ══════════════════════════════════════════════════════════════════════════
+function _safeContinueUrl(requested, purpose) {
+  const CANONICAL = {
+    reset:  'https://loyalty.ipear.gr/?resetOk=1',
+    verify: 'https://loyalty.ipear.gr/?verifyOk=1',
+  };
+  const fallback = CANONICAL[purpose] || CANONICAL.reset;
+  if (typeof requested !== 'string' || requested.length === 0) return fallback;
+  return requested === CANONICAL[purpose] ? requested : fallback;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  L2.4-A · POST /resend-verification (authenticated, server-authoritative)
+//
+//  Client contract:
+//    - Authorization: Bearer <firebase-id-token>    (header only; never body)
+//    - Body: {} (any content ignored)
+//    - Response: ALWAYS 200 { success: true, message: "…" } — neutral.
+//                Never reveals: account existence, already-verified state,
+//                Brevo delivery status, provider type, or Firebase error.
+//
+//  Server:
+//    - Verifies ID token via Identity Toolkit accounts:lookup helper.
+//    - Derives verifiedUid + verifiedEmail exclusively from the token.
+//    - Ignores any client-supplied uid/email.
+//    - Per-IP + per-uid + per-hashed-email rate limits (5/15min each).
+//    - Generates the link via Firebase Identity Toolkit accounts:sendOobCode
+//      with requestType: 'VERIFY_EMAIL' + returnOobLink: true — the SAME
+//      method the existing /reset-password uses for PASSWORD_RESET.
+//    - continueUrl restricted to _safeContinueUrl(_, 'verify').
+//    - Delivery via existing Brevo integration.
+//    - Never logs the oobLink, oobCode, ID token, or email plaintext.
+// ══════════════════════════════════════════════════════════════════════════
+async function handleResendVerification(request, env, CORS) {
+  const NEUTRAL_BODY = {
+    success: true,
+    message: 'If your account requires verification, a new email has been sent.',
+  };
+
+  const clientIP = request.headers.get('CF-Connecting-IP')
+    || request.headers.get('x-forwarded-for') || 'unknown';
+  pruneRateBuckets();
+  {
+    const _rl = await rateLimitOrBlock(
+      env, clientIP, 'verify', RATE_LIMIT_MAX_HITS, 900, CORS,
+      'Too many requests. Please try again later.'
+    );
+    if (_rl) return _rl;
+  }
+
+  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL
+      || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID
+      || !env.BREVO_API_KEY) {
+    console.error('[resend-verification] server not fully configured');
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+
+  const authHeader = request.headers.get('Authorization') || '';
+  if (!/^Bearer\s+[A-Za-z0-9._~+/=-]+$/.test(authHeader)) {
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+  const idToken = authHeader.slice(7).trim();
+  if (!idToken || idToken.length > 4096) return resp(NEUTRAL_BODY, 200, CORS);
+
+  let verifiedUid, verifiedEmail, alreadyVerified;
+  try {
+    const verifyRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }) }
+    );
+    const verifyData = await verifyRes.json();
+    const u = verifyData?.users?.[0];
+    if (!u?.localId || !u?.email) return resp(NEUTRAL_BODY, 200, CORS);
+    verifiedUid    = u.localId;
+    verifiedEmail  = String(u.email).trim().toLowerCase();
+    alreadyVerified = u.emailVerified === true;
+  } catch (_) {
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+
+  {
+    const _rl = await rateLimitOrBlock(
+      env, 't:uid:' + verifiedUid, 'verify', RATE_LIMIT_MAX_HITS, 900, CORS,
+      'Too many requests. Please try again later.'
+    );
+    if (_rl) return _rl;
+  }
+  {
+    const emailHash = await _sha256Hex(verifiedEmail);
+    const _rl = await rateLimitOrBlock(
+      env, 't:email:' + emailHash, 'verify', RATE_LIMIT_MAX_HITS, 900, CORS,
+      'Too many requests. Please try again later.'
+    );
+    if (_rl) return _rl;
+  }
+
+  if (alreadyVerified) {
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+
+  try {
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const fbRes = await fetch(
+      'https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + accessToken,
+        },
+        body: JSON.stringify({
+          requestType: 'VERIFY_EMAIL',
+          idToken,
+          returnOobLink: true,
+          continueUrl: _safeContinueUrl(null, 'verify'),
+        }),
+      }
+    );
+    if (!fbRes.ok) {
+      console.error('[resend-verification] Firebase status:', fbRes.status);
+      return resp(NEUTRAL_BODY, 200, CORS);
+    }
+    const fbData = await fbRes.json();
+    const oobLink = fbData?.oobLink || '';
+    let safeLink;
+    try {
+      const parsed = new URL(oobLink);
+      if (parsed.protocol !== 'https:') throw new Error('not https');
+      safeLink = oobLink;
+    } catch (_) {
+      console.error('[resend-verification] invalid oobLink shape');
+      return resp(NEUTRAL_BODY, 200, CORS);
+    }
+
+    const htmlContent = buildVerificationEmail(verifiedEmail.split('@')[0], safeLink);
+    const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key':      env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept':       'application/json',
+      },
+      body: JSON.stringify({
+        sender: {
+          name:  env.SENDER_NAME  || 'iPear Loyalty',
+          email: (env.SENDER_EMAIL || '').trim(),
+        },
+        to: [{ email: verifiedEmail }],
+        subject: '✉️ Επαλήθευση Email — iPear Loyalty',
+        htmlContent,
+      }),
+    });
+    if (!brevoRes.ok) {
+      console.error('[resend-verification] Brevo status:', brevoRes.status);
+    }
+  } catch (e) {
+    console.error('[resend-verification] catch:', e?.message || 'unknown');
+  }
+
+  return resp(NEUTRAL_BODY, 200, CORS);
+}
+
+async function _sha256Hex(input) {
+  const bytes = new TextEncoder().encode(String(input));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const arr = new Uint8Array(digest);
+  let hex = '';
+  for (let i = 0; i < arr.length; i++) hex += arr[i].toString(16).padStart(2, '0');
+  return hex;
+}
+
+function buildVerificationEmail(name, verifyLink) {
+  const safeName = escHtml(name);
+  const safeHref = verifyLink.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  return `<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Επαλήθευση Email — iPear Loyalty</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:40px 0">
+  <tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0"
+         style="max-width:600px;width:100%;background:#ffffff;border-radius:22px;
+                overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.10)">
+    <tr>
+      <td style="background:linear-gradient(135deg,#6bb800 0%,#8ae900 100%);padding:40px 44px;text-align:center">
+        <div style="font-size:36px;font-weight:900;color:#0a0a0a;letter-spacing:-1.5px;line-height:1">
+          iPear<span style="color:#ffffff">Loyalty</span>
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:36px 44px 0;text-align:center">
+        <div style="display:inline-block;width:72px;height:72px;line-height:72px;
+                    font-size:36px;background:#f0ffe0;border-radius:50%;
+                    border:2px solid #8ae900;text-align:center">
+          ✉️
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:24px 44px 32px">
+        <h1 style="font-size:22px;font-weight:800;color:#0a0a0a;margin:0 0 8px;line-height:1.3;text-align:center">
+          Επαλήθευση Email
+        </h1>
+        <p style="font-size:15px;color:#666;line-height:1.7;margin:0 0 28px;text-align:center">
+          Γεια σου, <strong>${safeName}</strong>!<br>
+          Επιβεβαίωσε το email σου για να ολοκληρώσεις τη σύνδεση:
+        </p>
+        <p style="text-align:center;margin:0 0 28px">
+          <a href="${safeHref}"
+             style="display:inline-block;background:linear-gradient(135deg,#6bb800,#8ae900);
+                    color:#0a0a0a;text-decoration:none;font-weight:800;font-size:16px;
+                    padding:14px 32px;border-radius:14px">
+            ✅ Επιβεβαίωση
+          </a>
+        </p>
+        <p style="font-size:12px;color:#888;line-height:1.6;margin:0;text-align:center">
+          Αν δεν ζήτησες αυτό το email, μπορείς να το αγνοήσεις.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="background:#fafafa;padding:20px 44px;text-align:center;border-radius:0 0 22px 22px">
+        <p style="font-size:12px;color:#aaa;margin:0">© iPear Loyalty Program 🍐</p>
+      </td>
+    </tr>
   </table>
   </td></tr>
 </table>

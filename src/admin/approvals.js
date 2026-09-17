@@ -11,6 +11,7 @@ import { escHtml, escJs } from '../utils.js';
 import { logger } from '../logger.js';
 import { toast } from './ui.js';
 import { publishLeaderboard } from './leaderboard.js';
+import { setOfferCount, resetApprovalsBadge } from './approvals-badge.js';
 
 const DB = () => window._db;
 
@@ -38,24 +39,10 @@ export function startApprovalListener() {
       const list = [];
       snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
       renderApprovals(list);
-
-      const badge = document.getElementById('approvals-badge');
-      if (badge) {
-        if (list.length > 0) {
-          badge.style.display = 'inline-block';
-          badge.textContent = list.length;
-          try {
-            new Audio('data:audio/wav;base64,UklGRl9vT19telefonismos...').play();
-          } catch {
-            /* autoplay-blocked or no audio context — ignore */
-          }
-        } else {
-          badge.style.display = 'none';
-        }
-      }
-
-      const btn = document.getElementById('tab-btn-approvals');
-      if (btn) btn.style.animation = list.length > 0 ? 'pulse 1s infinite' : '';
+      // Publish the offer-approvals count into the combined nav badge.
+      // The L2.3A tablet-requests listener publishes its own count via
+      // setTabletCount; the badge module sums them.
+      setOfferCount(list.length);
     },
     (err) => logger.error('[approvals] listener error:', err)
   );
@@ -69,8 +56,15 @@ export function stopApprovalListener() {
       /* ignore */
     }
     _approvalUnsub = null;
+    // Zero the offer count so a stale count from a previous session doesn't
+    // outlive its listener (logout / auth switch / re-init).
+    setOfferCount(0);
   }
 }
+
+// Re-export the badge reset so the auth flow can force-zero both counters
+// on logout without importing approvals-badge directly.
+export { resetApprovalsBadge };
 
 function renderApprovals(items) {
   const el = document.getElementById('approvals-list');
