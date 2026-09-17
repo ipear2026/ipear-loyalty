@@ -109,12 +109,12 @@ describe('/send-welcome', () => {
     defaultAuthStubs(fetchStub);
 
     let committed = false;
-    fetchStub.on(':beginTransaction', () => jsonResponse({ transaction: 'tx-1' }));
-    // Read on the customer doc: not yet processed.
-    fetchStub.on(/ipear_customers\/uid-user-1\?transaction=/, () =>
+    // STEP 1: mask GET for the idempotency flag — NOT yet processed (flag absent),
+    // card present. (Worker replaced the old R-M-W transaction with a mask GET +
+    // atomic-increment commit so /send-welcome and /process-referral don't contend.)
+    fetchStub.on(/ipear_customers\/uid-user-1\?mask/, () =>
       jsonResponse({ name: 'projects/p/databases/(default)/documents/ipear_customers/uid-user-1',
-                     fields: { points: { integerValue: '0' }, totalPoints: { integerValue: '0' },
-                               card: { stringValue: 'IP-AAAAAA' } } })
+                     fields: { card: { stringValue: 'IP-AAAAAA' } } })
     );
     fetchStub.on(':commit', () => { committed = true; return jsonResponse({}); });
     fetchStub.on(/ipear_transactions$/, () => jsonResponse({ name: 'tx-doc' }));
@@ -144,11 +144,11 @@ describe('/send-welcome', () => {
     defaultAuthStubs(fetchStub);
 
     let commits = 0;
-    fetchStub.on(':beginTransaction', () => jsonResponse({ transaction: 'tx-2' }));
-    fetchStub.on(/ipear_customers\/uid-user-1\?transaction=/, () =>
+    // STEP 1: mask GET returns the flag already set → worker skips the credit commit.
+    fetchStub.on(/ipear_customers\/uid-user-1\?mask/, () =>
       jsonResponse({ name: 'projects/p/databases/(default)/documents/ipear_customers/uid-user-1',
                      fields: { marketingWelcomeProcessed: { booleanValue: true },
-                               points: { integerValue: '50' }, totalPoints: { integerValue: '50' } } })
+                               card: { stringValue: 'IP-AAAAAA' } } })
     );
     fetchStub.on(':commit', () => { commits++; return jsonResponse({}); });
     fetchStub.on('api.brevo.com/v3/smtp/email', () => jsonResponse({ messageId: 'ok' }));
@@ -226,83 +226,9 @@ describe('/send-welcome', () => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  /push — dual-mode auth (admin broadcast vs idToken self-push)
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe('/push', () => {
-  it('admin broadcast: sends to every token in the body array', async () => {
-    const fetchStub = makeFetchStub();
-    fetchStub.on('oauth2.googleapis.com', () => jsonResponse({ access_token: 'fcm-sa' }));
-    const fcmCalls = [];
-    fetchStub.on('fcm.googleapis.com/v1/projects/test-project/messages:send', ({ opts }) => {
-      fcmCalls.push(JSON.parse(opts.body));
-      return jsonResponse({ name: 'sent' });
-    });
-    globalThis.fetch = fetchStub;
-
-    const req = makeRequest('/push', {
-      headers: { Authorization: 'Bearer test-admin-secret' },
-      body: { tokens: ['tok-A', 'tok-B'], title: 'Hi', message: 'Hello' }
-    });
-    const res = await worker.fetch(req, makeEnv(), {});
-    const json = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(json.sent).toBe(2);
-    expect(fcmCalls.map(c => c.message.token).sort()).toEqual(['tok-A', 'tok-B']);
-  });
-
-  it('self-push: idToken-authenticated caller can only push to own fcmToken', async () => {
-    const fetchStub = makeFetchStub();
-    defaultAuthStubs(fetchStub);
-    fetchStub.on(/ipear_customers\/uid-user-1(?!\?)/, () =>
-      jsonResponse({ fields: { fcmToken: { stringValue: 'my-own-token' } } })
-    );
-    const fcmCalls = [];
-    fetchStub.on('fcm.googleapis.com/v1/projects/test-project/messages:send', ({ opts }) => {
-      fcmCalls.push(JSON.parse(opts.body));
-      return jsonResponse({ name: 'sent' });
-    });
-    globalThis.fetch = fetchStub;
-
-    const req = makeRequest('/push', {
-      body: {
-        idToken: 'tok',
-        // Attacker tries to aim at someone else — must be ignored.
-        tokens: ['victim-token-A', 'victim-token-B'],
-        title: 'Hi', message: 'Test'
-      }
-    });
-    const res = await worker.fetch(req, makeEnv(), {});
-    const json = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(json.sent).toBe(1);
-    expect(fcmCalls.length).toBe(1);
-    expect(fcmCalls[0].message.token).toBe('my-own-token');
-  });
-
-  it('rejects calls with neither admin secret nor idToken', async () => {
-    const fetchStub = makeFetchStub();
-    globalThis.fetch = fetchStub;
-    const req = makeRequest('/push', { body: { tokens: ['x'], title: 'Hi' } });
-    const res = await worker.fetch(req, makeEnv(), {});
-    expect(res.status).toBe(401);
-  });
-
-  it('rejects self-push when caller has no fcmToken on file', async () => {
-    const fetchStub = makeFetchStub();
-    defaultAuthStubs(fetchStub);
-    fetchStub.on(/ipear_customers\/uid-user-1(?!\?)/, () =>
-      jsonResponse({ fields: { /* no fcmToken */ } })
-    );
-    globalThis.fetch = fetchStub;
-    const req = makeRequest('/push', { body: { idToken: 'tok', title: 'Hi' } });
-    const res = await worker.fetch(req, makeEnv(), {});
-    expect(res.status).toBe(400);
-  });
-});
+// Note: the /push endpoints (admin broadcast + idToken self-push) were removed
+// on 2026-07-31 when the app dropped push notifications (see email-worker.js
+// header comment). Their tests were deleted here in the prod-v2.7.0 lineage.
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Admin-gated endpoints reject anonymous calls
