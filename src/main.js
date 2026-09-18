@@ -1358,21 +1358,31 @@ async function _retryPendingBonuses(c) {
   const needsWelcome  = c.marketingOptIn === true && c.marketingWelcomeProcessed !== true;
   const needsReferral = !!c.referredBy && c.referralProcessed !== true;
   if (!needsWelcome && !needsReferral) return;
+  // Observe the retry outcome instead of silently discarding it, so a
+  // persistently-failing bonus is visible in logs (idempotent server-side,
+  // so re-firing is always safe — it no-ops once the flag flips).
+  const _observe = (label, p) => p.then(async (r) => {
+    let ok = r.ok, reason = '';
+    try { const d = await r.clone().json(); if (d && d.ok === false) { ok = false; reason = d.error || d.reason || ''; } else if (d && d.reason) { reason = d.reason; } } catch (_) {}
+    if (!ok) logger.warn(`[retry-bonuses] ${label} not credited:`, r.status, reason);
+    else logger.log(`[retry-bonuses] ${label} ok`, reason ? '(' + reason + ')' : '');
+  }).catch((e) => logger.warn(`[retry-bonuses] ${label} network error:`, e?.message || e));
+
   try {
     const idToken = await authUser.getIdToken(true);
     if (needsWelcome) {
-      fetch(_WORKER_URL + '/send-welcome', {
+      _observe('welcome', fetch(_WORKER_URL + '/send-welcome', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken, name: c.name || '', marketingOptIn: true }),
-      }).catch(() => {});
+      }));
     }
     if (needsReferral) {
-      fetch(_WORKER_URL + '/process-referral', {
+      _observe('referral', fetch(_WORKER_URL + '/process-referral', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken }),
-      }).catch(() => {});
+      }));
     }
   } catch (e) {
     logger.warn('[retry-bonuses] idToken failed:', e?.message || e);
