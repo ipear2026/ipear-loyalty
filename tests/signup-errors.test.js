@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   SIGNUP_STAGE, SIGNUP_MSG, classifySignupError, buildSignupLog, makeCorrelationId,
+  LOGIN_MSG, classifyLoginLookupError,
 } from '../src/customer/signup-errors.js';
 
 const ONLINE = { online: true };
@@ -105,6 +106,29 @@ describe('buildSignupLog — redaction', () => {
     for (const forbidden of ['email', 'phone', 'password', 'otp', 'code ', 'name', 'token']) {
       expect(keys.includes(forbidden)).toBe(false);
     }
+  });
+});
+
+describe('classifyLoginLookupError — login-appropriate messages', () => {
+  it('App Check failure → security message, NOT "can\'t reach database"', () => {
+    const r = classifyLoginLookupError({ code: 'appCheck/fetch-status-error' }, { online: true });
+    expect(r.category).toBe('E-appcheck');
+    expect(r.userMsg).toBe(LOGIN_MSG.APPCHECK);
+    expect(r.userMsg).not.toMatch(/βάση/);
+  });
+  it('Firestore unavailable → database message', () => {
+    const r = classifyLoginLookupError({ code: 'unavailable' }, { online: true });
+    expect(r.category).toBe('F-firestore');
+    expect(r.userMsg).toBe(LOGIN_MSG.DATABASE);
+  });
+  it('offline → offline message', () => {
+    const r = classifyLoginLookupError({ code: 'unavailable' }, { online: false });
+    expect(r.category).toBe('G-offline');
+    expect(r.userMsg).toBe(LOGIN_MSG.OFFLINE);
+  });
+  it('network/unknown → network message', () => {
+    const r = classifyLoginLookupError({ message: 'Failed to fetch', name: 'TypeError' }, { online: true });
+    expect(r.userMsg).toBe(LOGIN_MSG.NETWORK);
   });
 });
 

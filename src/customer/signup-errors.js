@@ -108,6 +108,34 @@ export function classifySignupError(stage, err, opts = {}) {
   return out('A-network', SIGNUP_MSG.NETWORK, code || 'unknown');
 }
 
+// Login-lookup messages — the customer-doc read after a successful sign-in.
+// findCustomerByAuth already swallows permission-denied (treated as "no
+// account"), so a bubbled error is always connectivity/security, never a
+// missing document. Never say "can't reach database" for an App Check failure.
+export const LOGIN_MSG = {
+  OFFLINE:  'Φαίνεται πως είσαι εκτός σύνδεσης. Έλεγξε το internet και δοκίμασε ξανά.',
+  NETWORK:  'Δεν μπορούμε να συνδεθούμε στην υπηρεσία τώρα. Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά.',
+  APPCHECK: 'Η επαλήθευση ασφαλείας απέτυχε. Απενεργοποίησε προσωρινά ad blocker/VPN και δοκίμασε ξανά.',
+  DATABASE: 'Προσωρινό πρόβλημα με τη βάση. Δοκίμασε ξανά σε λίγο.',
+};
+
+/**
+ * Classify the transient error from the post-login customer-doc lookup.
+ * Returns { category, code, title, userMsg } with a login-appropriate message.
+ */
+export function classifyLoginLookupError(err, opts = {}) {
+  const c = classifySignupError('login-lookup', err, opts);
+  let userMsg, title;
+  switch (c.category) {
+    case 'G-offline':  userMsg = LOGIN_MSG.OFFLINE;  title = 'Πρόβλημα σύνδεσης'; break;
+    case 'E-appcheck': userMsg = LOGIN_MSG.APPCHECK; title = 'Έλεγχος ασφαλείας'; break;
+    case 'F-firestore':userMsg = LOGIN_MSG.DATABASE; title = 'Προσωρινό πρόβλημα'; break;
+    case 'A-server':   userMsg = LOGIN_MSG.DATABASE; title = 'Προσωρινό πρόβλημα'; break;
+    default:           userMsg = LOGIN_MSG.NETWORK;  title = 'Πρόβλημα σύνδεσης';
+  }
+  return { category: c.category, code: c.code, title, userMsg };
+}
+
 /** Short, non-identifying correlation id for tying a UI failure to a log line. */
 export function makeCorrelationId() {
   try {

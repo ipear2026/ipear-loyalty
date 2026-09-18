@@ -3,6 +3,7 @@ import { state } from './state.js';
 import { showToast, _trackEvent, _WORKER_URL } from './utils.js';
 import {
   SIGNUP_STAGE, classifySignupError, buildSignupLog, makeCorrelationId,
+  classifyLoginLookupError,
 } from './customer/signup-errors.js';
 
 // Correlation id for the current signup attempt — set at submitRegister, reused
@@ -365,7 +366,8 @@ export async function autoLogin(email) {
         logger.warn('[auto-login] lookup error:', lookup.error);
         const cached = _getCachedCustomer();
         if (cached) { state.foundCustomer = cached; _transitionToApp(); return; }
-        showToast('⚠️ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
+        const cls = classifyLoginLookupError(lookup.error);
+        showToast('⚠️ ' + cls.userMsg, 'red');
         showScreen('s-phone'); _initCheckboxStyle(); return;
       }
       localStorage.removeItem(_REM_KEY); localStorage.removeItem(_CACHE_KEY); showScreen('s-phone'); _initCheckboxStyle(); return;
@@ -1147,11 +1149,14 @@ export async function submitPhone() {
       //     bypasses rules). Confirm with the worker BEFORE doing the
       //     destructive sign-out + offline-card wipe.
       if (lookup.error) {
-        _renderErr(err, {
-          icon: '⚠️', kind: 'warn',
-          title: 'Σφάλμα σύνδεσης',
-          body: 'Δεν μπορούμε να φτάσουμε στη βάση τώρα. Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά.'
-        });
+        // Classify the transient lookup failure — App Check / offline /
+        // network / Firestore-unavailable get distinct, accurate messages
+        // instead of a blanket "can't reach database".
+        const cls = classifyLoginLookupError(lookup.error);
+        logger.error('[login]', JSON.stringify(buildSignupLog('login-lookup', cls, {
+          appCheckStatus: (typeof window !== 'undefined' ? window._appCheckStatus : '') || 'unknown',
+        })));
+        _renderErr(err, { icon: '⚠️', kind: 'warn', title: cls.title, body: cls.userMsg });
         btn.disabled = false; btn.innerHTML = 'Είσοδος →'; return;
       }
 
