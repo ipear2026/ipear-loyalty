@@ -45,8 +45,13 @@ export async function copyReferral() {
 
 export async function shareReferral() {
   const code = state.foundCustomer?.card || '';
-  const basePath = window.location.pathname.includes('customer') ? window.location.pathname : '/customer.html';
-  const appUrl = window.location.origin + basePath + '?ref=' + encodeURIComponent(code);
+  // Referral links must ALWAYS point at the canonical production origin.
+  // Building from window.location.origin let a session opened on the
+  // Cloudflare Pages default domain (ipear-loyalty.pages.dev) share
+  // pages.dev referral links; and the /customer.html base path just added a
+  // redirect hop. Hardcode the canonical root so every shared link is
+  // https://loyalty.ipear.gr/?ref=IP-XXXXXX regardless of where it's shared.
+  const appUrl = 'https://loyalty.ipear.gr/?ref=' + encodeURIComponent(code);
   const text = `Εγγράψου στο iPear Loyalty και κέρδισε πόντους σε κάθε αγορά! 🎁\n\nΆνοιξε τον σύνδεσμο παρακάτω — ο κωδικός παραπομπής ${code} θα συμπληρωθεί αυτόματα!\n\n🔗 ${appUrl}`;
   if (navigator.share) {
     try {
