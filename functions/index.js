@@ -155,19 +155,29 @@ exports.validateBirthdayClaim = onDocumentCreated(
 //  Rebuilds ipear_leaderboard/latest so all customer apps get live updates
 //  via their existing onSnapshot listener.
 //
-//  Guard: only rebuilds when totalPoints actually changed (skips name edits etc.)
-//  Debounce: uses a 2-second write-coalesce via Firestore's own batching
+//  Guard: rebuilds on create/delete, or when totalPoints actually changed
+//  (skips name/phone edits). A DELETION always rebuilds so a removed customer
+//  cannot linger in the published snapshot.
 // ══════════════════════════════════════════════════════════════════════════
+
+// Pure decision predicate lives in ./lib/leaderboard-logic.js (dep-free,
+// unit-tested). See tests/leaderboard-logic.test.js.
+const { shouldRepublishLeaderboard } = require("./lib/leaderboard-logic");
+
 exports.autoPublishLeaderboard = onDocumentWritten(
   "ipear_customers/{customerId}",
   async (event) => {
     const before = event.data?.before?.data();
     const after = event.data?.after?.data();
 
-    // Skip if totalPoints didn't change (name edit, phone update, etc.)
-    const ptsBefore = before?.totalPoints ?? -1;
-    const ptsAfter = after?.totalPoints ?? -1;
-    if (ptsBefore === ptsAfter) return;
+    // A customer DELETION must ALWAYS refresh the published leaderboard so the
+    // removed customer can never linger in ipear_leaderboard/latest. (Bug: a
+    // deleted doc has after=undefined -> ptsAfter=-1; a doc lacking a
+    // totalPoints field gave ptsBefore=-1 too, so ptsBefore===ptsAfter skipped
+    // the republish and the deleted customer stayed visible until an unrelated
+    // write happened to re-trigger a publish.) Decision extracted to a pure,
+    // unit-tested helper.
+    if (!shouldRepublishLeaderboard(before, after)) return;
 
     try {
       // Query top 20 non-blocked customers ordered by totalPoints
