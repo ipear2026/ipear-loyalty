@@ -15,6 +15,25 @@ export function registerServiceWorker() {
   sessionStorage.removeItem('ipear_sw_reloading');
 
   window.addEventListener('load', () => {
+    // Compatibility cleanup: older builds registered a service worker at
+    // `/sw.js`, which no longer exists — Cloudflare Pages now answers that
+    // path with the SPA fallback (text/html), so the browser's periodic
+    // update of the stale registration fails with
+    // "unsupported MIME type ('text/html')". Unregister ONLY that obsolete
+    // `/sw.js` registration; never touch the active `sw-customer.js` one, so
+    // there is no cache/data loss and no overlapping workers.
+    try {
+      navigator.serviceWorker.getRegistrations().then((regs) => {
+        for (const reg of regs) {
+          const url = (reg.active || reg.waiting || reg.installing)?.scriptURL || '';
+          if (/\/sw\.js(\?|$)/.test(url) && !url.includes('sw-customer.js')) {
+            reg.unregister().then((ok) => logger.log('[SW] removed stale /sw.js registration:', ok))
+                            .catch((e) => logger.warn('[SW] stale /sw.js unregister failed:', e?.message || e));
+          }
+        }
+      }).catch(() => {});
+    } catch (_) { /* never block SW boot on cleanup */ }
+
     navigator.serviceWorker.register('sw-customer.js')
       .then(reg => {
         if (reg.waiting) {

@@ -1,6 +1,42 @@
 import { logger } from './logger.js';
 import { state } from './state.js';
 import { showToast, _trackEvent, _WORKER_URL } from './utils.js';
+import {
+  SIGNUP_STAGE, classifySignupError, buildSignupLog, makeCorrelationId,
+} from './customer/signup-errors.js';
+
+// Correlation id for the current signup attempt — set at submitRegister, reused
+// through the OTP + finalization steps so a UI failure ties to one log line.
+let _signupCid = null;
+
+// Emit a redacted signup-failure diagnostic: console + a best-effort beacon to
+// the Worker /client-error sink (already CSP-allowed). Never sends PII/secrets.
+function _reportSignupFailure(stage, err, extra = {}) {
+  let classified;
+  try {
+    classified = classifySignupError(stage, err, {
+      httpStatus: extra.httpStatus,
+      appCheckStatus: (typeof window !== 'undefined' ? window._appCheckStatus : '') || '',
+    });
+  } catch (_) {
+    classified = { category: 'A-network', userMsg: 'Δεν υπάρχει σύνδεση με την υπηρεσία. Έλεγξε τη σύνδεσή σου και προσπάθησε ξανά.', code: 'classify-failed', httpStatus: 0 };
+  }
+  const rec = buildSignupLog(stage, classified, {
+    httpStatus: extra.httpStatus,
+    appCheckStatus: (typeof window !== 'undefined' ? window._appCheckStatus : '') || 'unknown',
+    cid: _signupCid,
+  });
+  logger.error('[signup]', JSON.stringify(rec));
+  try {
+    const body = JSON.stringify({ type: 'signup_failure', ...rec });
+    if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+      navigator.sendBeacon(_WORKER_URL + '/client-error', body);
+    } else if (typeof fetch === 'function') {
+      fetch(_WORKER_URL + '/client-error', { method: 'POST', body, headers: { 'Content-Type': 'application/json' }, keepalive: true }).catch(() => {});
+    }
+  } catch (_) { /* diagnostics must never break signup */ }
+  return classified;
+}
 import { _t } from './i18n.js';
 // Q-2 fix: static import for synchronous cleanup on logout. Circular import
 // is safe here because logout() runs long after both modules have loaded.
@@ -861,15 +897,30 @@ export async function submitRegister() {
     }
 
     _regData = { name, phone, email, password: p1, birthday, refCode, marketingOptIn };
+    _signupCid = makeCorrelationId();
 
     btn.innerHTML = '<div class="spin"></div> Αποστολή SMS…';
-    const _otpRes = await fetch(_WORKER_URL + '/send-sms-otp', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone }),
-    });
-    const _otpData = await _otpRes.json();
-    if (!_otpRes.ok) throw new Error(_otpData.error || 'Αποτυχία αποστολής SMS');
+    let _otpRes;
+    try {
+      _otpRes = await fetch(_WORKER_URL + '/send-sms-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone }),
+      });
+    } catch (netErr) {
+      // fetch threw = network/CORS/offline reaching the Worker.
+      const cls = _reportSignupFailure(SIGNUP_STAGE.SEND_OTP, netErr);
+      err.textContent = '❌ ' + cls.userMsg;
+      btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
+    }
+    const _otpData = await _otpRes.json().catch(() => ({}));
+    if (!_otpRes.ok) {
+      const smsErr = new Error(_otpData.error || 'send-sms-otp failed');
+      smsErr.httpStatus = _otpRes.status;
+      const cls = _reportSignupFailure(SIGNUP_STAGE.SEND_OTP, smsErr, { httpStatus: _otpRes.status });
+      err.textContent = '❌ ' + cls.userMsg;
+      btn.disabled = false; btn.innerHTML = 'Εγγραφή →'; return;
+    }
 
     localStorage.setItem(_smsPhoneKey, _now.toString());
     localStorage.setItem(_smsGlobalKey, JSON.stringify([..._globalLog, _now]));
@@ -882,8 +933,9 @@ export async function submitRegister() {
     setTimeout(() => document.getElementById('otp-input').focus(), 300);
 
   } catch(e) {
-    logger.error('[register] ❌ SMS error:', e.message, e);
-    err.textContent = '❌ ' + (e.message || 'Σφάλμα αποστολής SMS. Δοκίμασε ξανά.');
+    // Unexpected throw in the pre-OTP path — classify instead of guessing "internet".
+    const cls = _reportSignupFailure(SIGNUP_STAGE.SEND_OTP, e);
+    err.textContent = '❌ ' + cls.userMsg;
   }
   btn.disabled = false; btn.innerHTML = 'Εγγραφή →';
 }
@@ -929,8 +981,13 @@ export async function submitOTP() {
       // from prior admin deletions (no Firestore record, but Auth still locked).
       body: JSON.stringify({ phone: _regData.phone, code, email: _regData.email }),
     });
-    const vData = await vRes.json();
-    if (!vRes.ok) throw new Error(vData.error || 'Λάθος κωδικός');
+    const vData = await vRes.json().catch(() => ({}));
+    if (!vRes.ok) {
+      const vErr = new Error(vData.error || 'verify-sms-otp failed');
+      vErr._stage = SIGNUP_STAGE.VERIFY_OTP;
+      vErr.httpStatus = vRes.status;
+      throw vErr;
+    }
 
     if (window._setPersistenceMode) await window._setPersistenceMode('local');
     const authResult = await window._createUser(window._auth, _regData.email, _regData.password);
@@ -954,12 +1011,14 @@ export async function submitOTP() {
     _regData = null;
 
   } catch(e) {
-    logger.error('[brevo-otp] verify error:', e.code || '', e.message);
-    if (e.code === 'auth/email-already-in-use') {
-      err.textContent = '❌ Υπάρχει ήδη λογαριασμός με αυτό το email. Χρησιμοποίησε την Είσοδο.';
-    } else {
-      err.textContent = '❌ ' + (e.message || 'Σφάλμα επαλήθευσης');
-    }
+    // Classify by the stage that actually failed so we never show a generic
+    // "internet" message for an Auth / App Check / Firestore / OTP failure.
+    const stage = e && e._stage ? e._stage
+      : (typeof e?.code === 'string' && e.code.startsWith('auth/')) ? SIGNUP_STAGE.AUTH_CREATE
+      : (e && e.cause) ? SIGNUP_STAGE.FIRESTORE_CREATE
+      : SIGNUP_STAGE.AUTH_CREATE;
+    const cls = _reportSignupFailure(stage, e, { httpStatus: e?.httpStatus });
+    err.textContent = '❌ ' + cls.userMsg;
     btn.disabled = false; btn.innerHTML = 'Επαλήθευση →';
   }
 }
