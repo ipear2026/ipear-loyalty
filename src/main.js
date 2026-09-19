@@ -13,6 +13,7 @@ import {
 } from './utils.js';
 import { _t } from './i18n.js';
 import { registerServiceWorker } from './sw-registration.js';
+import { pendingBonuses } from './customer/bonus-retry.js';
 import './firebase-init.js';
 import {
   renderHomeRewards, renderRewardsList,
@@ -1355,9 +1356,8 @@ export async function startApp() {
 async function _retryPendingBonuses(c) {
   const authUser = window._auth?.currentUser;
   if (!authUser) return;
-  const needsWelcome  = c.marketingOptIn === true && c.marketingWelcomeProcessed !== true;
-  const needsReferral = !!c.referredBy && c.referralProcessed !== true;
-  if (!needsWelcome && !needsReferral) return;
+  const { needsWelcome, needsReferral, any } = pendingBonuses(c);
+  if (!any) return;
   // Observe the retry outcome instead of silently discarding it, so a
   // persistently-failing bonus is visible in logs (idempotent server-side,
   // so re-firing is always safe — it no-ops once the flag flips).
