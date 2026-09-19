@@ -1894,6 +1894,56 @@ async function handleRedeemAttempt(request, env, CORS) {
 //  Καλείται αυτόματα όταν ο admin διαγράφει customer από το
 //  admin panel, ώστε ο customer να μπορεί να ξαναεγγραφεί με το ίδιο email/phone.
 // ══════════════════════════════════════════════════════════════════════════
+// GDPR Art.17 — anonymize personal identifiers left in ipear_redemption_requests
+// after a customer is deleted. This collection denies ALL client writes in
+// firestore.rules ("allow create, update, delete: if false"), so the admin app's
+// delete cascade cannot touch it — anonymization MUST happen server-side here,
+// with the service-account token. Business/financial history is preserved
+// (rewardCost, rewardLabel, status, ledgerId, points, timestamps, store/staff
+// uids); only the deleted customer's own identifiers are scrubbed. Best-effort:
+// never blocks the Auth deletion.
+async function _anonymizeRedemptionRequestsForUid(uid, accessToken, projectId) {
+  if (!uid || !projectId) return { anonymized: 0 };
+  const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+  const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+  const docNames = new Set();
+  // redemption_requests carries the customer's uid in BOTH customerUid and
+  // customerId; query each so legacy rows keyed on either are caught.
+  for (const field of ['customerUid', 'customerId']) {
+    const q = await fetch(`${fsBase}:runQuery`, {
+      method: 'POST', headers: fsHeaders,
+      body: JSON.stringify({ structuredQuery: {
+        from: [{ collectionId: 'ipear_redemption_requests' }],
+        where: { fieldFilter: { field: { fieldPath: field }, op: 'EQUAL', value: { stringValue: uid } } },
+        limit: 500,
+      }})
+    });
+    if (!q.ok) continue;
+    const rows = await q.json();
+    for (const r of rows) { if (r.document && r.document.name) docNames.add(r.document.name); }
+  }
+  if (!docNames.size) return { anonymized: 0 };
+  const nowIso = new Date().toISOString();
+  const writes = [...docNames].map(name => ({
+    update: {
+      name,
+      fields: {
+        customerId:    { stringValue: '[DELETED]' },
+        customerUid:   { stringValue: '[DELETED]' },
+        _anonymizedAt: { stringValue: nowIso },
+      }
+    },
+    updateMask: { fieldPaths: ['customerId', 'customerUid', '_anonymizedAt'] },
+    currentDocument: { exists: true },
+  }));
+  const commitRes = await fetch(`${fsBase}:commit`, {
+    method: 'POST', headers: fsHeaders,
+    body: JSON.stringify({ writes }),
+  });
+  if (!commitRes.ok) throw new Error('anon commit failed: ' + commitRes.status + ' ' + await commitRes.text());
+  return { anonymized: writes.length };
+}
+
 async function handleDeleteAuthUser(request, env, CORS) {
   let body;
   try { body = await readJsonCapped(request, 32 * 1024); }
@@ -1980,6 +2030,19 @@ async function handleDeleteAuthUser(request, env, CORS) {
       }
       deletedUid = lookup.uid;
       console.log('[delete-auth-user] email fallback resolved uid=' + lookup.uid + ' for ' + email);
+    }
+
+    // GDPR Art.17: scrub the deleted customer's identifiers from
+    // ipear_redemption_requests (client/admin cannot — rules deny writes there).
+    // Best-effort: a failure is logged but never fails the deletion, and the
+    // customer's Auth + other docs are already gone.
+    if (deletedUid) {
+      try {
+        const anon = await _anonymizeRedemptionRequestsForUid(deletedUid, accessToken, env.FCM_PROJECT_ID);
+        if (anon.anonymized) console.log('[delete-auth-user] anonymized redemption_requests x' + anon.anonymized + ' for uid=' + deletedUid);
+      } catch (e) {
+        console.error('[delete-auth-user] redemption_requests anonymization failed (non-fatal):', e.message);
+      }
     }
 
     if (!deletedUid) return resp({ success: true, notFound: true }, 200, CORS);

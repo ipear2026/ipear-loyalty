@@ -257,3 +257,74 @@ describe('admin-gated endpoints', () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  /admin/delete-auth-user — GDPR Art.17 redemption_requests anonymization
+//  (redemption_requests denies all client writes in firestore.rules, so the
+//   deleted customer's identifiers must be scrubbed server-side here.)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('/admin/delete-auth-user — redemption_requests anonymization', () => {
+  it('deletes the Auth user AND anonymizes the customer PII in redemption_requests', async () => {
+    const stub = makeFetchStub();
+    const rrName = 'projects/test-project/databases/(default)/documents/ipear_redemption_requests/req_1';
+    stub.on('oauth2.googleapis.com/token', () => jsonResponse({ access_token: 'sa-token', expires_in: 3600 }));
+    stub.on('identitytoolkit.googleapis.com/v1/accounts:delete', () => jsonResponse({}));
+    stub.on(':runQuery', () => jsonResponse([{ document: {
+      name: rrName,
+      fields: { customerUid: { stringValue: 'uid-del-1' }, customerId: { stringValue: 'uid-del-1' },
+                rewardCost: { integerValue: '-2500' }, status: { stringValue: 'approved' } },
+    } }]));
+    stub.on(':commit', () => jsonResponse({ writeResults: [{ updateTime: '2026-09-19T00:00:00Z' }] }));
+    globalThis.fetch = stub;
+
+    const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
+      body: { uid: 'uid-del-1', email: 'del@test.gr' },
+      headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv(), {});
+
+    expect(res.status).toBe(200);
+    const out = await res.json();
+    expect(out.success).toBe(true);
+    expect(out.uid).toBe('uid-del-1');
+
+    // Auth deletion happened
+    expect(stub.calls.some(c => c.url.includes('accounts:delete'))).toBe(true);
+    // A commit anonymized the redemption_requests doc
+    const commit = stub.calls.find(c => c.url.includes(':commit'));
+    expect(commit).toBeTruthy();
+    const w = JSON.parse(commit.body).writes[0];
+    expect(w.update.name).toBe(rrName);
+    expect(w.update.fields.customerId.stringValue).toBe('[DELETED]');
+    expect(w.update.fields.customerUid.stringValue).toBe('[DELETED]');
+    expect(w.update.fields._anonymizedAt.stringValue).toBeTruthy();
+    // Business/financial fields are NOT in the updateMask → preserved
+    expect(w.updateMask.fieldPaths.sort()).toEqual(['_anonymizedAt', 'customerId', 'customerUid']);
+  });
+
+  it('still succeeds (does not fail the deletion) when no redemption_requests match', async () => {
+    const stub = makeFetchStub();
+    stub.on('oauth2.googleapis.com/token', () => jsonResponse({ access_token: 'sa-token', expires_in: 3600 }));
+    stub.on('identitytoolkit.googleapis.com/v1/accounts:delete', () => jsonResponse({}));
+    stub.on(':runQuery', () => jsonResponse([{ readTime: '2026-09-19T00:00:00Z' }])); // no document field = no match
+    globalThis.fetch = stub;
+
+    const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
+      body: { uid: 'uid-del-2' },
+      headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv(), {});
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    // No commit attempted when nothing matched
+    expect(stub.calls.some(c => c.url.includes(':commit'))).toBe(false);
+  });
+
+  it('rejects without ADMIN_SECRET', async () => {
+    const stub = makeFetchStub();
+    globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
+      body: { uid: 'x' },
+    }), makeEnv(), {});
+    expect(res.status).toBe(401);
+  });
+});
