@@ -11,6 +11,9 @@ import { state } from '../src/state.js';
 describe('shareReferral — canonical origin', () => {
   beforeEach(() => {
     state.foundCustomer = { card: 'IP-FC0Z12' };
+    // The real app always has a #toast node; provide it so the clipboard
+    // fallback's showToast() call doesn't throw on a missing element.
+    document.body.innerHTML = '<div id="toast"></div>';
   });
 
   it('uses https://loyalty.ipear.gr and preserves the ref code (native share)', async () => {
