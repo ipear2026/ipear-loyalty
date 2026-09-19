@@ -38,6 +38,42 @@ function _reportSignupFailure(stage, err, extra = {}) {
   } catch (_) { /* diagnostics must never break signup */ }
   return classified;
 }
+
+// Emit a redacted BONUS-failure diagnostic for the initial (post-signup)
+// welcome / referral calls. Unlike _reportSignupFailure this NEVER surfaces a
+// user-facing message: an initial bonus failure is recoverable — the durable
+// marketingWelcomeProcessed / referralProcessed markers + _retryPendingBonuses
+// on the next login heal it, and the account is already usable. This makes the
+// initial failure OBSERVABLE (console + beacon) instead of silently swallowed,
+// with zero effect on eligibility, amounts, deterministic ids or idempotency.
+function _reportBonusIssue(stage, err, extra = {}) {
+  let classified;
+  try {
+    classified = classifySignupError(stage, err, {
+      httpStatus: extra.httpStatus,
+      appCheckStatus: (typeof window !== 'undefined' ? window._appCheckStatus : '') || '',
+    });
+  } catch (_) {
+    classified = { category: 'A-network', code: 'classify-failed', httpStatus: 0 };
+  }
+  const rec = buildSignupLog(stage, classified, {
+    httpStatus: extra.httpStatus,
+    appCheckStatus: (typeof window !== 'undefined' ? window._appCheckStatus : '') || 'unknown',
+    cid: _signupCid,
+  });
+  rec.evt = 'bonus_failure';
+  if (extra.reason) rec.reason = String(extra.reason);
+  rec.recoverable = extra.recoverable !== false; // default: retry-on-login heals it
+  logger.warn('[bonus]', JSON.stringify(rec));
+  try {
+    const body = JSON.stringify({ type: 'bonus_failure', ...rec });
+    if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+      navigator.sendBeacon(_WORKER_URL + '/client-error', body);
+    } else if (typeof fetch === 'function') {
+      fetch(_WORKER_URL + '/client-error', { method: 'POST', body, headers: { 'Content-Type': 'application/json' }, keepalive: true }).catch(() => {});
+    }
+  } catch (_) { /* diagnostics must never break the app */ }
+}
 import { _t } from './i18n.js';
 // Q-2 fix: static import for synchronous cleanup on logout. Circular import
 // is safe here because logout() runs long after both modules have loaded.
@@ -655,7 +691,10 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
           // handler only checked !d.ok, so those termination branches never
           // surfaced anything and the customer thought they got the bonus.
           if (!d.ok) {
-            logger.warn('[referral] worker error:', d.error || 'unknown');
+            // Worker returned ok:false — recoverable via retry-on-login.
+            _reportBonusIssue(SIGNUP_STAGE.PROCESS_REFERRAL,
+              new Error('process-referral not-ok: ' + (d.error || 'unknown')),
+              { reason: d.error || 'not-ok' });
             return;
           }
           if (d.reason === 'referral-limit-reached') {
@@ -684,7 +723,12 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
           }
           if (d.reason === 'already-processed') return;
           if (typeof loadHistory === 'function') setTimeout(loadHistory, 500);
-        }).catch(e => logger.warn('[referral] worker call failed:', e.message));
+        }).catch(e => {
+          // Transient /process-referral network failure — recoverable: the
+          // queue entry persists and _retryPendingBonuses re-fires on next
+          // login. Observable, no scary toast.
+          _reportBonusIssue(SIGNUP_STAGE.PROCESS_REFERRAL, e, { reason: 'worker-call-failed' });
+        });
       } catch(e) {
         // Queue setDoc rejected (rules mismatch, App Check, network) — the
         // customer has referredBy on their doc but no queue entry, so every
@@ -692,6 +736,9 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
         // loudly and tell the customer the +100 didn't land so support can
         // credit manually if needed.
         logger.error('[referral] queue create FAILED — bonus lost:', e?.code || '', e?.message || e);
+        // Definitive: without a queue entry, retry-on-login cannot heal this,
+        // so we DO inform the customer AND emit a non-recoverable diagnostic.
+        _reportBonusIssue(SIGNUP_STAGE.PROCESS_REFERRAL, e, { reason: 'queue-create-failed', recoverable: false });
         showToast('⚠️ Το bonus των 100 πόντων παραπομπής δεν καταχωρήθηκε — επικοινώνησε με το κατάστημα', 'red');
       }
     })();
@@ -715,9 +762,15 @@ async function _finishRegistration(authUser, { name, phone, email, card, birthda
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken, name, marketingOptIn: !!marketingOptIn }),
       });
-      if (!res.ok) logger.warn('[welcome] failed:', res.status);
+      if (!res.ok) {
+        // Non-fatal: retry-on-login re-fires /send-welcome (idempotent via the
+        // marketingWelcomeProcessed marker). Make it observable, not silent.
+        const httpErr = new Error('send-welcome HTTP ' + res.status);
+        httpErr.httpStatus = res.status;
+        _reportBonusIssue(SIGNUP_STAGE.WELCOME, httpErr, { httpStatus: res.status });
+      }
     } catch (e) {
-      logger.warn('[welcome] error:', e.message);
+      _reportBonusIssue(SIGNUP_STAGE.WELCOME, e);
     }
   })();
 

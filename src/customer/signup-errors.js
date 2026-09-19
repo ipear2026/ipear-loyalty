@@ -25,6 +25,7 @@ export const SIGNUP_STAGE = {
   AUTH_CREATE:      'auth-create',
   FIRESTORE_CREATE: 'firestore-create',
   WELCOME:          'send-welcome',
+  PROCESS_REFERRAL: 'process-referral',
 };
 
 // Clear, non-generic Greek user messages. Only the OFFLINE / NETWORK ones
