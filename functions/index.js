@@ -4,6 +4,7 @@ const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 const { createHash } = require("node:crypto");
+const { canonicalOfferCredit } = require("./lib/offer-credit");
 
 initializeApp();
 const db = getFirestore();
@@ -955,10 +956,37 @@ async function _approveRedemptionHandler(request) {
         ledgerType = "redeem";
         ledgerPointsDelta = -cost;
       } else if (req.type === "offer_credit") {
-        const bonus = -cost; // stored as negative
-        if (!Number.isInteger(bonus) || bonus <= 0) {
-          throw new HttpsError("failed-precondition", "Invalid bonus points.");
+        // SEC-H1: the credited amount MUST be derived from the authoritative
+        // ipear_offers doc — never from the customer-created offer_redemption
+        // or the request-captured rewardCost (a customer can mint an
+        // offer_redemption with a real offerId but an inflated bonusPoints up
+        // to the rules cap of 2500). Re-read the offer inside the transaction
+        // and reject on any mismatch (fail-closed, same as reward cost-drift).
+        // `red` is the offer_redemption doc (non-card path). offerId normally
+        // holds the offer doc id, with a legacy fallback to the offer title.
+        const offerId = (red && red.offerId) || null;
+        let offerData = null;
+        if (offerId) {
+          const offerSnap = await txn.get(db.collection("ipear_offers").doc(offerId));
+          if (offerSnap.exists) {
+            offerData = offerSnap.data();
+          } else {
+            const offerQ = await txn.get(
+              db.collection("ipear_offers").where("title", "==", offerId).limit(1),
+            );
+            if (!offerQ.empty) offerData = offerQ.docs[0].data();
+          }
         }
+        const decision = canonicalOfferCredit(offerData, req.rewardCost);
+        if (!decision.ok) {
+          throw new HttpsError(
+            "failed-precondition",
+            decision.reason === "value-mismatch"
+              ? "Offer value changed since the scan — please re-scan."
+              : "Offer not eligible.",
+          );
+        }
+        const bonus = decision.canonicalBonus; // server-derived, authoritative
         newPoints = newPoints + bonus;
         newTotalPoints = newTotalPoints + bonus;
         ledgerType = "add";
