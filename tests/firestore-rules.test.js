@@ -400,3 +400,64 @@ describe('ipear_redemptions: CREATE — hybrid rule', () => {
     ));
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+//  SEC-M1 — ipear_transactions: READ object-level authorization
+//
+//  The uid branches are authoritative (own-uid read is fine). The
+//  customerEmail branch MUST require verified auth (email_verified or a phone
+//  identity) so an UNVERIFIED account registered with a legacy customer's email
+//  cannot read that customer's point ledger.
+// ═════════════════════════════════════════════════════════════════════════
+describe('SEC-M1 — ipear_transactions READ authorization', () => {
+  const VICTIM_UID = 'victim-uid';
+  const VICTIM_EMAIL = 'victim@test.gr';
+
+  async function seedVictimTx() {
+    await seed('ipear_transactions/tx-victim-1', {
+      customerUid: VICTIM_UID,
+      customerId: VICTIM_UID,
+      customerEmail: VICTIM_EMAIL,
+      type: 'add',
+      points: 500,
+      date: new Date().toISOString(),
+    });
+  }
+
+  it('owner reads OWN transaction by uid (verified) → allowed', async () => {
+    await seedVictimTx();
+    const owner = testEnv.authenticatedContext(VICTIM_UID, { email: VICTIM_EMAIL, email_verified: true });
+    await assertSucceeds(getDoc(doc(owner.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('owner reads OWN transaction by uid even if UNVERIFIED → allowed (uid is authoritative)', async () => {
+    await seedVictimTx();
+    const owner = testEnv.authenticatedContext(VICTIM_UID, { email_verified: false });
+    await assertSucceeds(getDoc(doc(owner.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('owner reads OWN transaction via VERIFIED email match → allowed', async () => {
+    await seedVictimTx();
+    // Different uid, but verified email == the tx customerEmail.
+    const owner = testEnv.authenticatedContext('legacy-owner-uid', { email: VICTIM_EMAIL, email_verified: true });
+    await assertSucceeds(getDoc(doc(owner.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('ATTACK: UNVERIFIED account with the victim email reads victim tx → DENIED', async () => {
+    await seedVictimTx();
+    const attacker = testEnv.authenticatedContext('attacker-uid', { email: VICTIM_EMAIL, email_verified: false });
+    await assertFails(getDoc(doc(attacker.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('cross-customer read by a different verified user (different uid + email) → DENIED', async () => {
+    await seedVictimTx();
+    const other = testEnv.authenticatedContext('other-uid', { email: 'other@test.gr', email_verified: true });
+    await assertFails(getDoc(doc(other.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('unauthenticated read → DENIED', async () => {
+    await seedVictimTx();
+    const anon = testEnv.unauthenticatedContext();
+    await assertFails(getDoc(doc(anon.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+});

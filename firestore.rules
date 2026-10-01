@@ -251,13 +251,21 @@ service cloud.firestore {
     match /ipear_transactions/{txId} {
       // READ ── admin sees all; customer sees only own transactions,
       // matched on customerUid OR customerId == auth.uid OR customerEmail.
-      allow read: if isAdmin() || (
-        isAuth() && (
-          resource.data.customerUid   == request.auth.uid ||
-          resource.data.customerId    == request.auth.uid ||
-          resource.data.customerEmail == request.auth.token.email
-        )
-      );
+      // SEC-M1: uid branches stay on isAuth() (uid is authoritative and its
+      // binding is already verified-email-gated via isUidBindOnly()). The
+      // customerEmail branch MUST require isVerifiedAuth() — otherwise an
+      // attacker who registers an unverified Firebase Auth account with a
+      // legacy customer's email (no Auth account of their own) could read that
+      // customer's entire point ledger. Email verification here is an
+      // ADDITIONAL condition on top of the email-ownership match, never a
+      // substitute for ownership. Consistent with ownsCustomer() / HIGH-1.
+      allow read: if isAdmin() ||
+        (isAuth() && (
+          resource.data.customerUid == request.auth.uid ||
+          resource.data.customerId  == request.auth.uid
+        )) ||
+        (isVerifiedAuth() &&
+          resource.data.customerEmail == request.auth.token.email);
 
       // WRITE ── admin only. The tablet/admin app authenticates as an
       // admin UID before issuing any point credit/debit transaction.
