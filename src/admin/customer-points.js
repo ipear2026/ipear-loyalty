@@ -22,6 +22,8 @@ import { logger } from '../logger.js';
 import { authState } from './auth-state.js';
 import { toast, closeM } from './ui.js';
 import { publishLeaderboard as _publishLeaderboard } from './leaderboard.js';
+// ADMIN FORTRESS Stage 1 — server-authoritative path (feature-flagged, OFF by default).
+import { isServerFinancialEnabled, serverAdjustPoints, newIdempotencyKey } from './financial-mutations.js';
 
 const DB = () => window._db;
 
@@ -78,6 +80,40 @@ export async function confirmAdd() {
   if (!Number.isFinite(amt)) { toast('⚠️ Μη έγκυρο ποσό','error'); _txnBusy = false; return; }
   if (amt > 5000) { toast('⚠️ Μέγιστο ποσό αγοράς: 5.000€','error'); _txnBusy = false; return; }
   if (amt > 500 && !confirm(`⚠️ Ποσό ${amt.toLocaleString('el-GR')}€ — Σίγουρα;`)) { _txnBusy = false; return; }
+
+  // ── ADMIN FORTRESS Stage 1 — server-authoritative path (feature-flagged) ──
+  //    When enabled, submit an INTENT to the adminAdjustPoints callable; the
+  //    server resolves the customer, computes the balance, and writes the
+  //    ledger + immutable audit row. Mutually exclusive with the legacy path.
+  if (isServerFinancialEnabled()) {
+    const addBtnS = document.querySelector('#m-add .btn-green');
+    if (addBtnS) { addBtnS.disabled = true; addBtnS.textContent = '⏳'; }
+    try {
+      const r = await serverAdjustPoints({
+        customerId: cid,
+        operation: 'add',
+        amount: pts,
+        reason: (cat || 'manual-add') + (note ? (' — ' + note) : ''),
+        idempotencyKey: newIdempotencyKey(),
+      });
+      const np = Number(r && r.newPoints);
+      if (Number.isFinite(np)) {
+        cdata.points = np;
+        cdata.totalPoints = (cdata.totalPoints || 0) + pts;
+      }
+      _hooks.renderCust(cdata);
+      toast(`✅ +${pts} πόντοι για ${cdata.name}`, 'success'); closeM();
+      _publishLeaderboard();
+    } catch (e) {
+      logger.warn('[confirmAdd:server] failed:', e?.message);
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+    } finally {
+      _txnBusy = false;
+      if (addBtnS) { addBtnS.disabled = false; addBtnS.textContent = '✅ Καταχώρηση'; }
+    }
+    return; // never fall through to the legacy direct-write path
+  }
+
   const db=DB();
   const addBtn = document.querySelector('#m-add .btn-green');
   if (addBtn) { addBtn.disabled=true; addBtn.textContent='⏳'; }
@@ -148,6 +184,34 @@ export async function confirmRedeem() {
   if (!Number.isInteger(cost)) { toast('⚠️ Μη έγκυρο ποσό πόντων.','error'); _txnBusy = false; return; }
   const db = DB(), disc = (cost/250)*5;
   const redeemBtn = document.querySelector('#m-redeem .btn-green');
+
+  // ── ADMIN FORTRESS Stage 1 — server-authoritative path (feature-flagged) ──
+  //    Mutually exclusive with the legacy direct-write path below.
+  if (isServerFinancialEnabled()) {
+    if (redeemBtn) { redeemBtn.disabled = true; redeemBtn.textContent = '⏳'; }
+    try {
+      const r = await serverAdjustPoints({
+        customerId: cid,
+        operation: 'subtract',
+        amount: cost,
+        reason: `manual-redeem ${disc}€`,
+        idempotencyKey: newIdempotencyKey(),
+      });
+      const np = Number(r && r.newPoints);
+      if (Number.isFinite(np)) { cdata.points = np; }
+      _hooks.renderCust(cdata);
+      toast(`💶 Εξαργύρωση ${disc}€! Αφαιρέθηκαν ${cost} πόντοι.`, 'success'); closeM();
+      _publishLeaderboard();
+    } catch (e) {
+      logger.warn('[confirmRedeem:server] failed:', e?.message);
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+    } finally {
+      _txnBusy = false;
+      if (redeemBtn) { redeemBtn.disabled = false; redeemBtn.textContent = '💶 Εξαργύρωση'; }
+    }
+    return; // never fall through to the legacy direct-write path
+  }
+
   if (redeemBtn) { redeemBtn.disabled=true; redeemBtn.textContent='⏳'; }
   try {
     // ── Atomic Transaction — balance + audit log + ledger entry in one commit.

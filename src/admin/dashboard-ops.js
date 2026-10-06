@@ -21,6 +21,9 @@ import { escHtml } from '../utils.js';
 import { authState } from './auth-state.js';
 import { toast } from './ui.js';
 import { loadStats } from './stats.js';
+// ADMIN FORTRESS Stage 2 — referral credit is server-authoritative (Worker is
+// the sole authority); the browser queue processor is retired when enabled.
+import { isServerFinancialEnabled } from './financial-mutations.js';
 
 const DB = () => window._db;
 
@@ -43,6 +46,12 @@ const MAX_REFERRALS_PER_USER = 5; // Each user can refer max 5 people
 
 export async function processReferralQueue() {
   if (!authState.authenticated) return;
+  // ── ADMIN FORTRESS Stage 2 — retired to no-op (no browser financial write) ──
+  //    The canonical Worker /process-referral credits self-signup referrals;
+  //    this overlapping browser processor is disabled to remove the double-
+  //    credit path. Genuinely-stuck entries are granted by the owner via the
+  //    audited adminAdjustPoints.
+  if (isServerFinancialEnabled()) return;
   const db = DB(); if (!db) return;
   try {
     const snap = await window._getDocs(
@@ -231,6 +240,14 @@ export async function exportBk() {
 export async function importBk(ev) {
   const file=ev.target.files[0]; if(!file) return;
   if (!navigator.onLine) { toast('🔴 Offline','error'); ev.target.value=''; return; }
+  // ── ADMIN FORTRESS Stage 2: backup RESTORE writes the ledger directly ──
+  //   (ipear_customers + ipear_transactions). Under the fortress the browser
+  //   is NOT a financial writer; this path is retired (and the Firestore lock
+  //   denies client ledger writes anyway). Restore must be done server-side.
+  if (isServerFinancialEnabled()) {
+    toast('🔒 Η επαναφορά backup από τον browser είναι απενεργοποιημένη (append-only ledger). Χρησιμοποίησε server-side επαναφορά.', 'error');
+    ev.target.value=''; return;
+  }
   if (!confirm('⚠️ Θα προστεθούν δεδομένα από το backup. Συνέχεια;')) { ev.target.value=''; return; }
   const reader=new FileReader();
   reader.onload=async e=>{

@@ -3,6 +3,9 @@ import {
 } from '../services/firebase.js';
 import { escHtml } from '../utils.js';
 import { toast } from './ui.js';
+// ADMIN FORTRESS Stage 2 — append-only ledger: the admin UI must not delete
+// financial evidence. Flag-gated to preserve rollback.
+import { isServerFinancialEnabled } from './financial-mutations.js';
 
 // Callback invoked when a delete operation alters customer/transaction set.
 // admin-main wires this to its loadStats() so KPIs refresh.
@@ -138,6 +141,15 @@ export async function scanOrphans() {
 }
 
 export async function deleteOrphanTxs(customerId) {
+  // ── ADMIN FORTRESS Stage 2 — financial ledger is append-only ──
+  //    Deleting transaction history from the admin UI is no longer permitted
+  //    (and is blocked by the Firestore rule lock). Personal-data removal for
+  //    GDPR is handled separately by the anonymization flow (gdpr.js), which
+  //    preserves the immutable financial evidence while scrubbing PII.
+  if (isServerFinancialEnabled()) {
+    toast('🔒 Το ιστορικό συναλλαγών είναι append-only — δεν διαγράφεται. Για GDPR χρησιμοποίησε την ανωνυμοποίηση.', 'error');
+    return;
+  }
   if (!confirm('Θα διαγραφούν ΟΛΕΣ οι συναλλαγές αυτού του πελάτη. Συνέχεια;')) return;
   try {
     const db = getDb();

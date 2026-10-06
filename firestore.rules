@@ -112,6 +112,18 @@ service cloud.firestore {
                ]);
     }
 
+    // ADMIN FORTRESS Stage 2 lock — the server-authoritative BALANCE/lifetime
+    // fields. Narrower than touchesFinancial(): the lock blocks the admin
+    // BROWSER from writing these (they flow only through the server callables /
+    // Admin SDK), while admin may still edit non-balance fields (blocked,
+    // suspicious, tier, name, etc.). referralCount/referralProcessed are now
+    // server-authoritative (referral unified on the Worker).
+    function touchesBalance() {
+      return request.resource.data.diff(resource.data)
+               .affectedKeys()
+               .hasAny(['points', 'totalPoints', 'referralCount', 'referralProcessed']);
+    }
+
     // One-time UID binding (legacy doc → uid path migration helper).
     // HIGH-1: requires a verified email — without this, an attacker could
     // register an unverified Firebase Auth account with a victim's email and
@@ -143,7 +155,9 @@ service cloud.firestore {
       // points=0, no migration) can land before the user clicks the email
       // verification link. Path B (the email-match clone of a legacy doc) is
       // gated by isVerifiedAuth() inside the branch — see CRITICAL-2 note.
-      allow create: if isAdmin() || (
+      allow create: if (isAdmin()
+          && request.resource.data.points == 0
+          && request.resource.data.totalPoints == 0) || (
         isAuth() &&
         customerId == request.auth.uid &&
         request.resource.data.uid   == request.auth.uid &&
@@ -224,7 +238,7 @@ service cloud.firestore {
       // Any field absent from the update payload is unaffected by the cap;
       // any field present must be a string AND respect the limit.
       allow update: if
-        isAdmin()
+        (isAdmin() && !touchesBalance())
         ||
         (ownsCustomer(resource.data) && !touchesFinancial() &&
          (!('name'     in request.resource.data) || (request.resource.data.name     is string && request.resource.data.name.size()     <= 100)) &&
@@ -268,8 +282,11 @@ service cloud.firestore {
           resource.data.customerEmail == request.auth.token.email);
 
       // WRITE ── admin only. The tablet/admin app authenticates as an
-      // admin UID before issuing any point credit/debit transaction.
-      allow create, update, delete: if isAdmin();
+      // ADMIN FORTRESS Stage 2 lock — the ledger is append-only + server-only.
+      // No client (incl. a valid admin session) may create/update/delete a
+      // transaction; the Cloud Functions service account (Admin SDK) bypasses
+      // rules and remains the sole writer. Reads unchanged (above).
+      allow create, update, delete: if false;
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -545,6 +562,19 @@ service cloud.firestore {
     // ═════════════════════════════════════════════════════════════════════
     //  audit_logs — immutable; only GDPR Art.17 anonymisation allowed
     // ═════════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════════
+    //  admin_audit — ADMIN FORTRESS Stage 0 immutable security log.
+    //  Written EXCLUSIVELY by Cloud Functions via the Admin SDK service account
+    //  (which bypasses these rules). Fully append-only from every client,
+    //  including an admin web token: no client create/update/delete is ever
+    //  permitted, so audit evidence cannot be forged or erased from the UI.
+    //  Admins may READ (for a future hardened audit view).
+    // ═════════════════════════════════════════════════════════════════════
+    match /admin_audit/{entryId} {
+      allow read:   if isAdmin();
+      allow create, update, delete: if false;
+    }
+
     match /audit_logs/{logId} {
       allow read:   if isAdmin();
       allow create: if isAdmin();

@@ -5,6 +5,8 @@ import { tier, escHtml } from '../utils.js';
 import { toast } from './ui.js';
 import { authState } from './auth-state.js';
 import { publishLeaderboard } from './leaderboard.js';
+// ADMIN FORTRESS Stage 2 — server-authoritative batch maintenance (flag-gated).
+import { isServerFinancialEnabled, serverBatchMaintenance } from './financial-mutations.js';
 
 let _expireTargets = [];
 let _downgradeTargets = [];
@@ -81,6 +83,22 @@ export async function executeExpirePoints() {
   const btn = document.getElementById('btn-expire-exec');
   btn.textContent = '⏳ Εκτέλεση...';
   btn.disabled = true;
+
+  // ── ADMIN FORTRESS Stage 2 — server-authoritative path (flag-gated) ──
+  if (isServerFinancialEnabled()) {
+    try {
+      const r = await serverBatchMaintenance({ op: 'expire', customerIds: _expireTargets.map(c => c.id) });
+      toast(`✅ Εκπνοή: ${r.applied} μηδενίστηκαν${r.idempotent ? ' · ' + r.idempotent + ' ήδη' : ''}${r.skipped ? ' · ' + r.skipped + ' παραλείφθηκαν' : ''}${r.failed ? ' · ' + r.failed + ' σφάλματα' : ''}`, 'success');
+      if (r.applied > 0) publishLeaderboard().catch(() => {});
+    } catch (e) {
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+    } finally {
+      _expireTargets = [];
+      btn.style.display = 'none'; btn.disabled = false; btn.textContent = '🗑️ Εφαρμογή';
+      document.getElementById('expire-preview').innerHTML = '';
+    }
+    return; // never fall through to the legacy direct-write path
+  }
 
   let done = 0, failed = 0;
   try {
@@ -202,6 +220,23 @@ export async function executeTierDowngrade() {
   const btn = document.getElementById('btn-downgrade-exec');
   btn.textContent = '⏳ Εκτέλεση...';
   btn.disabled = true;
+
+  // ── ADMIN FORTRESS Stage 2 — server-authoritative path (flag-gated) ──
+  //    Server recomputes the target from the CANONICAL tier ladder; the client
+  //    only supplies the reviewed id list (never the resulting totalPoints).
+  if (isServerFinancialEnabled()) {
+    try {
+      const r = await serverBatchMaintenance({ op: 'tier_downgrade', customerIds: _downgradeTargets.map(c => c.id) });
+      toast(`✅ Tier Downgrade: ${r.applied} ανανεώθηκαν${r.idempotent ? ' · ' + r.idempotent + ' ήδη' : ''}${r.skipped ? ' · ' + r.skipped + ' παραλείφθηκαν' : ''}${r.failed ? ' · ' + r.failed + ' σφάλματα' : ''}`, 'success');
+    } catch (e) {
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+    } finally {
+      _downgradeTargets = [];
+      btn.style.display = 'none'; btn.disabled = false; btn.textContent = '📉 Εφαρμογή';
+      document.getElementById('downgrade-preview').innerHTML = '';
+    }
+    return; // never fall through to the legacy direct-write path
+  }
 
   let done = 0, failed = 0;
   try {

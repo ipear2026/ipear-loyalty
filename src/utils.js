@@ -116,6 +116,12 @@ export function tier(t) {
   return               {name:'Bronze',   icon:'🥉',cls:'bronze',   next:1000,  floor:0};
 }
 
+// Canonical tier floor for a given lifetime-points total. Mirrors tier().floor;
+// exported so callers (and the boundary test) share one source of truth.
+export function tierFloor(t) {
+  return tier(t).floor;
+}
+
 export function _applyTierColors(cls) {
   const tiers = ['bronze','silver','gold','diamond','platinum'];
   const els = [

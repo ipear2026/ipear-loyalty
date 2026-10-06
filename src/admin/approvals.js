@@ -12,6 +12,8 @@ import { logger } from '../logger.js';
 import { toast } from './ui.js';
 import { publishLeaderboard } from './leaderboard.js';
 import { setOfferCount, resetApprovalsBadge } from './approvals-badge.js';
+// ADMIN FORTRESS Stage 2 — offer approval must not credit from the browser.
+import { isServerFinancialEnabled } from './financial-mutations.js';
 
 const DB = () => window._db;
 
@@ -99,6 +101,14 @@ let _approveOfferBusy = false;
 
 export async function approveOffer(redemptionId) {
   if (_approveOfferBusy) return;
+  // ── ADMIN FORTRESS Stage 2 — no browser-side offer credit ──
+  //    This legacy 'pending_approval' queue is not fed by any current writer
+  //    (dead path); the authoritative offer approval is the tablet →
+  //    approveRedemption Cloud Function. Refuse rather than credit directly.
+  if (isServerFinancialEnabled()) {
+    toast('🔒 Η έγκριση προσφορών γίνεται πλέον server-side (tablet → approveRedemption).', 'error');
+    return;
+  }
   _approveOfferBusy = true;
   const clickedBtn = event?.target?.closest?.('button');
   if (clickedBtn) {

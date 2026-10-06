@@ -26,6 +26,9 @@ import { toast, closeM } from './ui.js';
 import { publishLeaderboard as _publishLeaderboard } from './leaderboard.js';
 import { loadStats } from './stats.js';
 import { getCachedCustomers, setCachedCustomers } from './snapshot-cache.js';
+// ADMIN FORTRESS Stage 2 — server-authoritative birthday credit + customer
+// lifecycle deletion (flag-gated).
+import { isServerFinancialEnabled, serverBirthdayCredit, serverDeleteCustomer } from './financial-mutations.js';
 
 const DB = () => window._db;
 const MAX_REFERRALS_PER_USER = 5; // mirrors dashboard-ops.js processReferralQueue cap
@@ -78,7 +81,14 @@ export async function register() {
     const { id: newId } = await window._addDoc(window._col(db,'ipear_customers'),
       { name,phone,card,email, birthday, points:0,totalPoints:0, blocked:false, referralProcessed:false, referralCount:0, referredBy:refCode||'', registeredStoreId:authState.storeId||null, registeredStoreName:authState.storeName, createdAt:new Date().toISOString() });
     // Referral bonus: +100 for both (max 5 referrals per referrer)
-    if (refCode) {
+    // ── ADMIN FORTRESS Stage 2 — referral credit is server-authoritative ──
+    //    Canonical authority = Worker /process-referral (self-signup flow).
+    //    Admin-created customers have no Firebase Auth account, so no browser
+    //    financial credit happens here; `referredBy` is recorded on the doc,
+    //    and the owner can grant the bonus via the audited adminAdjustPoints.
+    if (refCode && isServerFinancialEnabled()) {
+      toast(`✅ Εγγραφή επιτυχής! Η παραπομπή (${refCode}) καταγράφηκε.`,'success');
+    } else if (refCode) {
       const refSnap = await window._getDocs(window._query(window._col(db,'ipear_customers'),window._where('card','==',refCode)));
       if (!refSnap.empty) {
         let referrerAwarded = false;
@@ -253,6 +263,19 @@ export async function renderCust(d) {
       if (!sessionStorage.getItem(lastBdayKey)) {
         sessionStorage.setItem(lastBdayKey,'1');
         if(confirm(`🎂 Γενέθλια ${d.name}!\nΘέλεις να προσθέσεις αυτόματα 200 πόντους ως δώρο γενεθλίων;`)) {
+          // ── ADMIN FORTRESS Stage 2 — server-authoritative birthday (flag-gated) ──
+          if (isServerFinancialEnabled()) {
+            try {
+              const r = await serverBirthdayCredit({ customerId: cid });
+              const np = Number(r && r.newPoints);
+              if (Number.isFinite(np)) { cdata.points = np; if (!r.idempotent) cdata.totalPoints = (cdata.totalPoints || 0) + 200; }
+              renderCust(cdata);
+              toast(r && r.idempotent ? '🎂 Το δώρο γενεθλίων έχει ήδη δοθεί φέτος.' : '🎂 +200 πόντοι δώρο γενεθλίων!', 'success');
+            } catch (e) {
+              logger.warn('[birthday:server] failed:', e?.message);
+              toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+            }
+          } else {
           const db = DB();
           // Atomic: balance + ledger in one commit (was two separate writes).
           // Per-year deterministic id keeps it idempotent on retries / refreshes.
@@ -279,6 +302,7 @@ export async function renderCust(d) {
           });
           cdata.points = newPts; cdata.totalPoints = newTot;
           renderCust(cdata);
+          }
         }
       }
     }
@@ -374,6 +398,30 @@ export async function deleteCust() {
   }
   _deleteCustBusy = true;
   try {
+    // ── ADMIN FORTRESS Stage 2: server-authoritative lifecycle (flag ON) ──
+    //   The browser submits ONLY the deletion intent. The server anonymizes
+    //   the financial ledger (retains immutable evidence), deletes PII docs +
+    //   the Auth user, and writes an immutable audit event. The browser
+    //   performs NO financial ledger delete/update and NO local cascade.
+    //   Never falls through to the legacy client-cascade path below.
+    if (isServerFinancialEnabled()) {
+      try {
+        const res = await serverDeleteCustomer({ customerId: cid });
+        document.getElementById('cust-result').classList.remove('show');
+        document.getElementById('sinput').value = '';
+        _hooks.setScope({ cid: null, cdata: null });
+        toast(res && res.notFound
+          ? '🗑 Ο πελάτης είχε ήδη διαγραφεί.'
+          : '🗑 Ο πελάτης διαγράφηκε (server-authoritative — το ιστορικό συναλλαγών διατηρήθηκε ανωνυμοποιημένο).', 'success');
+        loadStats(); loadAll();
+      } catch (e) {
+        toast('❌ Αποτυχία διαγραφής: ' + (e?.message || 'unknown') + '. Ο πελάτης ΔΕΝ διαγράφηκε — δοκίμασε ξανά (η ενέργεια είναι idempotent).', 'error');
+      } finally {
+        _deleteCustBusy = false;
+      }
+      return; // never fall through to the legacy direct-delete cascade
+    }
+
     const db = DB();
     const phone = cdata?.phone || '';
     const email = cdata?.email || '';

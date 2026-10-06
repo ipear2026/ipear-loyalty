@@ -205,14 +205,20 @@ describe('§1 · isAdmin() claim-only enforcement (failing-before, passing-after
     }));
   });
 
-  it('NEW path: admin:true claim → ALLOWED all admin operations', async () => {
+  it('NEW path: admin:true claim → ALLOWED admin ops, but DIRECT balance write DENIED (§6b lock)', async () => {
     const admin = testEnv.authenticatedContext(ADMIN_UID, claimsAdmin);
     const db = admin.firestore();
     await assertSucceeds(getDoc(doc(db, 'ipear_customers', CUSTOMER_ID)));
-    await assertSucceeds(updateDoc(doc(db, 'ipear_customers', CUSTOMER_ID), {
+    // ADMIN FORTRESS §6b: a valid admin session may NOT directly mutate the
+    // loyalty balance — financial state is server-authoritative only.
+    await assertFails(updateDoc(doc(db, 'ipear_customers', CUSTOMER_ID), {
       points: 999,
     }));
-    // audit_logs create by admin:
+    // Non-financial admin edits remain ALLOWED (block / name / tier / suspicious):
+    await assertSucceeds(updateDoc(doc(db, 'ipear_customers', CUSTOMER_ID), {
+      blocked: true,
+    }));
+    // audit_logs create by admin remains allowed (not the locked admin_audit):
     await assertSucceeds(setDoc(doc(db, 'audit_logs', 'test-audit-1'), {
       action: 'test',
       approverUid: ADMIN_UID,

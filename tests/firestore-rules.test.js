@@ -461,3 +461,56 @@ describe('SEC-M1 — ipear_transactions READ authorization', () => {
     await assertFails(getDoc(doc(anon.firestore(), 'ipear_transactions', 'tx-victim-1')));
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMIN FORTRESS Stage 0 — admin_audit immutable security log.
+//  Written ONLY by Cloud Functions via the Admin SDK (bypasses rules). No
+//  client — not even an admin web token — may create / overwrite / delete an
+//  entry; admins may read.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('admin_audit: append-only immutable security log', () => {
+  const seedEntry = () => seed('admin_audit/adj_ik_seed', {
+    action: 'admin_adjust', actorUid: 'owner-uid', amount: 10, success: true,
+  });
+
+  it('ADMIN can READ audit entries', async () => {
+    await seedAdminWhitelist('admin-uid');
+    await seedEntry();
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertSucceeds(getDoc(doc(admin.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('NON-ADMIN user cannot READ audit entries', async () => {
+    await seedEntry();
+    const user = testEnv.authenticatedContext('u1', { email_verified: true });
+    await assertFails(getDoc(doc(user.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('ADMIN cannot CREATE a new audit entry (append-only, server-only)', async () => {
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertFails(setDoc(doc(admin.firestore(), 'admin_audit', 'adj_new'), { action: 'forged' }));
+  });
+
+  it('ADMIN cannot overwrite an existing audit entry', async () => {
+    await seedEntry(); // seed BEFORE touching any auth context's firestore()
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertFails(setDoc(doc(admin.firestore(), 'admin_audit', 'adj_ik_seed'), { action: 'tampered' }));
+  });
+
+  it('ADMIN cannot DELETE an audit entry (evidence cannot be erased)', async () => {
+    await seedEntry();
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertFails(deleteDoc(doc(admin.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('unauthenticated cannot read', async () => {
+    await seedEntry();
+    const anon = testEnv.unauthenticatedContext();
+    await assertFails(getDoc(doc(anon.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('unauthenticated cannot write', async () => {
+    const anon = testEnv.unauthenticatedContext();
+    await assertFails(setDoc(doc(anon.firestore(), 'admin_audit', 'adj_x'), { a: 1 }));
+  });
+});

@@ -11,8 +11,14 @@
 import { escHtml, escJs } from '../utils.js';
 import { toast } from './ui.js';
 import { publishLeaderboard } from './leaderboard.js';
+// ADMIN FORTRESS Stage 2 — server-authoritative code verification (flag-gated).
+import { isServerFinancialEnabled, serverVerifyRedemption } from './financial-mutations.js';
 
 const DB = () => window._db;
+
+// Last looked-up code (set by verifyCode) — the server resolves by code, so the
+// confirm handlers pass it to adminVerifyRedemption when the flag is ON.
+let _lastCode = '';
 
 // Injected by admin-main once on bootstrap.
 let _ctx = {
@@ -32,6 +38,7 @@ export async function verifyCode() {
     toast('⚠️ Εισάγετε 6-ψήφιο κωδικό!', 'error');
     return;
   }
+  _lastCode = raw; // server resolves by code when the fortress flag is ON
   const resEl = document.getElementById('rcode-result');
   resEl.style.display = 'none';
   try {
@@ -118,6 +125,28 @@ export async function confirmVerify(redemptionId, code) {
   if (vBtn) {
     vBtn.disabled = true;
     vBtn.textContent = '⏳ Εξαργύρωση...';
+  }
+  // ── ADMIN FORTRESS Stage 2 — server-authoritative path (flag-gated) ──
+  //    The server resolves the code → reward, re-reads the catalog cost, debits,
+  //    and writes the ledger + audit. Mutually exclusive with the legacy path.
+  if (isServerFinancialEnabled()) {
+    try {
+      const r = await serverVerifyRedemption({ code: code || _lastCode });
+      const debited = Math.abs(Number(r && r.amount) || 0);
+      document.getElementById('rcode-result').innerHTML = `<div style="background:linear-gradient(135deg,#0f1f00,#1a3300);border:1px solid #8ae900;border-radius:11px;padding:20px;text-align:center">
+        <div style="font-size:2.5rem;margin-bottom:8px">✅</div>
+        <div style="color:#8ae900;font-weight:900;font-size:1.2rem;margin-bottom:4px">${r && r.idempotent ? 'Ήδη εξαργυρωμένο' : 'Εξαργύρωση Επιτυχής!'}</div>
+        <div style="color:#888;font-size:.82rem;margin-top:4px">${r && r.idempotent ? '' : 'Αφαιρέθηκαν ' + debited + ' πόντοι'}</div>
+      </div>`;
+      document.getElementById('rcode-in').value = '';
+      toast(r && r.idempotent ? '↺ Ήδη εξαργυρωμένο' : '✅ Εξαργύρωση OK', 'success');
+      publishLeaderboard().catch(() => {});
+      _ctx.refreshAdminViews();
+    } catch (e) {
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+      if (vBtn && document.body.contains(vBtn)) { vBtn.disabled = false; vBtn.textContent = '💶 Επιβεβαίωση & Εξαργύρωση'; }
+    }
+    return; // never fall through to the legacy direct-write path
   }
   try {
     const db = DB();
@@ -262,6 +291,28 @@ export async function confirmOfferVerify(redemptionId) {
   if (vBtn) {
     vBtn.disabled = true;
     vBtn.textContent = '⏳ Επεξεργασία...';
+  }
+  // ── ADMIN FORTRESS Stage 2 — server-authoritative path (flag-gated) ──
+  //    Server resolves the code → offer, re-reads the canonical offer value
+  //    (H1-safe), credits, and writes the ledger + audit.
+  if (isServerFinancialEnabled()) {
+    try {
+      const r = await serverVerifyRedemption({ code: _lastCode });
+      const credited = Math.abs(Number(r && r.amount) || 0);
+      document.getElementById('rcode-result').innerHTML = `<div style="background:linear-gradient(135deg,#0f1f00,#1a3300);border:1px solid #8ae900;border-radius:11px;padding:20px;text-align:center">
+        <div style="font-size:2.5rem;margin-bottom:8px">🎁</div>
+        <div style="color:#8ae900;font-weight:900;font-size:1.2rem;margin-bottom:4px">${r && r.idempotent ? 'Ήδη εγκεκριμένο' : 'Προσφορά Εγκρίθηκε!'}</div>
+        <div style="color:#888;font-size:.82rem;margin-top:4px">${r && r.idempotent ? '' : '+' + credited + ' bonus πόντοι'}</div>
+      </div>`;
+      document.getElementById('rcode-in').value = '';
+      toast(r && r.idempotent ? '↺ Ήδη εγκεκριμένο' : '🎁 Προσφορά OK', 'success');
+      publishLeaderboard().catch(() => {});
+      _ctx.refreshAdminViews();
+    } catch (e) {
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+      if (vBtn && document.body.contains(vBtn)) { vBtn.disabled = false; vBtn.textContent = '🎁 Έγκριση Προσφοράς'; }
+    }
+    return; // never fall through to the legacy direct-write path
   }
   try {
     const db = DB();

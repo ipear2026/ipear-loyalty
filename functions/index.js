@@ -5,6 +5,16 @@ const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestor
 const { getAuth } = require("firebase-admin/auth");
 const { createHash } = require("node:crypto");
 const { canonicalOfferCredit } = require("./lib/offer-credit");
+// ADMIN FORTRESS Stage 0/1 — owner authorization + server-authoritative mutations.
+const { checkOwner } = require("./lib/owner");
+const {
+  validateAdjustInput, planAdjustment, ledgerIdForKey, auditIdForKey,
+  planMaintenance, maintLedgerId, MAINT_OPS, MAX_BATCH,
+} = require("./lib/admin-financial");
+const { planRewardRedeem, planOfferRedeem } = require("./lib/redemption");
+const {
+  tombstoneId, lifecycleId, planLedgerAnonymization, LIFECYCLE_POLICY,
+} = require("./lib/lifecycle");
 
 initializeApp();
 const db = getFirestore();
@@ -547,6 +557,49 @@ function _requireAdmin(request) {
   return { uid: request.auth.uid };
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+//  ADMIN FORTRESS Stage 0 — security-event logging + owner gate + kill switch.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Structured security event → Cloud Logging (foundation for log-based metric
+// alerts in a later stage). NEVER include tokens/secrets/OTP/PII beyond the
+// actor/customer UID. `details` is shallow and must already be redacted.
+function _securityEvent(type, details) {
+  try {
+    const safe = { sev: "SECURITY", event: type, at: new Date().toISOString(), ...(details || {}) };
+    // Use console.error for denials so they surface at ERROR severity.
+    const deny = /deny|denied|fail|mismatch|replay|exceed|disabled|forbidden/i.test(type);
+    (deny ? console.error : console.log)("[SEC-EVENT]", JSON.stringify(safe));
+  } catch (_) { /* never let logging break a handler */ }
+}
+
+// Server-side financial kill-switch placeholder (AF-12). Enforcement is OFF by
+// default; when env ADMIN_FINANCIAL_ACTIONS_DISABLED === "true" every
+// owner-gated financial mutation is denied (fail-safe). Not enabled in prod now.
+function _financialActionsDisabled() {
+  return String(process.env.ADMIN_FINANCIAL_ACTIONS_DISABLED || "").trim() === "true";
+}
+
+// Owner gate (AF-4 single-owner): valid Firebase auth AND admin claim AND the
+// server-side OWNER_UIDS allowlist. Fail-closed (missing config → deny). This
+// is ADDITIVE defense-in-depth; the existing admin-claim gate still applies to
+// all legacy paths.
+function _requireOwner(request, opName) {
+  if (!request.auth) {
+    _securityEvent("owner_denied", { op: opName || null, reason: "unauthenticated" });
+    throw new HttpsError("unauthenticated", "Sign in required.");
+  }
+  const t = request.auth.token || {};
+  const uid = request.auth.uid;
+  const verdict = checkOwner(t, uid, process.env.OWNER_UIDS);
+  if (!verdict.ok) {
+    _securityEvent("owner_denied", { op: opName || null, uid: uid || null, reason: verdict.reason });
+    // Uniform permission-denied to the client (no oracle about which check failed).
+    throw new HttpsError("permission-denied", "Owner authorization required.");
+  }
+  return { uid };
+}
+
 // Deterministic ledger id for approveRedemption idempotency.
 function _ledgerIdForRequest(requestId, type) {
   const prefix = type === "offer_credit" ? "offer_credit" : "redeem";
@@ -1064,6 +1117,318 @@ exports.approveRedemption = onCall(
   _approveRedemptionHandler
 );
 
+// ───────────────────────────────────────────────────────────────────────────
+//  ADMIN FORTRESS Stage 1 — adminAdjustPoints (server-authoritative manual
+//  point mutation). Replaces the admin browser's direct Firestore writes for
+//  manual add / subtract / correct. The client submits an INTENT only; the
+//  server resolves the customer, reads the authoritative balance, validates the
+//  amount + limit, computes the result, enforces idempotency (deterministic
+//  ledger id), and writes the ledger + immutable `admin_audit` row atomically.
+//
+//  Auth: Firebase auth + admin claim + OWNER_UIDS allowlist + App Check
+//  (enforced by onCall) + fail-safe financial kill switch. Fail-closed.
+// ───────────────────────────────────────────────────────────────────────────
+async function _adminAdjustPointsHandler(request) {
+  // 1–4: auth, admin claim, owner allowlist (App Check enforced by onCall).
+  const { uid: actorUid } = _requireOwner(request, "adminAdjustPoints");
+
+  // Fail-safe kill switch (AF-12 placeholder; disabled by default).
+  if (_financialActionsDisabled()) {
+    _securityEvent("financial_killswitch_denied", { op: "adminAdjustPoints", uid: actorUid });
+    throw new HttpsError("failed-precondition", "Financial actions are temporarily disabled.");
+  }
+
+  // 5: validate the intent schema (never trusts newBalance/role/actor/ts).
+  const parsed = validateAdjustInput(request.data);
+  if (!parsed.ok) {
+    _securityEvent("adjust_input_rejected", { uid: actorUid, reason: parsed.reason });
+    throw new HttpsError("invalid-argument", `Invalid adjustment: ${parsed.reason}`);
+  }
+  const input = parsed.value;
+
+  // Large-mutation signal for future alerting (still within the hard cap).
+  if (Math.abs(input.amount) >= 5000) {
+    _securityEvent("large_adjustment", {
+      uid: actorUid, customerId: input.customerId, amount: input.amount, operation: input.operation,
+    });
+  }
+
+  return _commitAdjustment(input, actorUid);
+}
+
+// Shared commit for owner-gated point adjustments — used by manual
+// add/subtract/correct AND by server-fixed credits (e.g. birthday). Resolves
+// the customer + balance server-side, enforces idempotency (deterministic
+// ledger id), and writes the ledger + immutable audit row atomically.
+// `input` MUST already be schema-validated by the caller.
+async function _commitAdjustment(input, actorUid) {
+  const nowIso = new Date().toISOString();
+  const custRef = db.collection("ipear_customers").doc(input.customerId);
+  const ledgerRef = db.collection("ipear_transactions").doc(ledgerIdForKey(input.idempotencyKey));
+  const auditRef = db.collection("admin_audit").doc(auditIdForKey(input.idempotencyKey));
+  try {
+    const result = await db.runTransaction(async (txn) => {
+      const custSnap = await txn.get(custRef);
+      const ledgerSnap = await txn.get(ledgerRef);
+      const cust = custSnap.exists ? (custSnap.data() || {}) : {};
+      const plan = planAdjustment(
+        {
+          exists: custSnap.exists,
+          blocked: cust.blocked === true,
+          points: cust.points,
+          totalPoints: cust.totalPoints,
+          customer: { uid: cust.uid, email: cust.email, name: cust.name, card: cust.card },
+        },
+        ledgerSnap.exists ? (ledgerSnap.data() || {}) : null,
+        input,
+        { actorUid, storeId: null, storeName: null, nowIso },
+      );
+      if (!plan.ok) return { _deny: true, code: plan.code, reason: plan.reason };
+      if (plan.idempotent) return { idempotent: true, newPoints: plan.newPoints, ledgerId: ledgerRef.id };
+      txn.update(custRef, plan.customerUpdate);
+      txn.set(ledgerRef, plan.ledger);
+      txn.set(auditRef, { ...plan.audit, serverTimestamp: FieldValue.serverTimestamp() });
+      return { idempotent: false, newPoints: plan.after, ledgerId: ledgerRef.id };
+    });
+    if (result && result._deny) {
+      _securityEvent("adjust_denied", { uid: actorUid, customerId: input.customerId, reason: result.reason });
+      throw new HttpsError(result.code || "failed-precondition", `Adjustment rejected: ${result.reason}`);
+    }
+    return { ok: true, idempotent: !!result.idempotent, newPoints: result.newPoints, ledgerId: result.ledgerId };
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    _securityEvent("adjust_error", { uid: actorUid, customerId: input.customerId, code: e && e.code });
+    throw new HttpsError("internal", "Adjustment failed.");
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+//  ADMIN FORTRESS Stage 2 — adminBirthdayCredit (server-authoritative).
+//  Server fixes the reward amount AND the annual idempotency key; the browser
+//  cannot alter the amount or the award year. Same customer + same year → at
+//  most one credit (deterministic ledger id). Owner-gated + App Check + kill
+//  switch. Birthday eligibility/policy is unchanged — the admin UI still decides
+//  WHEN to offer it; the server owns the financial effect.
+// ───────────────────────────────────────────────────────────────────────────
+const BIRTHDAY_BONUS = 200;
+async function _adminBirthdayCreditHandler(request) {
+  const { uid: actorUid } = _requireOwner(request, "adminBirthdayCredit");
+  if (_financialActionsDisabled()) {
+    _securityEvent("financial_killswitch_denied", { op: "adminBirthdayCredit", uid: actorUid });
+    throw new HttpsError("failed-precondition", "Financial actions are temporarily disabled.");
+  }
+  const raw = request.data && request.data.customerId;
+  if (typeof raw !== "string" || !raw.trim() || raw.length > 200) {
+    throw new HttpsError("invalid-argument", "customerId required.");
+  }
+  const customerId = raw.trim();
+  const year = new Date().getFullYear();
+  const input = {
+    customerId,
+    operation: "add",
+    amount: BIRTHDAY_BONUS, // server-fixed — never from the client
+    reason: `Δώρο γενεθλίων ${year}`,
+    idempotencyKey: `birthday_${customerId}_${year}`, // server-derived annual key
+  };
+  return _commitAdjustment(input, actorUid);
+}
+exports.adminBirthdayCredit = onCall(
+  { enforceAppCheck: true, region: "europe-west1" },
+  _adminBirthdayCreditHandler
+);
+
+// ───────────────────────────────────────────────────────────────────────────
+//  ADMIN FORTRESS Stage 2 — adminVerifyRedemption (server-authoritative replacement
+//  for the admin 6-digit code-verify browser flow, src/admin/redemption-verify.js).
+//  The browser submits ONLY the code; the server resolves the code, the
+//  reward/offer, the customer, and the authoritative amount, then debits/credits
+//  atomically. Reward cost = catalog-trusted (ipear_rewards); offer credit =
+//  canonical offer value (shared canonicalOfferValue → H1-safe). Idempotency is
+//  tied to the redemption doc id (deterministic ledger id) + the `used` flag.
+//  Owner-gated + App Check + fail-safe kill switch. Fail-closed.
+// ───────────────────────────────────────────────────────────────────────────
+async function _adminVerifyRedemptionHandler(request) {
+  const { uid: actorUid } = _requireOwner(request, "adminVerifyRedemption");
+  if (_financialActionsDisabled()) {
+    _securityEvent("financial_killswitch_denied", { op: "adminVerifyRedemption", uid: actorUid });
+    throw new HttpsError("failed-precondition", "Financial actions are temporarily disabled.");
+  }
+  const code = request.data && request.data.code;
+  if (typeof code !== "string" || !/^\d{6}$/.test(code)) {
+    throw new HttpsError("invalid-argument", "code must be a 6-digit string.");
+  }
+
+  // Resolve the code to a redemption doc + type (reward first, then offer) —
+  // the client cannot choose the target customer or operation.
+  let kind = null, redId = null;
+  const rq = await db.collection("ipear_redemptions").where("code", "==", code).limit(1).get();
+  if (!rq.empty) { kind = "reward"; redId = rq.docs[0].id; }
+  else {
+    const oq = await db.collection("ipear_offer_redemptions").where("code", "==", code).limit(1).get();
+    if (!oq.empty) { kind = "offer"; redId = oq.docs[0].id; }
+  }
+  if (!kind) {
+    _securityEvent("verify_denied", { uid: actorUid, reason: "code-not-found" });
+    throw new HttpsError("not-found", "Invalid or expired code.");
+  }
+
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
+  const col = kind === "reward" ? "ipear_redemptions" : "ipear_offer_redemptions";
+  const redRef = db.collection(col).doc(redId);
+  const ledgerRef = db.collection("ipear_transactions")
+    .doc(kind === "reward" ? `redeem_verify_${redId}` : `offer_verify_${redId}`);
+  const auditRef = db.collection("admin_audit").doc(`verify_${redId}`);
+  const ctx = { actorUid, nowIso, nowMs, storeId: null, storeName: null, redemptionId: redId, code };
+
+  try {
+    const result = await db.runTransaction(async (txn) => {
+      // ── reads first ──
+      const redSnap = await txn.get(redRef);
+      const ledgerSnap = await txn.get(ledgerRef);
+      if (!redSnap.exists) return { _deny: true, code: "not-found", reason: "code-not-found" };
+      const redemption = redSnap.data() || {};
+
+      // Resolve customer: customerId → customerUid/customerDocId fallback.
+      let customerId = redemption.customerId || null;
+      let custSnap = customerId ? await txn.get(db.collection("ipear_customers").doc(customerId)) : null;
+      if ((!custSnap || !custSnap.exists)) {
+        const alt = redemption.customerUid || redemption.customerDocId;
+        if (alt && alt !== customerId) { customerId = alt; custSnap = await txn.get(db.collection("ipear_customers").doc(alt)); }
+      }
+      const customer = custSnap && custSnap.exists ? (custSnap.data() || {}) : null;
+      const existingLedger = ledgerSnap.exists ? (ledgerSnap.data() || {}) : null;
+
+      let plan;
+      if (kind === "reward") {
+        let reward = null;
+        if (redemption.rewardId) {
+          const rs = await txn.get(db.collection("ipear_rewards").doc(redemption.rewardId));
+          reward = rs.exists ? (rs.data() || {}) : null;
+        }
+        plan = planRewardRedeem(redemption, reward, customer, customerId, existingLedger, ctx);
+      } else {
+        let offer = null;
+        if (redemption.offerId) {
+          const os = await txn.get(db.collection("ipear_offers").doc(redemption.offerId));
+          offer = os.exists ? (os.data() || {}) : null;
+        }
+        plan = planOfferRedeem(redemption, offer, customer, customerId, existingLedger, ctx);
+      }
+
+      if (!plan.ok) return { _deny: true, code: plan.code, reason: plan.reason };
+      if (plan.idempotent) return { idempotent: true, newPoints: (customer && customer.points) ?? null, ledgerId: ledgerRef.id };
+
+      // ── writes after ──
+      txn.update(redRef, plan.redemptionUpdate);
+      txn.update(db.collection("ipear_customers").doc(customerId), plan.customerUpdate);
+      txn.set(ledgerRef, plan.ledger);
+      txn.set(auditRef, { ...plan.audit, serverTimestamp: FieldValue.serverTimestamp() });
+      return { idempotent: false, kind: plan.kind, amount: plan.amount, newPoints: plan.after, ledgerId: ledgerRef.id };
+    });
+
+    if (result && result._deny) {
+      _securityEvent("verify_denied", { uid: actorUid, redemptionId: redId, reason: result.reason });
+      // Generic external message — no customer-existence leakage.
+      const msg = result.reason === "insufficient-balance" ? "Insufficient points."
+        : result.code === "not-found" ? "Invalid or expired code."
+        : "Redemption rejected.";
+      throw new HttpsError(result.code || "failed-precondition", msg);
+    }
+    return { ok: true, kind: result.kind, amount: result.amount, newPoints: result.newPoints, ledgerId: result.ledgerId, idempotent: !!result.idempotent };
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    _securityEvent("verify_error", { uid: actorUid, redemptionId: redId, code: e && e.code });
+    throw new HttpsError("internal", "Redemption failed.");
+  }
+}
+exports.adminVerifyRedemption = onCall(
+  { enforceAppCheck: true, region: "europe-west1" },
+  _adminVerifyRedemptionHandler
+);
+
+exports.adminAdjustPoints = onCall(
+  { enforceAppCheck: true, region: "europe-west1" },
+  _adminAdjustPointsHandler
+);
+
+// ───────────────────────────────────────────────────────────────────────────
+//  ADMIN FORTRESS Stage 2 — adminBatchMaintenance (server-authoritative batch).
+//  Handles point EXPIRE and TIER_DOWNGRADE. The browser sends only the op + a
+//  bounded list of customerIds (the admin's reviewed selection); the server
+//  reads each customer's authoritative balance, computes the delta (expire →
+//  zero; tier_downgrade → canonical-ladder target), and writes customer +
+//  ledger + immutable audit per item in a transaction. Deterministic per-item
+//  ids make every item idempotent (re-run / concurrent → one mutation each).
+//  Owner-gated + App Check + fail-safe kill switch. Fail-closed per item.
+// ───────────────────────────────────────────────────────────────────────────
+async function _adminBatchMaintenanceHandler(request) {
+  const { uid: actorUid } = _requireOwner(request, "adminBatchMaintenance");
+  if (_financialActionsDisabled()) {
+    _securityEvent("financial_killswitch_denied", { op: "adminBatchMaintenance", uid: actorUid });
+    throw new HttpsError("failed-precondition", "Financial actions are temporarily disabled.");
+  }
+  const data = request.data || {};
+  const op = data.op;
+  const ids = Array.isArray(data.customerIds) ? data.customerIds : null;
+  if (!MAINT_OPS.has(op)) throw new HttpsError("invalid-argument", "Unknown maintenance op.");
+  if (!ids || ids.length === 0) throw new HttpsError("invalid-argument", "customerIds required.");
+  if (ids.length > MAX_BATCH) throw new HttpsError("invalid-argument", `Batch too large (max ${MAX_BATCH}).`);
+  for (const id of ids) {
+    if (typeof id !== "string" || !id.trim() || id.length > 200) {
+      throw new HttpsError("invalid-argument", "Malformed customerId in batch.");
+    }
+  }
+  _securityEvent("batch_maintenance", { uid: actorUid, op, count: ids.length });
+
+  const year = new Date().getFullYear();
+  const nowIso = new Date().toISOString();
+  let applied = 0, idempotent = 0, skipped = 0, failed = 0;
+  const outcomes = [];
+
+  // Per-item transaction so a bad/ineligible item never aborts the whole batch
+  // (fail-closed per item); deterministic ids keep each item idempotent.
+  for (const customerId of ids) {
+    const custRef = db.collection("ipear_customers").doc(customerId);
+    const ledgerRef = db.collection("ipear_transactions").doc(maintLedgerId(op, customerId, year));
+    const auditRef = db.collection("admin_audit").doc(`${op}_${customerId}_${year}`);
+    try {
+      const r = await db.runTransaction(async (txn) => {
+        const custSnap = await txn.get(custRef);
+        const ledgerSnap = await txn.get(ledgerRef);
+        const cust = custSnap.exists ? (custSnap.data() || {}) : {};
+        const plan = planMaintenance(
+          op, customerId,
+          { exists: custSnap.exists, points: cust.points, totalPoints: cust.totalPoints,
+            customer: { uid: cust.uid, email: cust.email, name: cust.name, card: cust.card } },
+          ledgerSnap.exists ? (ledgerSnap.data() || {}) : null,
+          { actorUid, year, nowIso, storeId: null, storeName: null },
+        );
+        if (!plan.ok) return { kind: plan.reason === "nothing-to-expire" || plan.reason === "not-eligible-bronze" || plan.reason === "no-downgrade" ? "skip" : "deny", reason: plan.reason };
+        if (plan.idempotent) return { kind: "idempotent" };
+        txn.update(custRef, plan.customerUpdate);
+        txn.set(ledgerRef, plan.ledger);
+        txn.set(auditRef, { ...plan.audit, serverTimestamp: FieldValue.serverTimestamp() });
+        return { kind: "applied" };
+      });
+      if (r.kind === "applied") applied++;
+      else if (r.kind === "idempotent") idempotent++;
+      else if (r.kind === "skip") skipped++;
+      else { failed++; }
+      outcomes.push({ kind: r.kind, reason: r.reason });
+    } catch (e) {
+      failed++;
+      outcomes.push({ kind: "error", code: e && e.code });
+      _securityEvent("batch_item_error", { uid: actorUid, op, code: e && e.code });
+    }
+  }
+  return { ok: true, op, total: ids.length, applied, idempotent, skipped, failed };
+}
+exports.adminBatchMaintenance = onCall(
+  { enforceAppCheck: true, region: "europe-west1" },
+  _adminBatchMaintenanceHandler
+);
+
 // rejectRedemption(requestId, reason)
 //   - Admin-only. Requires App Check.
 //   - Marks request 'rejected' with audit. No balance change.
@@ -1358,6 +1723,205 @@ exports.createRedemptionRequestFromCard = onCall(
   _createRedemptionRequestFromCardHandler
 );
 
+// ───────────────────────────────────────────────────────────────────────────
+//  ADMIN FORTRESS Stage 2 — adminDeleteCustomer (server-authoritative customer
+//  lifecycle). Owner-gated + App Check + fail-closed. Replaces the browser
+//  delete cascade in src/admin/customers-crud.js.
+//
+//  INVARIANT: customer deletion MUST NOT destroy financial evidence.
+//    • ipear_transactions / ipear_(offer_)redemptions → ANONYMIZE PII in place,
+//      RETAIN immutable financial facts (points/type/delta/date/source/ids).
+//      This is the ONLY server path that updates existing ledger rows — the
+//      single documented, owner-gated, audited exception to append-only.
+//    • ipear_customers (+orphans) / ipear_referral_queue → DELETE (PII / transient).
+//    • ipear_redemption_requests / ipear_birthday_claims / audit_logs → ANONYMIZE.
+//    • admin_audit → never touched (append-only); only the completion event added.
+//    • Firebase Auth user(s) → DELETE (Admin SDK; user-not-found == success).
+//
+//  Idempotent + resumable: the deterministic lifecycle id names the admin_audit
+//  COMPLETION doc. The customer docs are deleted LAST, just before the audit is
+//  written, and the audit stores the target ids — so a retry after the audit
+//  exists simply re-runs the (idempotent) customer-doc deletion tail. All
+//  anonymization steps are no-ops once a row carries the tombstone. A retry
+//  therefore never restores PII, never deletes financial evidence, never
+//  duplicates the audit, and never corrupts loyalty state.
+// ───────────────────────────────────────────────────────────────────────────
+async function _deleteCustomerDocs(ids) {
+  for (const id of ids) {
+    try { await db.collection("ipear_customers").doc(id).delete(); }
+    catch (_) { /* idempotent — already gone */ }
+  }
+}
+
+// Anonymize every row of `coll` matching `field == value`. Idempotent (skips
+// rows already tombstoned). Returns {seen, anonymized}.
+async function _anonymizeLedgerByQuery(coll, field, value, tombstone, nowIso) {
+  let seen = 0, anonymized = 0;
+  const snap = await db.collection(coll).where(field, "==", value).get();
+  for (const d of snap.docs) {
+    seen++;
+    const upd = planLedgerAnonymization(d.data(), tombstone, nowIso);
+    if (upd) { await d.ref.update(upd); anonymized++; }
+  }
+  return { seen, anonymized };
+}
+
+async function _deleteByQuery(coll, field, value) {
+  let deleted = 0;
+  const snap = await db.collection(coll).where(field, "==", value).get();
+  for (const d of snap.docs) { try { await d.ref.delete(); deleted++; } catch (_) {} }
+  return deleted;
+}
+
+async function _adminDeleteCustomerHandler(request) {
+  // 1–4: auth, admin claim, owner allowlist (App Check enforced by onCall).
+  const { uid: actorUid } = _requireOwner(request, "adminDeleteCustomer");
+
+  // Strict input validation — the browser submits ONLY the deletion intent.
+  const raw = request.data && request.data.customerId;
+  if (typeof raw !== "string" || !raw.trim() || raw.length > 200) {
+    throw new HttpsError("invalid-argument", "customerId required.");
+  }
+  const customerId = raw.trim();
+  const idemRaw = request.data && request.data.idempotencyKey;
+  const idempotencyKey =
+    (typeof idemRaw === "string" && idemRaw.trim() && idemRaw.length <= 200) ? idemRaw.trim() : null;
+
+  const lid = lifecycleId(customerId, idempotencyKey);
+  const auditRef = db.collection("admin_audit").doc(lid);
+  const nowIso = new Date().toISOString();
+
+  try {
+    // Fast path / resume tail: the completion audit already exists → steps
+    // A–F are proven done; just (re)run the idempotent customer-doc deletion.
+    const existingAudit = await auditRef.get();
+    if (existingAudit.exists) {
+      const a = existingAudit.data() || {};
+      const ids = Array.isArray(a.targetCustomerIds) && a.targetCustomerIds.length
+        ? a.targetCustomerIds : [customerId];
+      await _deleteCustomerDocs(ids);
+      _securityEvent("lifecycle_idempotent", { uid: actorUid, customerId, lifecycleId: lid });
+      return { ok: true, idempotent: true, tombstone: a.tombstone || null, lifecycleId: lid };
+    }
+
+    // Server-side identity resolution (never trust the browser for this).
+    const primarySnap = await db.collection("ipear_customers").doc(customerId).get();
+    if (!primarySnap.exists) {
+      // No doc + no audit: nonexistent, or a prior run already deleted the doc
+      // but crashed before auditing. No identifiers remain to safely continue,
+      // so this is a no-op (no financial evidence can be at risk here).
+      _securityEvent("lifecycle_noop_missing", { uid: actorUid, customerId, lifecycleId: lid });
+      return { ok: true, idempotent: true, notFound: true, lifecycleId: lid };
+    }
+    const pdata = primarySnap.data() || {};
+    const uids = new Set();
+    if (pdata.uid) uids.add(pdata.uid);
+    const email = (pdata.email || "").toLowerCase();
+    const phone = pdata.phone || "";
+    const card = pdata.card || "";
+    const custIds = new Set([customerId]);
+
+    // Orphan discovery: other ipear_customers docs sharing phone/email/card.
+    for (const [field, val] of [["phone", phone], ["email", email], ["card", card]]) {
+      if (!val) continue;
+      const q = await db.collection("ipear_customers").where(field, "==", val).get();
+      q.forEach((d) => {
+        custIds.add(d.id);
+        const od = d.data() || {};
+        if (od.uid) uids.add(od.uid);
+      });
+    }
+    const tombstone = tombstoneId(pdata.uid || customerId);
+
+    // ── Step A: anonymize the FINANCIAL LEDGER (retain evidence) ────────────
+    let ledgerSeen = 0, ledgerAnon = 0;
+    for (const cid of custIds) {
+      const r = await _anonymizeLedgerByQuery("ipear_transactions", "customerId", cid, tombstone, nowIso);
+      ledgerSeen += r.seen; ledgerAnon += r.anonymized;
+    }
+    for (const u of uids) {
+      const r = await _anonymizeLedgerByQuery("ipear_transactions", "customerUid", u, tombstone, nowIso);
+      ledgerSeen += r.seen; ledgerAnon += r.anonymized;
+    }
+    if (email) {
+      const r = await _anonymizeLedgerByQuery("ipear_transactions", "customerEmail", email, tombstone, nowIso);
+      ledgerSeen += r.seen; ledgerAnon += r.anonymized;
+    }
+
+    // ── Step B: anonymize REDEMPTION financial evidence (retain) ────────────
+    for (const u of uids) {
+      await _anonymizeLedgerByQuery("ipear_offer_redemptions", "customerId", u, tombstone, nowIso);
+      await _anonymizeLedgerByQuery("ipear_offer_redemptions", "customerUid", u, tombstone, nowIso);
+      await _anonymizeLedgerByQuery("ipear_redemptions", "customerUid", u, tombstone, nowIso);
+    }
+
+    // ── Step C: anonymize OPERATIONAL PII records (keep markers) ────────────
+    for (const u of uids) {
+      await _anonymizeLedgerByQuery("ipear_redemption_requests", "customerUid", u, tombstone, nowIso);
+      await _anonymizeLedgerByQuery("ipear_birthday_claims", "customerUid", u, tombstone, nowIso);
+      await _anonymizeLedgerByQuery("audit_logs", "customerUid", u, tombstone, nowIso);
+    }
+
+    // ── Step D: DELETE transient operational markers (no evidence) ──────────
+    let referralDeleted = 0;
+    for (const u of uids) {
+      try { await db.collection("ipear_referral_queue").doc(u).delete(); referralDeleted++; } catch (_) {}
+      referralDeleted += await _deleteByQuery("ipear_referral_queue", "uid", u);
+    }
+
+    // ── Step E: DELETE Firebase Auth user(s) (user-not-found == success) ────
+    let authDeleted = 0;
+    for (const u of uids) {
+      try { await getAuth().deleteUser(u); authDeleted++; }
+      catch (e) {
+        if (e && e.code === "auth/user-not-found") { authDeleted++; continue; }
+        _securityEvent("lifecycle_auth_delete_error", { uid: actorUid, lifecycleId: lid, code: e && e.code });
+        throw new HttpsError("internal", "Auth deletion failed; retry is safe.");
+      }
+    }
+
+    // ── Step F: write the immutable admin_audit COMPLETION event ────────────
+    // Written BEFORE the final customer-doc deletion so the stored target ids
+    // let a crashed run resume the deletion tail. Deterministic id → no dupes.
+    await auditRef.set({
+      action: "admin_delete_customer",
+      actorUid,
+      targetCustomerId: customerId,
+      targetCustomerIds: Array.from(custIds),
+      targetUids: Array.from(uids),
+      tombstone,
+      lifecycleId: lid,
+      result: "success",
+      ledgerRowsSeen: ledgerSeen,
+      ledgerRowsAnonymized: ledgerAnon,
+      referralQueueDeleted: referralDeleted,
+      authUsersDeleted: authDeleted,
+      at: nowIso,
+      serverTimestamp: FieldValue.serverTimestamp(),
+    });
+
+    // ── Step G: DELETE the PII-bearing customer docs LAST ───────────────────
+    await _deleteCustomerDocs(Array.from(custIds));
+
+    _securityEvent("lifecycle_deleted", {
+      uid: actorUid, customerId, lifecycleId: lid,
+      custDocs: custIds.size, uids: uids.size, ledgerAnonymized: ledgerAnon,
+    });
+    return {
+      ok: true, idempotent: false, tombstone, lifecycleId: lid,
+      customersDeleted: custIds.size, ledgerRowsAnonymized: ledgerAnon,
+    };
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    _securityEvent("lifecycle_error", { uid: actorUid, customerId, code: e && e.code });
+    throw new HttpsError("internal", "Customer deletion failed; retry is safe.");
+  }
+}
+exports.adminDeleteCustomer = onCall(
+  { enforceAppCheck: true, region: "europe-west1" },
+  _adminDeleteCustomerHandler
+);
+
 // L2.3A exports for local unit tests (mocked Firestore + real-emulator
 // integration tests). Firebase Functions honors CommonJS module.exports
 // for the deploy path — extending module.exports here (not `exports`)
@@ -1384,9 +1948,21 @@ module.exports._l23aInternals = {
   // Emulator-integration helpers — expose the admin-SDK Firestore instance
   // + timestamp helpers so tests can seed/read data without re-importing
   // firebase-admin from a test-root that lacks it.
+  // ADMIN FORTRESS Stage 0/1 — owner gate + server-authoritative adjust handler.
+  _requireOwner,
+  _adminAdjustPointsHandler,
+  _adminBatchMaintenanceHandler,
+  _adminBirthdayCreditHandler,
+  _adminVerifyRedemptionHandler,
+  _adminDeleteCustomerHandler,
+  _commitAdjustment,
+  _financialActionsDisabled,
   db,
   Timestamp,
   FieldValue,
   _requireTablet,
   _requireAdmin,
+  // ADMIN FORTRESS Stage 2 — lifecycle emulator harness helpers.
+  _deleteCustomerDocs,
+  getAuth,
 };
