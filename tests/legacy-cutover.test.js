@@ -81,27 +81,43 @@ describe('Phase D · legacy loyalty-mutation kill-switch', () => {
     expect(r.status).toBe(410);
   });
 
-  it('kill-switch ON — /woo-get-user (read-only) is NOT killed, ADMIN_SECRET still works', async () => {
-    // Read-only endpoint intentionally excluded from the kill list — no mutation risk.
-    // We shim fetch so the handler can complete a customer lookup.
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
+  it('Stage 3D — /woo-get-user is now RETIRED (410) by default (replacement: /woo/v2/get-user)', async () => {
+    // Stage 3C moved the My-Account lookup to the scoped /woo/v2/get-user
+    // (WOO_LOOKUP_SECRET); Stage 3D retires the legacy ADMIN_SECRET read route.
     const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true' });
     const r = await worker.fetch(
       req('/woo-get-user', { email: 'x@y.gr' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
       env, {}
     );
-    // The exact response depends on the handler's own logic (200 with empty
-    // result, or 404). Either way, it is NOT 410.
+    expect(r.status).toBe(410);
+  });
+
+  it('Stage 3D rollback — /woo-get-user (read-only) still works with ADMIN_SECRET; the mutation flag never killed reads', async () => {
+    // In explicit server-side rollback the legacy read path resumes. The
+    // read-only route was never in the LOYALTY_LEGACY_MUTATION_DISABLED kill list.
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
+    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true', ADMIN_LEGACY_ROUTES_ENABLED: 'true' });
+    const r = await worker.fetch(
+      req('/woo-get-user', { email: 'x@y.gr' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
+      env, {}
+    );
     expect(r.status).not.toBe(410);
   });
 
-  it('kill-switch OFF → /woo-add-points reaches the (legacy) handler as before', async () => {
-    // With the flag unset, the router falls through to the legacy handler.
-    // The handler will call Firestore; we shim fetch to return an empty
-    // customer query so the request completes with 404 (customer-not-found)
-    // rather than a network error. The important assertion is: NOT 410.
+  it('Stage 3D — /woo-add-points is retired (410) by DEFAULT even with the mutation flag unset', async () => {
+    // The broader Stage 3D retirement (ADMIN_LEGACY_ROUTES_ENABLED absent)
+    // supersedes the older per-endpoint LOYALTY_LEGACY_MUTATION_DISABLED switch.
+    const env = baseEnv();   // no LOYALTY flag, no rollback switch
+    const r = await worker.fetch(
+      req('/woo-add-points', { email: 'x@y.gr', orderTotal: 100, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
+      env, {}
+    );
+    expect(r.status).toBe(410);
+  });
+
+  it('Stage 3D rollback + mutation flag OFF → /woo-add-points reaches the legacy handler', async () => {
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
-    const env = baseEnv();   // no LOYALTY_LEGACY_MUTATION_DISABLED
+    const env = baseEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' });   // rollback, LOYALTY flag unset
     const r = await worker.fetch(
       req('/woo-add-points', { email: 'x@y.gr', orderTotal: 100, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
       env, {}

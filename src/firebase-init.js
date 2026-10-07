@@ -264,6 +264,15 @@ if (IS_DEMO) {
     try {
       _appCheckInstance = initializeAppCheck(app, { provider: new ReCaptchaV3Provider(_AC_KEY), isTokenAutoRefreshEnabled: true });
       logger.log('[app-check] ✅ initialized');
+      // ADMIN FORTRESS Stage 3B — expose a transient App Check token getter for
+      // the owner-auth adapter. Returns the token STRING for a single request;
+      // the SDK manages caching/refresh. Never persisted. Throws if unavailable.
+      window._getAppCheckToken = async (forceRefresh = false) => {
+        if (!_appCheckInstance) throw new Error('appcheck-unavailable');
+        const r = await _getAppCheckToken(_appCheckInstance, forceRefresh);
+        if (!r || !r.token) throw new Error('appcheck-no-token');
+        return r.token;
+      };
       // Verify a token can actually be minted — an initialized SDK is not the
       // same as a working exchange. `getToken(inst, false)` uses cache when
       // available; a rejection here means the exchange failed at some point.

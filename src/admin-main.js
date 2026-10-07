@@ -11,7 +11,7 @@ import {
   renderAnalytics,
   openDrillDown,
 } from './admin/analytics.js';
-import { toast, closeM } from './admin/ui.js';
+import { closeM } from './admin/ui.js';
 import { initAdminAuth, unlock, adminLogout } from './admin/admin-auth.js';
 import { initGdpr, loadDeletionRequests, gdprDeleteCustomer } from './admin/gdpr.js';
 import {
@@ -40,7 +40,15 @@ import {
 import {
   getWorkerSecret as _getWorkerSecret,
   setWorkerSecret as _setWorkerSecret,
+  clearWorkerSecret as _clearWorkerSecretStartup,
 } from './admin/worker-secret.js';
+import { isOwnerAuthEnabled as _isOwnerAuthEnabled } from './admin/owner-api.js';
+
+// ADMIN FORTRESS Stage 3B — when owner-auth is ON, the admin browser must hold
+// NO reusable master secret. Purge any stale ipear_worker_secret at startup
+// (logout also clears it via admin-auth.js). Legacy rollback path (flag OFF)
+// is untouched.
+try { if (_isOwnerAuthEnabled()) _clearWorkerSecretStartup(); } catch (_) {}
 import {
   toggleWorkerConfig,
   saveWorkerConfig,

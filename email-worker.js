@@ -51,6 +51,12 @@ import {
 // deployed plugin; new endpoints /woo-credit-order and /woo-refund-order
 // use the ledger doc `ipear_woo_events/{siteHash}__{orderId}`.
 import { handleWooCreditOrder, handleWooRefundOrder } from './src/worker/lib/woo-integrity.js';
+// ADMIN FORTRESS Stage 3A — additive owner-grade auth (Firebase ID token +
+// admin claim + OWNER_UID + App Check). Backs the /admin/v2/* routes.
+// Stage 3D: the legacy ADMIN_SECRET routes are now RETIRED (fail-closed behind
+// env.ADMIN_LEGACY_ROUTES_ENABLED, default off); /admin/create-admin-user is
+// retired unconditionally. ADMIN_SECRET stays configured for rollback only.
+import { requireOwner } from './src/worker/lib/owner-auth.js';
 
 const MAX_RECIPIENTS = 5000;
 const MAX_TOKENS     = 5000;
@@ -249,14 +255,11 @@ export default {
   // ── Cron Trigger: runs /health-deep every 30 minutes ──
   async scheduled(event, env, _ctx) {
     console.log('[cron] health-deep check triggered at', new Date().toISOString());
-    const fakeUrl = 'https://worker/health-deep';
-    const fakeReq = new Request(fakeUrl, {
-      method: 'GET',
-      headers: { 'Authorization': 'Bearer ' + (env.ADMIN_SECRET || '') }
-    });
-    const result = await handleHealthDeep(fakeReq, env, {});
-    const body = await result.json();
-    console.log('[cron] health-deep result:', JSON.stringify(body));
+    // Stage 3D: run the probe IN-PROCESS. No synthetic Request, no ADMIN_SECRET
+    // bearer, no HTTP auth hop — scheduled monitoring is fully decoupled from
+    // the (now retired) /health-deep HTTP surface.
+    const { results } = await _runHealthDeep(env);
+    console.log('[cron] health-deep result:', JSON.stringify(results));
   },
 
   async fetch(request, env, ctx) {
@@ -329,6 +332,17 @@ export default {
     if (path === '/client-error')    return handleClientError(request, env, CORS);
     if (path === '/log-event')       return handleLogEvent(request, env, CORS, ctx);
 
+    // ── ADMIN FORTRESS Stage 3D — /woo-create-coupon moved OFF the ADMIN_SECRET
+    //  gate into the public/idToken section. The handler authenticates the
+    //  CUSTOMER via their own Firebase ID token (verified server-side against
+    //  FIREBASE_API_KEY, then matched to their ipear_customers doc), with a
+    //  per-IP rate limit and hard discount caps. It never needed ADMIN_SECRET —
+    //  and while it sat BEHIND the gate it was effectively broken for real
+    //  customers (idToken-only calls were 401'd by the master-secret check).
+    //  Routing it here fixes the e-shop coupon redemption AND removes it from
+    //  the ADMIN_SECRET acceptance surface (it carries no master-secret authority).
+    if (path === '/woo-create-coupon') return handleWooCreateCoupon(request, env, CORS);
+
     // ── ERP integration: phone-based customer lookup ──
     //
     //  POST /erp/lookup-by-phone  { phone: "6912345678" }
@@ -360,6 +374,13 @@ export default {
       timingSafeEqual,
     });
 
+    // ── ADMIN FORTRESS Stage 3C — scoped read-only Woo customer lookup ────────
+    //  Authenticated ONLY by WOO_LOOKUP_SECRET (timing-safe, own dedicated
+    //  secret — never ADMIN_SECRET). Routed BEFORE the ADMIN_SECRET gate so it
+    //  carries no master-secret authority. Legacy /woo-get-user stays for
+    //  rollback until Stage 3D.
+    if (path === '/woo/v2/get-user')  return handleWooLookupV2(request, env, CORS);
+
     // ── PHASE L1 · Legacy loyalty mutation kill-switch (env-gated) ────────
     //
     //  Phase D of the zero-downtime cutover: once the new plugin is deployed
@@ -381,18 +402,72 @@ export default {
       }, 410, CORS);
     }
 
-    // All other endpoints require ADMIN_SECRET
+    // ── ADMIN FORTRESS Stage 3A · NEW parallel owner-authenticated routes ──
+    //   Firebase ID token + admin:true claim + OWNER_UID allowlist + App Check.
+    //   ADDITIVE: these /admin/v2/* paths carry NO reusable master secret and
+    //   are routed BEFORE the ADMIN_SECRET gate. The legacy paths below remain
+    //   fully operational for rollback. Fail-closed: any token/claim/owner/
+    //   App-Check/config problem → deny (never fall through to the secret gate).
+    //   Owner-minting is intentionally NOT exposed here (see Stage-3 audit §E).
+    {
+      const V2 = {
+        '/admin/v2/email':            handleEmail,
+        '/admin/v2/sms':              handleSMS,
+        '/admin/v2/bulk-sms':         handleBulkSMS,
+        '/admin/v2/delete-auth-user': handleDeleteAuthUser,
+        '/admin/v2/export-backup':    handleExportBackup,
+      };
+      if (Object.prototype.hasOwnProperty.call(V2, path)) {
+        const gate = await requireOwner(request, env);
+        if (!gate.ok) return resp({ error: 'forbidden', code: gate.code }, gate.status, CORS);
+        return V2[path](request, env, CORS);
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ADMIN FORTRESS Stage 3D — RETIRE THE LEGACY ADMIN_SECRET SURFACE
+    //
+    //  create-admin is retired PERMANENTLY and UNCONDITIONALLY (3D.2): no
+    //  runtime HTTP endpoint may mint a loyalty admin, and there is NO rollback
+    //  switch for it. Future bootstrap/recovery is an out-of-band operator
+    //  procedure (Firebase/GCP admin tooling), never a public route. Returned
+    //  BEFORE any secret comparison so a correct ADMIN_SECRET gets the identical
+    //  retired response — the route is never a secret-validity oracle (3D.9).
+    if (path === '/admin/create-admin-user') {
+      return resp({ error: 'endpoint-retired' }, 410, CORS);
+    }
+
+    //  Every other legacy ADMIN_SECRET-gated route is FAIL-CLOSED. The default
+    //  (env.ADMIN_LEGACY_ROUTES_ENABLED absent or ≠ 'true') RETIRES them all.
+    //  The 410 is returned BEFORE the ADMIN_SECRET compare, so a correct OR a
+    //  wrong secret yields the same response (no oracle, 3D.9). This covers the
+    //  known legacy paths AND any unmatched POST (the old handleEmail default).
+    //  Live replacements (unchanged by this stage):
+    //    /admin/v2/{email,sms,bulk-sms,delete-auth-user,export-backup}
+    //        → Firebase ID token + admin:true + OWNER_UID + App Check
+    //    /woo/v2/get-user            → WOO_LOOKUP_SECRET (read-only lookup)
+    //    /woo-credit-order,/woo-refund-order → WOO_LOYALTY_SECRET (financial)
+    //  ROLLBACK is SERVER-SIDE ONLY: `wrangler secret put ADMIN_LEGACY_ROUTES_
+    //  ENABLED` = 'true'. It is never bundled into any frontend, never settable
+    //  by the browser / WordPress / a request body, and cannot be enabled by
+    //  presenting ADMIN_SECRET. There is NO automatic fallback (3D.7).
+    if (env.ADMIN_LEGACY_ROUTES_ENABLED !== 'true') {
+      return resp({ error: 'endpoint-retired' }, 410, CORS);
+    }
+
+    // ════════ Below: legacy ADMIN_SECRET path — reachable ONLY in explicit ═══
+    // ════════ server-side rollback (ADMIN_LEGACY_ROUTES_ENABLED='true').   ═══
+    //  Dead in production (the switch is absent → every request already 410'd
+    //  above). Retained as rollback-only implementation per 3D.7 / 3D.15.
     const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
     if (!env.ADMIN_SECRET || !(await timingSafeEqual(auth, env.ADMIN_SECRET))) {
       return resp({ error: 'Unauthorized' }, 401, CORS);
     }
 
     if (path === '/bulk-sms') return handleBulkSMS(request, env, CORS);
-    if (path === '/woo-create-coupon') return handleWooCreateCoupon(request, env, CORS);
     if (path === '/sms')      return handleSMS(request, env, CORS);
     if (path === '/admin/redeem-attempt') return handleRedeemAttempt(request, env, CORS);
     if (path === '/admin/delete-auth-user') return handleDeleteAuthUser(request, env, CORS);
-    if (path === '/admin/create-admin-user') return handleCreateAdminUser(request, env, CORS);
     if (path === '/admin/export-backup') return handleExportBackup(request, env, CORS);
     if (path === '/woo-add-points')   return handleWooAddPoints(request, env, CORS, ctx);
     if (path === '/woo-refund-points') return handleWooRefundPoints(request, env, CORS);
@@ -1129,17 +1204,22 @@ function buildWelcomeEmail(name, points, appUrl) {
 //  Admin-only endpoint — returns customer loyalty data by email.
 //  Used by WooCommerce "My Account" tab to show points & name.
 // ══════════════════════════════════════════════════════════════════════════
-async function handleWooGetUser(request, env, CORS) {
+// Shared minimized customer lookup (one source of truth for both the legacy
+// ADMIN_SECRET /woo-get-user and the Stage-3C scoped /woo/v2/get-user). Returns
+// ONLY { name, points, totalPoints, card } for a single exact-email match — no
+// enumeration, no other PII/claims/audit. Auth is the caller's responsibility.
+async function _wooCustomerLookup(request, env, CORS, extraHeaders = {}) {
+  const H = { ...CORS, ...extraHeaders };
   let body;
   try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, H); }
 
   const email = (body.email || '').trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return resp({ error: 'Valid email required' }, 400, CORS);
+    return resp({ error: 'Valid email required' }, 400, H);
 
   if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
+    return resp({ error: 'Server not configured' }, 503, H);
 
   try {
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
@@ -1163,7 +1243,7 @@ async function handleWooGetUser(request, env, CORS) {
     });
     const results = await queryRes.json();
     const doc = Array.isArray(results) && results[0]?.document;
-    if (!doc) return resp({ error: 'Customer not found' }, 404, CORS);
+    if (!doc) return resp({ error: 'Customer not found' }, 404, H);
 
     const f = doc.fields || {};
     return resp({
@@ -1172,12 +1252,33 @@ async function handleWooGetUser(request, env, CORS) {
       points: Number(f.points?.integerValue || 0),
       totalPoints: Number(f.totalPoints?.integerValue || 0),
       card: f.card?.stringValue || '',
-    }, 200, CORS);
+    }, 200, H);
 
   } catch (e) {
-    console.error('[woo-get-user]', e.message);
-    return resp({ error: 'Internal error' }, 500, CORS);
+    console.error('[woo-lookup]', e.message);
+    return resp({ error: 'Internal error' }, 500, H);
   }
+}
+
+// Legacy ADMIN_SECRET-gated lookup (auth enforced at the router gate). Unchanged
+// contract; kept for rollback until Stage 3D.
+async function handleWooGetUser(request, env, CORS) {
+  return _wooCustomerLookup(request, env, CORS);
+}
+
+// ── ADMIN FORTRESS Stage 3C — scoped read-only Woo lookup ────────────────────
+//  POST /woo/v2/get-user — authenticated ONLY by WOO_LOOKUP_SECRET (timing-safe).
+//  No ADMIN_SECRET, no fallback. Fail-closed if the secret is unset. Returns the
+//  same minimized single-customer shape with Cache-Control: no-store.
+async function handleWooLookupV2(request, env, CORS) {
+  const NOSTORE = { ...CORS, 'Cache-Control': 'no-store' };
+  if (request.method !== 'POST') return resp({ error: 'method-not-allowed' }, 405, NOSTORE);
+  const configured = String(env.WOO_LOOKUP_SECRET || '');
+  if (!configured) return resp({ error: 'server-misconfigured' }, 503, NOSTORE); // fail-closed
+  const presented = String(request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!presented) return resp({ error: 'missing-auth' }, 401, NOSTORE);
+  if (!(await timingSafeEqual(presented, configured))) return resp({ error: 'bad-auth' }, 401, NOSTORE);
+  return _wooCustomerLookup(request, env, CORS, { 'Cache-Control': 'no-store' });
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2054,98 +2155,23 @@ async function handleDeleteAuthUser(request, env, CORS) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  CREATE / RESET ADMIN OR TABLET ACCOUNT
+//  CREATE / RESET ADMIN OR TABLET ACCOUNT — RETIRED (ADMIN FORTRESS Stage 3D)
 //
-//  POST /admin/create-admin-user
-//  Body: { email, password, storeid? }
+//  The runtime admin-minting endpoint (POST /admin/create-admin-user) has been
+//  RETIRED unconditionally: the router returns 410 "endpoint-retired" with no
+//  rollback switch, and the handler implementation has been REMOVED so no code
+//  path — not even in rollback mode — can mint or reset a loyalty admin over
+//  HTTP (3D.2: "NO RUNTIME HTTP ENDPOINT CAN MINT A NEW LOYALTY ADMIN").
 //
-//  Idempotent: if email already exists, updates the password instead of erroring.
-//  Always (re)writes the ipear_admins/{uid} doc so the user has admin rights.
-//  Requires the same ADMIN_SECRET as every other /admin/* endpoint.
+//  If admin bootstrap/recovery is ever required, it is a controlled, out-of-band
+//  operator procedure using Firebase Auth + Firestore admin tooling (set the
+//  password in the Firebase console / Admin SDK, then write ipear_admins/{uid}
+//  and the admin:true custom claim). It must never be re-exposed as a public
+//  runtime route.
 // ══════════════════════════════════════════════════════════════════════════
-async function handleCreateAdminUser(request, env, CORS) {
-  let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const email    = (body.email    || '').trim().toLowerCase();
-  const password = body.password  || '';
-  const storeid  = (body.storeid  || '').trim();
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)
-    return resp({ error: 'invalid email' }, 400, CORS);
-  if (typeof password !== 'string' || password.length < 6 || password.length > 128)
-    return resp({ error: 'password must be 6-128 chars' }, 400, CORS);
-
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
-
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    let uid;
-    let created = false;
-
-    // 1. Create the Auth user (idempotent — falls back to lookup+password-update if it exists)
-    const signupRes = await fetch(`https://identitytoolkit.googleapis.com/v1/projects/${projectId}/accounts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-      body: JSON.stringify({ email, password, emailVerified: true })
-    });
-
-    if (signupRes.ok) {
-      uid = (await signupRes.json()).localId;
-      created = true;
-    } else {
-      const errBody = await signupRes.json().catch(() => ({}));
-      const code = errBody?.error?.message || '';
-      if (code === 'EMAIL_EXISTS' || code === 'DUPLICATE_EMAIL') {
-        // Already exists — look up the UID and force-update the password
-        const lookupRes = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-          body: JSON.stringify({ email: [email] })
-        });
-        if (!lookupRes.ok) return resp({ error: 'Email exists but lookup failed: ' + lookupRes.status }, 500, CORS);
-        const lookup = await lookupRes.json();
-        const existing = lookup?.users?.[0];
-        if (!existing?.localId) return resp({ error: 'Email exists but no UID returned' }, 500, CORS);
-        uid = existing.localId;
-        const updateRes = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-          body: JSON.stringify({ localId: uid, password })
-        });
-        if (!updateRes.ok) {
-          const updErr = await updateRes.json().catch(() => ({}));
-          return resp({ error: 'Failed to update password: ' + (updErr?.error?.message || updateRes.status) }, 500, CORS);
-        }
-      } else {
-        return resp({ error: 'Auth user creation failed: ' + code }, 500, CORS);
-      }
-    }
-
-    // 2. (Re)write the ipear_admins/{uid} doc so this user has admin privileges
-    const adminWriteRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_admins/${uid}`,
-      {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-        body: JSON.stringify({ fields: { storeid: { stringValue: storeid } } })
-      }
-    );
-    if (!adminWriteRes.ok) {
-      const errText = await adminWriteRes.text();
-      console.error('[create-admin-user] Firestore write failed:', errText);
-      return resp({ error: 'Auth user ready but ipear_admins write failed', uid }, 500, CORS);
-    }
-
-    return resp({ success: true, uid, email, created, storeid }, 200, CORS);
-  } catch(e) {
-    console.error('[create-admin-user]', e.message);
-    return resp({ error: 'Internal error: ' + e.message }, 500, CORS);
-  }
-}
+//  (Implementation deleted in Stage 3D. The former body created/looked-up a
+//   Firebase Auth user via Identity Toolkit signUp/accounts:update and wrote
+//   ipear_admins/{uid}. The route now returns 410 in the main router.)
 
 // ══════════════════════════════════════════════════════════════════════════
 //  SMS HANDLER (Brevo Transactional SMS)
@@ -3370,12 +3396,27 @@ async function handleClientError(request, env, CORS) {
 // ══════════════════════════════════════════════════════════════════════════
 
 async function handleHealthDeep(request, env, CORS) {
-  // Auth: Bearer-only — no query string fallback (secrets must never travel in URLs)
+  const H = { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
+  // ── ADMIN FORTRESS Stage 3D — HTTP surface retired (fail-closed) ──
+  //  The deep-health probe is invoked by the cron IN-PROCESS via _runHealthDeep;
+  //  the HTTP route exists only for explicit server-side rollback. Default
+  //  (ADMIN_LEGACY_ROUTES_ENABLED absent or ≠ 'true') → 410, returned BEFORE any
+  //  ADMIN_SECRET comparison so the endpoint is never a secret-validity oracle.
+  if (env.ADMIN_LEGACY_ROUTES_ENABLED !== 'true') {
+    return resp({ error: 'endpoint-retired' }, 410, H);
+  }
+  // Rollback-only: preserve the original Bearer ADMIN_SECRET auth exactly.
   const secret = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
   if (!env.ADMIN_SECRET || !(await timingSafeEqual(secret, env.ADMIN_SECRET))) {
-    return resp({ error: 'Unauthorized' }, 401, CORS);
+    return resp({ error: 'Unauthorized' }, 401, H);
   }
+  const { results, degraded } = await _runHealthDeep(env);
+  return resp(results, degraded ? 503 : 200, H);
+}
 
+// Stage 3D: auth-free, in-process deep-health probe. Returns { results, degraded }.
+// Callable directly by the cron (trusted) and by the rollback HTTP wrapper above.
+async function _runHealthDeep(env) {
   const results = { worker: 'ok', brevo: 'unknown', firestore: 'unknown', timestamp: new Date().toISOString() };
   const alerts = [];
 
@@ -3466,7 +3507,7 @@ async function handleHealthDeep(request, env, CORS) {
     results.status = 'ok';
   }
 
-  return resp(results, alerts.length > 0 ? 503 : 200, { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
+  return { results, degraded: alerts.length > 0 };
 }
 
 // Caller contract: `detail` is PLAIN TEXT. Use `\n` for line breaks. Do NOT
@@ -3586,7 +3627,8 @@ async function _rebuildLeaderboard(fsBase, fsHeaders) {
 //  full-DB exfiltration over a single HTTPS request.
 //
 //  New behaviour:
-//    POST /admin/export-backup     (ADMIN_SECRET-gated)
+//    POST /admin/export-backup     (Stage 3B: /admin/v2/export-backup, Firebase
+//        owner auth + App Check; legacy ADMIN_SECRET variant retired in 3D)
 //        → uploads compact JSON to R2 under a random key
 //        → returns { downloadUrl, expiresAt, totalCustomers, key }
 //        → writes an audit_logs row with the calling IP + key
@@ -3595,15 +3637,16 @@ async function _rebuildLeaderboard(fsBase, fsHeaders) {
 //        → key+exp+sig query params; HMAC verified timing-safely
 //        → streams the R2 object body; 410 once expired
 //
-//  Reqs: env.BACKUP_R2 (R2 binding), env.ADMIN_SECRET (HMAC key).
-//  Setup (one-time, Cloudflare dashboard):
+//  Reqs: env.BACKUP_R2 (R2 binding), env.BACKUP_SIGNING_KEY (dedicated HMAC key
+//        — Stage 3D decoupled this from ADMIN_SECRET).
+//  Setup (one-time):
 //    1. R2 → Create bucket "ipear-backups"
 //    2. wrangler.toml: add the [[r2_buckets]] block (already templated)
-//    3. wrangler secret put ADMIN_SECRET (already set)
+//    3. wrangler secret put BACKUP_SIGNING_KEY
 //    4. Optional retention rule on R2: delete after 30 days
 // ══════════════════════════════════════════════════════════════════════════
 
-// HMAC-SHA-256 signing of "key:expEpochMs" using ADMIN_SECRET.
+// HMAC-SHA-256 signing of "key:expEpochMs" using BACKUP_SIGNING_KEY.
 // Returns lowercase hex. Use timingSafeHexEqual() to verify.
 async function _hmacHex(secret, message) {
   const enc = new TextEncoder();
@@ -3634,8 +3677,10 @@ async function handleExportBackup(request, env, CORS) {
              '([[r2_buckets]] binding="BACKUP_R2" bucket_name="ipear-backups").'
     }, 503, CORS);
   }
-  if (!env.ADMIN_SECRET) {
-    return resp({ error: 'ADMIN_SECRET not configured (required for signed-URL HMAC).' }, 503, CORS);
+  // Stage 3D: download-URL HMAC now uses a DEDICATED BACKUP_SIGNING_KEY, not
+  // ADMIN_SECRET — so a leaked ADMIN_SECRET can no longer forge backup links.
+  if (!env.BACKUP_SIGNING_KEY) {
+    return resp({ error: 'Service not configured' }, 503, CORS);
   }
 
   try {
@@ -3711,7 +3756,7 @@ async function handleExportBackup(request, env, CORS) {
     // ── Sign URL valid for 10 minutes ──
     const EXPIRY_MS = 10 * 60 * 1000;
     const expiresAtMs = Date.now() + EXPIRY_MS;
-    const sig = await _hmacHex(env.ADMIN_SECRET, `${key}:${expiresAtMs}`);
+    const sig = await _hmacHex(env.BACKUP_SIGNING_KEY, `${key}:${expiresAtMs}`);
     const downloadUrl = `${new URL(request.url).origin}/admin/export-download` +
       `?key=${encodeURIComponent(key)}&exp=${expiresAtMs}&sig=${sig}`;
 
@@ -3751,7 +3796,7 @@ async function handleExportBackup(request, env, CORS) {
 //  Routed in the PUBLIC section because the signature is the only credential.
 // ══════════════════════════════════════════════════════════════════════════
 async function handleExportDownload(request, env, CORS) {
-  if (!env.BACKUP_R2 || !env.ADMIN_SECRET) {
+  if (!env.BACKUP_R2 || !env.BACKUP_SIGNING_KEY) {
     return resp({ error: 'Service not configured' }, 503, CORS);
   }
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -3777,7 +3822,7 @@ async function handleExportDownload(request, env, CORS) {
   if (Date.now() > expMs) {
     return resp({ error: 'Signed URL expired' }, 410, CORS);
   }
-  const expected = await _hmacHex(env.ADMIN_SECRET, `${key}:${expMs}`);
+  const expected = await _hmacHex(env.BACKUP_SIGNING_KEY, `${key}:${expMs}`);
   if (!_timingSafeHexEqual(sig, expected)) {
     return resp({ error: 'Signature mismatch' }, 403, CORS);
   }

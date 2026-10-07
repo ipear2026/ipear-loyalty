@@ -2,6 +2,8 @@ import { getDb, collection, getDocs } from '../services/firebase.js';
 import { tier, escHtml } from '../utils.js';
 import { toast } from './ui.js';
 import { getWorkerSecret } from './worker-secret.js';
+// ADMIN FORTRESS Stage 3B — owner-auth path (flag ON), no master secret.
+import { isOwnerAuthEnabled, ownerSendBulkSms } from './owner-api.js';
 
 const SMS_COST_PER_MSG = 0.05; // €0.05/SMS (Brevo Greece GSM-7)
 
@@ -87,9 +89,10 @@ let _sendSMSBulkBusy = false;
 
 export async function sendSMSBulk() {
   if (_sendSMSBulkBusy) return;
+  const _ownerAuth = isOwnerAuthEnabled();
   const workerUrl = localStorage.getItem('ipear_worker_url');
-  const workerSec = getWorkerSecret();
-  if (!workerUrl || !workerSec) {
+  const workerSec = _ownerAuth ? '' : getWorkerSecret();
+  if (!workerUrl || (!_ownerAuth && !workerSec)) {
     toast('⚠️ Ρύθμισε πρώτα τον Worker (κουμπί Ρυθμίσεις)!', 'error');
     document.getElementById('worker-cfg-panel').style.display = 'block';
     document.getElementById('worker-cfg-toggle').textContent = '▲ Απόκρυψη';
@@ -143,18 +146,22 @@ export async function sendSMSBulk() {
 
     prog.textContent = `📤 Αποστολή σε ${recipients.length} παραλήπτες...`;
 
-    const smsUrl = workerUrl.replace(/\/$/, '') + '/bulk-sms';
-    const response = await fetch(smsUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${workerSec}`,
-      },
-      body: JSON.stringify({ recipients, message }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    let data;
+    if (_ownerAuth) {
+      data = await ownerSendBulkSms({ recipients, message });
+    } else {
+      const smsUrl = workerUrl.replace(/\/$/, '') + '/bulk-sms';
+      const response = await fetch(smsUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${workerSec}`,
+        },
+        body: JSON.stringify({ recipients, message }),
+      });
+      data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    }
 
     prog.style.display = 'none';
     const failedLine = data.failed > 0

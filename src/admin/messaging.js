@@ -17,6 +17,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { tier } from '../utils.js';
 import { toast, closeM } from './ui.js';
+// ADMIN FORTRESS Stage 3B — owner-auth path (flag ON), no master secret.
+import { isOwnerAuthEnabled, ownerSendSms, ownerSendEmail } from './owner-api.js';
 
 let _hooks = {
   getScope: () => ({ cdata: null, msgCh: '' }),
@@ -121,9 +123,10 @@ let _smsSendBusy = false;
 export async function sendSMSIndividual() {
   if (_smsSendBusy) return;
   const { cdata } = _hooks.getScope();
+  const _ownerAuth = isOwnerAuthEnabled();
   const workerUrl = localStorage.getItem('ipear_worker_url');
-  const workerSec = _hooks.getWorkerSecret();
-  if (!workerUrl || !workerSec) { toast('⚠️ Ορίστε τον Worker URL στις Ειδοποιήσεις πρώτα!', 'error'); closeM(); return; }
+  const workerSec = _ownerAuth ? '' : _hooks.getWorkerSecret();
+  if (!workerUrl || (!_ownerAuth && !workerSec)) { toast('⚠️ Ορίστε τον Worker URL στις Ειδοποιήσεις πρώτα!', 'error'); closeM(); return; }
   const message = document.getElementById('ms-body').value.trim();
   const err = document.getElementById('ms-err');
   if (!message) { err.textContent = '⚠️ Συμπλήρωσε μήνυμα'; return; }
@@ -132,14 +135,18 @@ export async function sendSMSIndividual() {
   btn.disabled = true; btn.textContent = '⏳ Αποστολή...';
   err.textContent = '';
   try {
-    const smsUrl = workerUrl.replace(/\/$/, '') + '/sms';
-    const response = await fetch(smsUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${workerSec}` },
-      body: JSON.stringify({ phone: cdata.phone, message }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (_ownerAuth) {
+      await ownerSendSms({ phone: cdata.phone, message });
+    } else {
+      const smsUrl = workerUrl.replace(/\/$/, '') + '/sms';
+      const response = await fetch(smsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${workerSec}` },
+        body: JSON.stringify({ phone: cdata.phone, message }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    }
     toast(`✅ SMS εστάλη στον/στην ${cdata.name}!`, 'success');
     closeM();
   } catch(e) {
@@ -173,9 +180,10 @@ let _sendEmailIndBusy = false;
 export async function sendEmailIndividual() {
   if (_sendEmailIndBusy) return;
   const { cdata } = _hooks.getScope();
+  const _ownerAuth = isOwnerAuthEnabled();
   const workerUrl = localStorage.getItem('ipear_worker_url');
-  const workerSec = _hooks.getWorkerSecret();
-  if (!workerUrl || !workerSec) { toast('⚠️ Ορίστε τον Worker URL στις Ειδοποιήσεις πρώτα!', 'error'); closeM(); return; }
+  const workerSec = _ownerAuth ? '' : _hooks.getWorkerSecret();
+  if (!workerUrl || (!_ownerAuth && !workerSec)) { toast('⚠️ Ορίστε τον Worker URL στις Ειδοποιήσεις πρώτα!', 'error'); closeM(); return; }
   const subject = document.getElementById('me-subject').value.trim();
   const message = document.getElementById('me-body').value.trim();
   const err = document.getElementById('me-err');
@@ -189,17 +197,22 @@ export async function sendEmailIndividual() {
     const finalMessage = message
       .replace(/\{\{name\}\}/g, '{{params.name}}')
       .replace(/\{\{points\}\}/g, '{{params.points}}');
-    const response = await fetch(workerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${workerSec}` },
-      body: JSON.stringify({
-        recipients: [{ email: cdata.email, name: cdata.name, points: String(cdata.points||0) }],
-        subject,
-        message: finalMessage,
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const _payload = {
+      recipients: [{ email: cdata.email, name: cdata.name, points: String(cdata.points||0) }],
+      subject,
+      message: finalMessage,
+    };
+    if (_ownerAuth) {
+      await ownerSendEmail(_payload);
+    } else {
+      const response = await fetch(workerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${workerSec}` },
+        body: JSON.stringify(_payload),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    }
     toast(`✅ Email εστάλη στον/στην ${cdata.name}!`, 'success');
     closeM();
   } catch(e) {

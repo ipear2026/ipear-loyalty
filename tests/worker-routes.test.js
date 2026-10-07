@@ -11,7 +11,7 @@
 // ───────────────────────────────────────────────────────────────────────────
 
 import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, createSign } from 'node:crypto';
 import worker from '../email-worker.js';
 
 // Worker JWT signing requires a real RSA PEM. Generate one once for the whole
@@ -234,26 +234,40 @@ describe('/send-welcome', () => {
 //  Admin-gated endpoints reject anonymous calls
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('admin-gated endpoints', () => {
+describe('admin-gated endpoints (Stage 3D — legacy ADMIN_SECRET routes retired)', () => {
+  // Default production env has NO ADMIN_LEGACY_ROUTES_ENABLED → legacy routes
+  // are retired (410), returned BEFORE any secret compare (no oracle, 3D.9).
   it.each([
     ['/sms',       { phone: '6900000000', message: 'x' }],
     ['/bulk-sms',  { recipients: [{ phone: '6900000000' }], message: 'x' }],
-  ])('%s rejects without ADMIN_SECRET', async (path, body) => {
+  ])('%s → 410 retired without ADMIN_SECRET (default)', async (path, body) => {
     const fetchStub = makeFetchStub();
     globalThis.fetch = fetchStub;
     const res = await worker.fetch(makeRequest(path, { body }), makeEnv(), {});
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(410);
+    expect((await res.json()).error).toBe('endpoint-retired');
   });
 
   it.each([
     ['/sms',       { phone: '6900000000', message: 'x' }],
     ['/bulk-sms',  { recipients: [{ phone: '6900000000' }], message: 'x' }],
-  ])('%s rejects with WRONG ADMIN_SECRET', async (path, body) => {
+  ])('%s → 410 retired even with CORRECT ADMIN_SECRET (no secret oracle)', async (path, body) => {
     const fetchStub = makeFetchStub();
     globalThis.fetch = fetchStub;
     const res = await worker.fetch(makeRequest(path, {
-      body, headers: { Authorization: 'Bearer wrong-secret' }
+      body, headers: { Authorization: 'Bearer test-admin-secret' }
     }), makeEnv(), {});
+    expect(res.status).toBe(410);
+  });
+
+  it.each([
+    ['/sms',       { phone: '6900000000', message: 'x' }],
+    ['/bulk-sms',  { recipients: [{ phone: '6900000000' }], message: 'x' }],
+  ])('%s → 401 (not 410) in explicit server-side rollback, without secret', async (path, body) => {
+    const fetchStub = makeFetchStub();
+    globalThis.fetch = fetchStub;
+    const res = await worker.fetch(makeRequest(path, { body }),
+      makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
     expect(res.status).toBe(401);
   });
 });
@@ -277,10 +291,12 @@ describe('/admin/delete-auth-user — redemption_requests anonymization', () => 
     stub.on(':commit', () => jsonResponse({ writeResults: [{ updateTime: '2026-09-19T00:00:00Z' }] }));
     globalThis.fetch = stub;
 
+    // Exercises the shared handler via the legacy path in explicit rollback
+    // mode (the handler is identical to the live /admin/v2/delete-auth-user).
     const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
       body: { uid: 'uid-del-1', email: 'del@test.gr' },
       headers: { Authorization: 'Bearer test-admin-secret' },
-    }), makeEnv(), {});
+    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
 
     expect(res.status).toBe(200);
     const out = await res.json();
@@ -311,7 +327,7 @@ describe('/admin/delete-auth-user — redemption_requests anonymization', () => 
     const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
       body: { uid: 'uid-del-2' },
       headers: { Authorization: 'Bearer test-admin-secret' },
-    }), makeEnv(), {});
+    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
 
     expect(res.status).toBe(200);
     expect((await res.json()).success).toBe(true);
@@ -319,12 +335,337 @@ describe('/admin/delete-auth-user — redemption_requests anonymization', () => 
     expect(stub.calls.some(c => c.url.includes(':commit'))).toBe(false);
   });
 
-  it('rejects without ADMIN_SECRET', async () => {
+  it('Stage 3D: legacy /admin/delete-auth-user → 410 retired by default', async () => {
     const stub = makeFetchStub();
     globalThis.fetch = stub;
     const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
-      body: { uid: 'x' },
+      body: { uid: 'x' }, headers: { Authorization: 'Bearer test-admin-secret' },
     }), makeEnv(), {});
+    expect(res.status).toBe(410);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMIN FORTRESS Stage 3A — NEW /admin/v2/* owner-auth routes (additive).
+//  Prove: routes exist (deny, not 404), fail-closed without config, reject a
+//  bare ADMIN_SECRET (no longer sufficient for v2), and dispatch to the handler
+//  only for a verified owner + App Check. Legacy ADMIN_SECRET routes are
+//  covered unchanged by the suites above (additive-safety).
+// ═══════════════════════════════════════════════════════════════════════════
+const V2_PATHS = ['/admin/v2/email', '/admin/v2/sms', '/admin/v2/bulk-sms', '/admin/v2/delete-auth-user', '/admin/v2/export-backup'];
+const PROJNUM = '1234567890';
+function b64u(b) { return Buffer.from(b).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+
+describe('Stage 3A — /admin/v2 owner-auth routes', () => {
+  it.each(V2_PATHS)('%s exists and denies unauthenticated (401, not 404/200)', async (path) => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest(path, { body: {} }), makeEnv(), {});
+    expect(res.status).toBe(401);            // no Firebase token → no-token
+    expect(res.status).not.toBe(404);        // route EXISTS
+    expect(res.status).not.toBe(200);        // never reaches handler
+  });
+
+  it('token present but OWNER_UIDS unset → 503 owner-unconfigured (fail-closed config)', async () => {
+    const stub = makeFetchStub();
+    stub.on('accounts:lookup', () => jsonResponse({ users: [{ localId: 'owner-1', email: 'o@ipear.gr', customAttributes: JSON.stringify({ admin: true }) }] }));
+    globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/v2/email', {
+      body: {}, headers: { Authorization: 'Bearer sometoken' },
+    }), makeEnv({ FIREBASE_PROJECT_NUMBER: PROJNUM }), {}); // no OWNER_UIDS
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe('owner-unconfigured');
+  });
+
+  it('denies with OWNER_UIDS set but NO Firebase token (401 no-token)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/v2/email', { body: {} }),
+      makeEnv({ OWNER_UIDS: 'owner-1', FIREBASE_PROJECT_NUMBER: PROJNUM }), {});
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe('no-token');
+  });
+
+  it('a bare ADMIN_SECRET does NOT authorize a v2 route (treated as idToken → token-invalid)', async () => {
+    const stub = makeFetchStub();
+    stub.on('accounts:lookup', () => jsonResponse({ error: { message: 'INVALID_ID_TOKEN' } }, 400));
+    globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/v2/delete-auth-user', {
+      body: { uid: 'x' }, headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv({ OWNER_UIDS: 'owner-1', FIREBASE_PROJECT_NUMBER: PROJNUM }), {});
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe('token-invalid');
+  });
+
+  it('non-owner admin token → 403 not-owner (never reaches handler)', async () => {
+    const stub = makeFetchStub();
+    stub.on('accounts:lookup', () => jsonResponse({ users: [{ localId: 'other', email: 'a@b.gr', customAttributes: JSON.stringify({ admin: true }) }] }));
+    globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/v2/export-backup', {
+      body: {}, headers: { Authorization: 'Bearer sometoken' },
+    }), makeEnv({ OWNER_UIDS: 'owner-1', FIREBASE_PROJECT_NUMBER: PROJNUM }), {});
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe('not-owner');
+  });
+
+  it('valid owner + valid App Check → dispatches past the gate (not an auth denial)', async () => {
+    // real RS256 App Check token + matching JWKS
+    const kp = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const jwk = { ...kp.publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use: 'sig' };
+    const now = Date.now();
+    const header = b64u(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'k1' }));
+    const payload = b64u(JSON.stringify({
+      iss: `https://firebaseappcheck.googleapis.com/${PROJNUM}`, aud: [`projects/${PROJNUM}`],
+      exp: Math.floor(now / 1000) + 300, sub: 'app-1',
+    }));
+    const s = createSign('RSA-SHA256'); s.update(header + '.' + payload); s.end();
+    const appCheck = `${header}.${payload}.${b64u(s.sign(kp.privateKey))}`;
+
+    const stub = makeFetchStub();
+    stub.on('accounts:lookup', () => jsonResponse({ users: [{ localId: 'owner-1', email: 'o@ipear.gr', customAttributes: JSON.stringify({ admin: true }) }] }));
+    stub.on('/jwks', () => jsonResponse({ keys: [jwk] }));
+    // downstream Brevo (handleEmail) — accept whatever it sends
+    stub.on('api.brevo.com', () => jsonResponse({ messageId: 'ok' }, 201));
+    globalThis.fetch = stub;
+
+    const res = await worker.fetch(makeRequest('/admin/v2/email', {
+      body: { subject: 's', html: '<p>x</p>', recipients: [{ email: 'to@test.gr' }] },
+      headers: { Authorization: 'Bearer owner-token', 'X-Firebase-AppCheck': appCheck },
+    }), makeEnv({ OWNER_UIDS: 'owner-1', FIREBASE_PROJECT_NUMBER: PROJNUM }), {});
+    // The gate passed → we reached handleEmail. Assert it is NOT an auth denial.
+    expect([401, 403, 503]).not.toContain(res.status);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMIN FORTRESS Stage 3C — scoped read-only Woo lookup /woo/v2/get-user.
+//  Proves WOO_LOOKUP_SECRET isolation: it authorizes ONLY the lookup, nothing
+//  else; and no other secret authorizes the lookup. No ADMIN_SECRET fallback.
+// ═══════════════════════════════════════════════════════════════════════════
+const LOOKUP = 'lookup-sec-3c';
+const LOYALTY = 'loyalty-sec-3c';
+function envWoo(over = {}) { return makeEnv({ WOO_LOOKUP_SECRET: LOOKUP, WOO_LOYALTY_SECRET: LOYALTY, ...over }); }
+function stubLookupBackend(stub) {
+  stub.on('oauth2.googleapis.com/token', () => jsonResponse({ access_token: 'sa-token', expires_in: 3600 }));
+  stub.on(':runQuery', () => jsonResponse([{ document: { fields: {
+    name: { stringValue: 'Jane' }, points: { integerValue: '120' },
+    totalPoints: { integerValue: '500' }, card: { stringValue: 'IP-ABC123' },
+  } } }]));
+}
+
+describe('Stage 3C — /woo/v2/get-user (WOO_LOOKUP_SECRET)', () => {
+  it('correct lookup secret → 200 minimized record + Cache-Control no-store', async () => {
+    const stub = makeFetchStub(); stubLookupBackend(stub); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', {
+      body: { email: 'jane@ipear.gr' }, headers: { Authorization: `Bearer ${LOOKUP}` },
+    }), envWoo(), {});
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('no-store');
+    const d = await res.json();
+    expect(d).toMatchObject({ ok: true, name: 'Jane', points: 120, totalPoints: 500, card: 'IP-ABC123' });
+    // minimized — no extra fields leaked
+    expect(Object.keys(d).sort()).toEqual(['card', 'name', 'ok', 'points', 'totalPoints']);
+  });
+  it('missing auth → 401', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', { body: { email: 'j@ipear.gr' } }), envWoo(), {});
+    expect(res.status).toBe(401);
+  });
+  it('wrong secret → 401', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', { body: { email: 'j@ipear.gr' }, headers: { Authorization: 'Bearer nope' } }), envWoo(), {});
+    expect(res.status).toBe(401);
+  });
+  it('ADMIN_SECRET alone → DENIED on v2 lookup (no fallback)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', { body: { email: 'j@ipear.gr' }, headers: { Authorization: 'Bearer test-admin-secret' } }), envWoo(), {});
+    expect(res.status).toBe(401);
+  });
+  it('WOO_LOYALTY_SECRET → DENIED on lookup', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', { body: { email: 'j@ipear.gr' }, headers: { Authorization: `Bearer ${LOYALTY}` } }), envWoo(), {});
+    expect(res.status).toBe(401);
+  });
+  it('WOO_LOOKUP_SECRET unset → 503 fail-closed', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', { body: { email: 'j@ipear.gr' }, headers: { Authorization: `Bearer ${LOOKUP}` } }), makeEnv(), {});
+    expect(res.status).toBe(503);
+  });
+  it('GET method → 405', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', { method: 'GET', headers: { Authorization: `Bearer ${LOOKUP}` } }), envWoo(), {});
+    expect(res.status).toBe(405);
+  });
+});
+
+describe('Stage 3C — scoped secret isolation (lookup secret cannot do anything else)', () => {
+  it('lookup secret → DENIED on /woo-credit-order (needs WOO_LOYALTY_SECRET)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo-credit-order', { body: { orderId: 1 }, headers: { Authorization: `Bearer ${LOOKUP}` } }), envWoo(), {});
+    expect(res.status).toBe(401);
+  });
+  it('lookup secret → DENIED on legacy /admin/export-backup (Stage 3D: retired → 410)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/export-backup', { body: {}, headers: { Authorization: `Bearer ${LOOKUP}` } }), envWoo(), {});
+    // Stage 3D retired the legacy route (410) before any secret compare — the
+    // lookup secret still gains no authority here.
+    expect(res.status).toBe(410);
+  });
+  it('lookup secret → DENIED on /admin/v2/email (owner idToken path)', async () => {
+    const stub = makeFetchStub();
+    stub.on('accounts:lookup', () => jsonResponse({ error: { message: 'INVALID_ID_TOKEN' } }, 400));
+    globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/v2/email', { body: {}, headers: { Authorization: `Bearer ${LOOKUP}` } }),
+      envWoo({ OWNER_UIDS: 'owner-1', FIREBASE_PROJECT_NUMBER: '123' }), {});
+    expect([401, 403]).toContain(res.status);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMIN FORTRESS Stage 3D — RETIRE THE LEGACY ADMIN_SECRET SURFACE.
+//  Target: active runtime endpoints accepting ADMIN_SECRET = 0. Every legacy
+//  route is fail-closed (410) by default, BEFORE any secret compare (no
+//  oracle). create-admin is retired unconditionally (no rollback). The v2
+//  owner-auth routes and the scoped Woo routes are unaffected.
+// ═══════════════════════════════════════════════════════════════════════════
+const LEGACY_SECRET_ROUTES = [
+  ['/sms',                     { phone: '6900000000', message: 'x' }],
+  ['/bulk-sms',                { recipients: [{ phone: '6900000000' }], message: 'x' }],
+  ['/admin/redeem-attempt',    { action: 'check' }],
+  ['/admin/delete-auth-user',  { uid: 'x' }],
+  ['/admin/export-backup',     {}],
+  ['/woo-add-points',          { email: 'a@b.gr', points: 1 }],
+  ['/woo-refund-points',       { email: 'a@b.gr', points: 1 }],
+  ['/woo-get-user',            { email: 'a@b.gr' }],
+  ['/',                        { to: 'a@b.gr', subject: 's', html: 'h' }],
+];
+
+describe('Stage 3D — legacy routes retired by default (fail-closed, no oracle)', () => {
+  it.each(LEGACY_SECRET_ROUTES)('%s → 410 with NO auth', async (path, body) => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest(path, { body }), makeEnv(), {});
+    expect(res.status).toBe(410);
+    expect((await res.json()).error).toBe('endpoint-retired');
+  });
+
+  it.each(LEGACY_SECRET_ROUTES)('%s → 410 even with a CORRECT ADMIN_SECRET (no secret oracle)', async (path, body) => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest(path, {
+      body, headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv(), {});
+    expect(res.status).toBe(410);
+  });
+
+  it.each(LEGACY_SECRET_ROUTES)('%s → 410 with a WRONG ADMIN_SECRET (identical response)', async (path, body) => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest(path, {
+      body, headers: { Authorization: 'Bearer definitely-wrong' },
+    }), makeEnv(), {});
+    expect(res.status).toBe(410);
+  });
+
+  it('an UNKNOWN POST path → 410 (default handleEmail fallback is retired)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/some-unknown-path', {
+      body: {}, headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv(), {});
+    expect(res.status).toBe(410);
+  });
+
+  it('GET /health-deep → 410 retired by default', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/health-deep', {
+      method: 'GET', headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv(), {});
+    expect(res.status).toBe(410);
+  });
+});
+
+describe('Stage 3D — create-admin retired UNCONDITIONALLY (no rollback)', () => {
+  const body = { email: 'new@admin.gr', password: 'secret123' };
+  it.each([
+    ['no auth',               {}],
+    ['correct ADMIN_SECRET',  { Authorization: 'Bearer test-admin-secret' }],
+    ['wrong ADMIN_SECRET',    { Authorization: 'Bearer nope' }],
+    ['WOO_LOOKUP_SECRET',     { Authorization: `Bearer ${LOOKUP}` }],
+    ['WOO_LOYALTY_SECRET',    { Authorization: `Bearer ${LOYALTY}` }],
+  ])('create-admin-user → 410 (%s)', async (_label, headers) => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/create-admin-user', { body, headers }), envWoo(), {});
+    expect(res.status).toBe(410);
+    expect((await res.json()).error).toBe('endpoint-retired');
+  });
+
+  it('create-admin-user → STILL 410 even in rollback mode (legacy switch ON)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/create-admin-user', {
+      body, headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
+    expect(res.status).toBe(410);
+  });
+});
+
+describe('Stage 3D — /woo-create-coupon moved OFF the ADMIN_SECRET gate (idToken auth)', () => {
+  it('no idToken → 400 (reached the handler, NOT a 401 ADMIN_SECRET gate)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo-create-coupon', {
+      body: { discountType: 'percent', discountAmount: 5 },
+    }), makeEnv(), {});
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/idToken/i);
+  });
+
+  it('a stale ADMIN_SECRET bearer does NOT gate it (still reaches idToken check → 400)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo-create-coupon', {
+      body: { discountType: 'percent', discountAmount: 5 },
+      headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv(), {});
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('Stage 3D — replacements remain reachable (deny, not 404/410)', () => {
+  it.each(V2_PATHS)('%s still routes to owner-auth (401/403 without a valid owner token, never 410)', async (path) => {
+    const stub = makeFetchStub();
+    stub.on('accounts:lookup', () => jsonResponse({ error: { message: 'INVALID_ID_TOKEN' } }, 400));
+    globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest(path, {
+      body: {}, headers: { Authorization: 'Bearer some-id-token' },
+    }), makeEnv({ OWNER_UIDS: 'owner-1', FIREBASE_PROJECT_NUMBER: '123' }), {});
+    expect([401, 403]).toContain(res.status);
+    expect(res.status).not.toBe(410);
+  });
+
+  it('/woo/v2/get-user still works with WOO_LOOKUP_SECRET (unaffected by 3D)', async () => {
+    const stub = makeFetchStub(); stubLookupBackend(stub); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo/v2/get-user', {
+      body: { email: 'jane@ipear.gr' }, headers: { Authorization: `Bearer ${LOOKUP}` },
+    }), envWoo(), {});
+    expect(res.status).toBe(200);
+  });
+
+  it('/woo-credit-order still gated by WOO_LOYALTY_SECRET (wrong secret → 401, not 410)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo-credit-order', {
+      body: { orderId: 1 }, headers: { Authorization: 'Bearer wrong' },
+    }), envWoo(), {});
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('Stage 3D — rollback mode re-enables legacy ADMIN_SECRET routing', () => {
+  it('legacy /admin/redeem-attempt authorizes with correct ADMIN_SECRET when switch ON', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/redeem-attempt', {
+      body: { action: 'check' }, headers: { Authorization: 'Bearer test-admin-secret' },
+    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
+    expect(res.status).toBe(200);
+  });
+
+  it('legacy route with WRONG secret in rollback mode → 401 (gate reached)', async () => {
+    const stub = makeFetchStub(); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/admin/redeem-attempt', {
+      body: { action: 'check' }, headers: { Authorization: 'Bearer wrong' },
+    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
     expect(res.status).toBe(401);
   });
 });
