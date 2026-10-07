@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from 'vitest';
 import { generateKeyPairSync, createSign } from 'node:crypto';
 import worker from '../email-worker.js';
+import { _resetAppCheckJwksCache } from '../src/worker/lib/owner-auth.js';
 
 // Worker JWT signing requires a real RSA PEM. Generate one once for the whole
 // suite — much simpler than mocking the internal helper.
@@ -95,8 +96,38 @@ function defaultAuthStubs(stub, { uid = 'uid-user-1', email = 'user@test.gr', ph
   );
 }
 
+// ── Owner-auth (Stage 3A/3B) harness: real RS256 App Check + stubbed identity ──
+// Lets integration tests drive the live /admin/v2/* owner routes end-to-end.
+const _OWNER_UID = 'owner-uid-1';
+const _PROJNUM   = '1234567890';
+const _AC_KID    = 'ac-kid-1';
+let _acPriv, _acJwk;
+beforeAll(() => {
+  const kp = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  _acPriv = kp.privateKey;
+  _acJwk  = { ...kp.publicKey.export({ format: 'jwk' }), kid: _AC_KID, alg: 'RS256', use: 'sig' };
+});
+function _b64u(s) { return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function makeAppCheckToken() {
+  const header  = _b64u(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: _AC_KID }));
+  const payload = _b64u(JSON.stringify({
+    iss: `https://firebaseappcheck.googleapis.com/${_PROJNUM}`,
+    aud: [`projects/${_PROJNUM}`], exp: Math.floor(Date.now() / 1000) + 300, sub: 'app-xyz',
+  }));
+  const s = createSign('RSA-SHA256'); s.update(header + '.' + payload); s.end();
+  return header + '.' + payload + '.' + _b64u(s.sign(_acPriv));
+}
+function ownerEnv(over = {}) { return makeEnv({ OWNER_UIDS: _OWNER_UID, FIREBASE_PROJECT_NUMBER: _PROJNUM, ...over }); }
+function ownerHeaders() { return { Authorization: 'Bearer owner-idtoken', 'X-Firebase-AppCheck': makeAppCheckToken() }; }
+// Register the two fetches owner-auth performs: identity (owner w/ admin:true) + App Check JWKS.
+function stubOwnerAuth(stub) {
+  stub.on('identitytoolkit.googleapis.com/v1/accounts:lookup', () =>
+    jsonResponse({ users: [{ localId: _OWNER_UID, customAttributes: JSON.stringify({ admin: true }) }] }));
+  stub.on('firebaseappcheck.googleapis.com/v1/jwks', () => jsonResponse({ keys: [_acJwk] }));
+}
+
 let originalFetch;
-beforeEach(() => { originalFetch = globalThis.fetch; });
+beforeEach(() => { originalFetch = globalThis.fetch; _resetAppCheckJwksCache(); });
 afterEach(()  => { globalThis.fetch = originalFetch; vi.restoreAllMocks(); });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -263,12 +294,12 @@ describe('admin-gated endpoints (Stage 3D — legacy ADMIN_SECRET routes retired
   it.each([
     ['/sms',       { phone: '6900000000', message: 'x' }],
     ['/bulk-sms',  { recipients: [{ phone: '6900000000' }], message: 'x' }],
-  ])('%s → 401 (not 410) in explicit server-side rollback, without secret', async (path, body) => {
+  ])('%s → 410 even with the (now-removed) rollback switch set (3F: switch is inert)', async (path, body) => {
     const fetchStub = makeFetchStub();
     globalThis.fetch = fetchStub;
     const res = await worker.fetch(makeRequest(path, { body }),
       makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(410);
   });
 });
 
@@ -289,14 +320,15 @@ describe('/admin/delete-auth-user — redemption_requests anonymization', () => 
                 rewardCost: { integerValue: '-2500' }, status: { stringValue: 'approved' } },
     } }]));
     stub.on(':commit', () => jsonResponse({ writeResults: [{ updateTime: '2026-09-19T00:00:00Z' }] }));
+    stubOwnerAuth(stub);
     globalThis.fetch = stub;
 
-    // Exercises the shared handler via the legacy path in explicit rollback
-    // mode (the handler is identical to the live /admin/v2/delete-auth-user).
-    const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
+    // Stage 3F: the handler is reached ONLY via the owner-authenticated
+    // /admin/v2/delete-auth-user route (Firebase owner identity + App Check).
+    const res = await worker.fetch(makeRequest('/admin/v2/delete-auth-user', {
       body: { uid: 'uid-del-1', email: 'del@test.gr' },
-      headers: { Authorization: 'Bearer test-admin-secret' },
-    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
+      headers: ownerHeaders(),
+    }), ownerEnv(), {});
 
     expect(res.status).toBe(200);
     const out = await res.json();
@@ -322,12 +354,13 @@ describe('/admin/delete-auth-user — redemption_requests anonymization', () => 
     stub.on('oauth2.googleapis.com/token', () => jsonResponse({ access_token: 'sa-token', expires_in: 3600 }));
     stub.on('identitytoolkit.googleapis.com/v1/accounts:delete', () => jsonResponse({}));
     stub.on(':runQuery', () => jsonResponse([{ readTime: '2026-09-19T00:00:00Z' }])); // no document field = no match
+    stubOwnerAuth(stub);
     globalThis.fetch = stub;
 
-    const res = await worker.fetch(makeRequest('/admin/delete-auth-user', {
+    const res = await worker.fetch(makeRequest('/admin/v2/delete-auth-user', {
       body: { uid: 'uid-del-2' },
-      headers: { Authorization: 'Bearer test-admin-secret' },
-    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
+      headers: ownerHeaders(),
+    }), ownerEnv(), {});
 
     expect(res.status).toBe(200);
     expect((await res.json()).success).toBe(true);
@@ -652,20 +685,23 @@ describe('Stage 3D — replacements remain reachable (deny, not 404/410)', () =>
   });
 });
 
-describe('Stage 3D — rollback mode re-enables legacy ADMIN_SECRET routing', () => {
-  it('legacy /admin/redeem-attempt authorizes with correct ADMIN_SECRET when switch ON', async () => {
+describe('Stage 3F — the rollback switch is permanently inert (ADMIN_SECRET gone)', () => {
+  it('ADMIN_LEGACY_ROUTES_ENABLED=true no longer resurrects any legacy route → 410', async () => {
     const stub = makeFetchStub(); globalThis.fetch = stub;
-    const res = await worker.fetch(makeRequest('/admin/redeem-attempt', {
-      body: { action: 'check' }, headers: { Authorization: 'Bearer test-admin-secret' },
-    }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
-    expect(res.status).toBe(200);
+    for (const path of ['/admin/redeem-attempt', '/sms', '/woo-get-user', '/woo-add-points']) {
+      const res = await worker.fetch(makeRequest(path, {
+        body: { action: 'check' }, headers: { Authorization: 'Bearer test-admin-secret' },
+      }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
+      expect(res.status, `${path} must stay retired even with the dead switch set`).toBe(410);
+      expect((await res.json()).error).toBe('endpoint-retired');
+    }
   });
 
-  it('legacy route with WRONG secret in rollback mode → 401 (gate reached)', async () => {
+  it('/admin/create-admin-user stays 410 with the switch set', async () => {
     const stub = makeFetchStub(); globalThis.fetch = stub;
-    const res = await worker.fetch(makeRequest('/admin/redeem-attempt', {
-      body: { action: 'check' }, headers: { Authorization: 'Bearer wrong' },
+    const res = await worker.fetch(makeRequest('/admin/create-admin-user', {
+      body: { email: 'x@y.gr', password: 'abcdef' }, headers: { Authorization: 'Bearer test-admin-secret' },
     }), makeEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' }), {});
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(410);
   });
 });

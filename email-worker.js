@@ -4,7 +4,15 @@
 //
 //  Environment Variables (Settings → Variables στο Cloudflare):
 //
-//  ADMIN_SECRET      → το μυστικό σου, π.χ. "ipear-secret-2024-xyz"
+//  (ADMIN_SECRET — ELIMINATED in Admin Fortress Stage 3F. No runtime code reads
+//   it; there is no master secret. Admin uses Firebase owner auth + App Check;
+//   Woo uses WOO_LOOKUP_SECRET / WOO_LOYALTY_SECRET; backups use BACKUP_SIGNING_KEY.)
+//  OWNER_UIDS            → comma-separated owner UID allowlist (admin /admin/v2/*)
+//  FIREBASE_PROJECT_NUMBER → App Check audience/issuer (admin /admin/v2/*)
+//  FIREBASE_API_KEY      → Identity Toolkit key (owner ID-token verification)
+//  WOO_LOOKUP_SECRET     → scoped read-only lookup (/woo/v2/get-user)
+//  WOO_LOYALTY_SECRET    → scoped credit/refund (/woo-credit-order, /woo-refund-order)
+//  BACKUP_SIGNING_KEY    → HMAC key for signed backup download URLs
 //  BREVO_API_KEY     → API key από brevo.com
 //  SENDER_EMAIL      → επαληθευμένο email στο Brevo, π.χ. "loyalty@ipear.gr"
 //  SENDER_NAME       → "iPear Loyalty"
@@ -17,45 +25,42 @@
 //
 //  APP_URL           → e.g. "https://loyalty.ipear.gr" (used for welcome email CTA link)
 //
-//  ENDPOINTS:
-//  POST /                → αποστολή bulk email (Brevo) — requires ADMIN_SECRET
-//  POST /sms             → αποστολή SMS (Brevo Transactional SMS) — requires ADMIN_SECRET
-//  POST /bulk-sms        → μαζική αποστολή SMS (Brevo) — requires ADMIN_SECRET
-// Push endpoints (/push, /push-debug) removed 2026-07-31 — app dropped push notifications.
-//  POST /admin/redeem-attempt → brute-force guard for redemption approval — requires ADMIN_SECRET
-//  POST /woo-add-points    → LEGACY: add points by orderTotal — kept for current plugin. Prefer /woo-credit-order.
-//  POST /woo-refund-points → LEGACY: clawback by orderTotal — kept for current plugin. Prefer /woo-refund-order.
-//  POST /woo-credit-order  → PHASE L1: integer-cent credit + Firestore ledger idempotency. ADMIN_SECRET.
-//  POST /woo-refund-order  → PHASE L1: integer-cent refund with FSM (credited→refunded→re-credited). ADMIN_SECRET.
-//  POST /woo-get-user      → WooCommerce: fetch customer points/name by email — requires ADMIN_SECRET
-//  POST /woo-create-coupon  → Create real WooCommerce coupon for e-shop offer redemption — requires ADMIN_SECRET
-//  POST /woo-sync-tier      → Sync VIP tier to WooCommerce user meta — public, Firebase ID token auth, rate-limited
-//  POST /reset-password  → branded password reset email (public, no secret needed)
-//  POST /send-welcome    → welcome email after registration (public, rate-limited)
-//  POST /send-sms-otp    → Brevo SMS fallback OTP (public, rate-limited)
-//  POST /verify-sms-otp  → verify Brevo OTP code (public, rate-limited)
-//  POST /client-error    → client-side error telemetry (public, rate-limited, fire-and-forget)
-//  POST /log-event       → zero-cookie funnel analytics: anonymous event counters (public, rate-limited)
-//  POST /admin/export-backup → cross-cloud backup: read-only customer data snapshot (requires ADMIN_SECRET)
-//  GET  /health-deep     → deep health check: Worker + Brevo + Firestore (requires ADMIN_SECRET)
+//  ENDPOINTS (post-Stage-3F):
+//  ADMIN (owner auth: Firebase ID token + admin:true + OWNER_UID + App Check)
+//  POST /admin/v2/email | /admin/v2/sms | /admin/v2/bulk-sms
+//       /admin/v2/delete-auth-user | /admin/v2/export-backup
+//  WOO (scoped secrets)
+//  POST /woo/v2/get-user   → read-only points/name lookup — WOO_LOOKUP_SECRET
+//  POST /woo-credit-order  → PHASE L1 integer-cent credit + ledger — WOO_LOYALTY_SECRET
+//  POST /woo-refund-order  → PHASE L1 refund FSM — WOO_LOYALTY_SECRET
+//  PUBLIC / idToken
+//  POST /woo-create-coupon  → e-shop coupon — Firebase ID token (customer), rate-limited
+//  POST /woo-sync-tier      → VIP tier sync — Firebase ID token, rate-limited
+//  POST /reset-password | /send-welcome | /send-sms-otp | /verify-sms-otp
+//       /client-error | /log-event   → public, rate-limited
+//  POST /erp/lookup-by-phone, /erp/ping → ERP_SECRET
+//  GET  /health             → public health check
+//  GET  /admin/export-download → HMAC-signed (BACKUP_SIGNING_KEY) R2 stream
+//  RETIRED (unconditional 410 endpoint-retired; Stage 3D/3F — no master secret)
+//       /  /sms  /bulk-sms  /admin/redeem-attempt  /admin/delete-auth-user
+//       /admin/export-backup  /admin/create-admin-user  /woo-add-points
+//       /woo-refund-points  /woo-get-user  GET /health-deep
+// Push endpoints (/push, /push-debug) removed 2026-07-31 — app dropped push.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { normalizeIpForRateLimit } from './src/worker/lib/ip.js';
 import { normalizeGreekSMS } from './src/worker/lib/sms.js';
-import {
-  makeRedeemRateKey, makeFailKey, makeBlockKey,
-} from './src/worker/lib/redeem-keys.js';
+// Stage 3F: redeem-keys.js helpers were used only by the removed
+// /admin/redeem-attempt guard; the import is gone.
 // Phase L1: WooCommerce points integrity (integer-cent math + Firestore ledger
-// as authoritative idempotency store, KV as 90-day fast-path only).
-// Legacy /woo-add-points and /woo-refund-points remain for the currently
-// deployed plugin; new endpoints /woo-credit-order and /woo-refund-order
-// use the ledger doc `ipear_woo_events/{siteHash}__{orderId}`.
+// as authoritative idempotency store, KV as 90-day fast-path only). The only
+// Woo financial endpoints are /woo-credit-order and /woo-refund-order
+// (WOO_LOYALTY_SECRET), keyed on the ledger doc `ipear_woo_events/{siteHash}__{orderId}`.
 import { handleWooCreditOrder, handleWooRefundOrder } from './src/worker/lib/woo-integrity.js';
-// ADMIN FORTRESS Stage 3A — additive owner-grade auth (Firebase ID token +
-// admin claim + OWNER_UID + App Check). Backs the /admin/v2/* routes.
-// Stage 3D: the legacy ADMIN_SECRET routes are now RETIRED (fail-closed behind
-// env.ADMIN_LEGACY_ROUTES_ENABLED, default off); /admin/create-admin-user is
-// retired unconditionally. ADMIN_SECRET stays configured for rollback only.
+// ADMIN FORTRESS Stage 3A/3B — owner-grade auth (Firebase ID token + admin:true
+// claim + OWNER_UID + App Check) backing the /admin/v2/* routes. Stage 3D/3F:
+// the legacy ADMIN_SECRET surface is ELIMINATED — no secret compare, no rollback
+// switch, no master secret anywhere in this Worker.
 import { requireOwner } from './src/worker/lib/owner-auth.js';
 
 const MAX_RECIPIENTS = 5000;
@@ -77,10 +82,7 @@ const _referralBuckets = new Map();
 // after rotation. 3 / 30-min cuts that to ~6/hour, well below the rate
 // needed to enumerate a meaningful slice of the 900K code space before
 // codes naturally expire (5-min TTL on each pending code).
-const REDEEM_FAIL_LIMIT = 3;
-const REDEEM_BLOCK_TTL_SECONDS = 30 * 60; // block for 30 minutes
-const REDEEM_FAIL_TTL_SECONDS = 30 * 60;  // keep the fail counter for 30 minutes
-// REDEEM_FAIL_KEY_PREFIX / REDEEM_BLOCK_KEY_PREFIX imported from worker/lib/redeem-keys.js
+// Stage 3F: REDEEM_* rate-limit constants removed with the /admin/redeem-attempt guard.
 
 function _isRateLimited(ip) {
   const now = Date.now();
@@ -185,38 +187,9 @@ async function readJsonCapped(request, maxBytes = 16 * 1024) {
   }
 }
 
-// makeRedeemRateKey / makeFailKey / makeBlockKey imported from worker/lib/redeem-keys.js
-
-async function getRedeemFailState(env, failKey) {
-  if (!env.RATE_LIMIT_KV) return { fails: 0, firstFailAt: 0 };
-  const raw = await env.RATE_LIMIT_KV.get(failKey);
-  if (!raw) return { fails: 0, firstFailAt: 0 };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      fails: Number(parsed.fails) || 0,
-      firstFailAt: Number(parsed.firstFailAt) || 0,
-    };
-  } catch {
-    return { fails: 0, firstFailAt: 0 };
-  }
-}
-
-async function saveRedeemFailState(env, failKey, state) {
-  if (!env.RATE_LIMIT_KV) return;
-  await env.RATE_LIMIT_KV.put(failKey, JSON.stringify(state), { expirationTtl: REDEEM_FAIL_TTL_SECONDS });
-}
-
-async function clearRedeemRateLimit(env, failKey, blockKey) {
-  if (!env.RATE_LIMIT_KV) return;
-  await env.RATE_LIMIT_KV.delete(failKey);
-  await env.RATE_LIMIT_KV.delete(blockKey);
-}
-
-async function isRedeemBlocked(env, blockKey) {
-  if (!env.RATE_LIMIT_KV) return false;
-  return (await env.RATE_LIMIT_KV.get(blockKey)) !== null;
-}
+// Stage 3F: the redemption-guard KV helpers (getRedeemFailState /
+// saveRedeemFailState / clearRedeemRateLimit / isRedeemBlocked) were used only
+// by the removed /admin/redeem-attempt endpoint and have been deleted.
 
 function _isReferralRateLimited(ip) {
   const now = Date.now();
@@ -300,7 +273,7 @@ export default {
       }, 200, { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
     }
 
-    // ── GET /health-deep — deep health check: Brevo + Firestore (requires ADMIN_SECRET) ──
+    // ── GET /health-deep — RETIRED (Stage 3F). Cron probes in-process; HTTP → 410. ──
     if (request.method === 'GET' && path === '/health-deep') {
       return handleHealthDeep(request, env, CORS);
     }
@@ -381,34 +354,11 @@ export default {
     //  rollback until Stage 3D.
     if (path === '/woo/v2/get-user')  return handleWooLookupV2(request, env, CORS);
 
-    // ── PHASE L1 · Legacy loyalty mutation kill-switch (env-gated) ────────
-    //
-    //  Phase D of the zero-downtime cutover: once the new plugin is deployed
-    //  and no callers of /woo-add-points or /woo-refund-points remain, set
-    //  env var LOYALTY_LEGACY_MUTATION_DISABLED="true" and redeploy. The
-    //  legacy mutation endpoints then return 410 Gone even for callers who
-    //  still hold a valid ADMIN_SECRET. This eliminates ADMIN_SECRET as a
-    //  possible loyalty-mutation vector, delivering the full secret split.
-    //
-    //  Flag is checked BEFORE the ADMIN_SECRET gate so a 200 can never
-    //  be reached via the legacy path once tripped. Read-only /woo-get-user
-    //  is NOT killed — it only fetches customer data, no mutation.
-    if (env.LOYALTY_LEGACY_MUTATION_DISABLED === 'true' &&
-        (path === '/woo-add-points' || path === '/woo-refund-points')) {
-      return resp({
-        error: 'gone',
-        reason: 'legacy-mutation-endpoints-removed',
-        migrate_to: path === '/woo-add-points' ? '/woo-credit-order' : '/woo-refund-order',
-      }, 410, CORS);
-    }
-
-    // ── ADMIN FORTRESS Stage 3A · NEW parallel owner-authenticated routes ──
+    // ── ADMIN FORTRESS Stage 3A/3B · owner-authenticated admin routes ──────
     //   Firebase ID token + admin:true claim + OWNER_UID allowlist + App Check.
-    //   ADDITIVE: these /admin/v2/* paths carry NO reusable master secret and
-    //   are routed BEFORE the ADMIN_SECRET gate. The legacy paths below remain
-    //   fully operational for rollback. Fail-closed: any token/claim/owner/
-    //   App-Check/config problem → deny (never fall through to the secret gate).
-    //   Owner-minting is intentionally NOT exposed here (see Stage-3 audit §E).
+    //   This is the ONLY privileged admin surface. Fail-closed: any token /
+    //   claim / owner / App-Check / config problem → deny. Owner-minting is
+    //   intentionally NOT exposed here and has no runtime route anywhere.
     {
       const V2 = {
         '/admin/v2/email':            handleEmail,
@@ -425,54 +375,21 @@ export default {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    //  ADMIN FORTRESS Stage 3D — RETIRE THE LEGACY ADMIN_SECRET SURFACE
+    //  ADMIN FORTRESS Stage 3F — LEGACY ADMIN_SECRET SURFACE PERMANENTLY GONE
     //
-    //  create-admin is retired PERMANENTLY and UNCONDITIONALLY (3D.2): no
-    //  runtime HTTP endpoint may mint a loyalty admin, and there is NO rollback
-    //  switch for it. Future bootstrap/recovery is an out-of-band operator
-    //  procedure (Firebase/GCP admin tooling), never a public route. Returned
-    //  BEFORE any secret comparison so a correct ADMIN_SECRET gets the identical
-    //  retired response — the route is never a secret-validity oracle (3D.9).
-    if (path === '/admin/create-admin-user') {
-      return resp({ error: 'endpoint-retired' }, 410, CORS);
-    }
-
-    //  Every other legacy ADMIN_SECRET-gated route is FAIL-CLOSED. The default
-    //  (env.ADMIN_LEGACY_ROUTES_ENABLED absent or ≠ 'true') RETIRES them all.
-    //  The 410 is returned BEFORE the ADMIN_SECRET compare, so a correct OR a
-    //  wrong secret yields the same response (no oracle, 3D.9). This covers the
-    //  known legacy paths AND any unmatched POST (the old handleEmail default).
-    //  Live replacements (unchanged by this stage):
-    //    /admin/v2/{email,sms,bulk-sms,delete-auth-user,export-backup}
-    //        → Firebase ID token + admin:true + OWNER_UID + App Check
-    //    /woo/v2/get-user            → WOO_LOOKUP_SECRET (read-only lookup)
-    //    /woo-credit-order,/woo-refund-order → WOO_LOYALTY_SECRET (financial)
-    //  ROLLBACK is SERVER-SIDE ONLY: `wrangler secret put ADMIN_LEGACY_ROUTES_
-    //  ENABLED` = 'true'. It is never bundled into any frontend, never settable
-    //  by the browser / WordPress / a request body, and cannot be enabled by
-    //  presenting ADMIN_SECRET. There is NO automatic fallback (3D.7).
-    if (env.ADMIN_LEGACY_ROUTES_ENABLED !== 'true') {
-      return resp({ error: 'endpoint-retired' }, 410, CORS);
-    }
-
-    // ════════ Below: legacy ADMIN_SECRET path — reachable ONLY in explicit ═══
-    // ════════ server-side rollback (ADMIN_LEGACY_ROUTES_ENABLED='true').   ═══
-    //  Dead in production (the switch is absent → every request already 410'd
-    //  above). Retained as rollback-only implementation per 3D.7 / 3D.15.
-    const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-    if (!env.ADMIN_SECRET || !(await timingSafeEqual(auth, env.ADMIN_SECRET))) {
-      return resp({ error: 'Unauthorized' }, 401, CORS);
-    }
-
-    if (path === '/bulk-sms') return handleBulkSMS(request, env, CORS);
-    if (path === '/sms')      return handleSMS(request, env, CORS);
-    if (path === '/admin/redeem-attempt') return handleRedeemAttempt(request, env, CORS);
-    if (path === '/admin/delete-auth-user') return handleDeleteAuthUser(request, env, CORS);
-    if (path === '/admin/export-backup') return handleExportBackup(request, env, CORS);
-    if (path === '/woo-add-points')   return handleWooAddPoints(request, env, CORS, ctx);
-    if (path === '/woo-refund-points') return handleWooRefundPoints(request, env, CORS);
-    if (path === '/woo-get-user')    return handleWooGetUser(request, env, CORS);
-    return handleEmail(request, env, CORS);
+    //  ADMIN_SECRET has been ELIMINATED from the architecture. There is no
+    //  secret comparison, no rollback switch, and no legacy route handler left
+    //  in this Worker. Every request reaching this point — each former
+    //  ADMIN_SECRET route (`/`, `/sms`, `/bulk-sms`, `/admin/redeem-attempt`,
+    //  `/admin/delete-auth-user`, `/admin/export-backup`,
+    //  `/admin/create-admin-user`, `/woo-add-points`, `/woo-refund-points`,
+    //  `/woo-get-user`) and any unknown POST — is retired UNCONDITIONALLY with
+    //  a generic 410. No successor master secret exists. The only privileged
+    //  surfaces are the owner-auth `/admin/v2/*` routes above, the scoped Woo
+    //  routes (`/woo/v2/get-user`, `/woo-credit-order`, `/woo-refund-order`),
+    //  and the public / idToken routes. `/admin/create-admin-user` therefore
+    //  cannot mint an admin by any path (its handler was deleted in 3D).
+    return resp({ error: 'endpoint-retired' }, 410, CORS);
   }
 };
 
@@ -1260,11 +1177,9 @@ async function _wooCustomerLookup(request, env, CORS, extraHeaders = {}) {
   }
 }
 
-// Legacy ADMIN_SECRET-gated lookup (auth enforced at the router gate). Unchanged
-// contract; kept for rollback until Stage 3D.
-async function handleWooGetUser(request, env, CORS) {
-  return _wooCustomerLookup(request, env, CORS);
-}
+// Stage 3F: the legacy ADMIN_SECRET-gated lookup (handleWooGetUser → /woo-get-user)
+// has been REMOVED. The scoped read-only lookup below (/woo/v2/get-user,
+// WOO_LOOKUP_SECRET) is the sole lookup path. _wooCustomerLookup() still backs it.
 
 // ── ADMIN FORTRESS Stage 3C — scoped read-only Woo lookup ────────────────────
 //  POST /woo/v2/get-user — authenticated ONLY by WOO_LOOKUP_SECRET (timing-safe).
@@ -1423,285 +1338,11 @@ async function handleErpLookup(request, env, CORS) {
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  POST /woo-add-points  { email, orderTotal }
-//  Admin-only endpoint called by WooCommerce plugin on order completion.
-//  Converts euros → points (1€ = 10 πόντοι), updates customer, creates
-//  transaction, and publishes leaderboard.
-// ══════════════════════════════════════════════════════════════════════════
-async function handleWooAddPoints(request, env, CORS, ctx) {
-  let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const email = (body.email || '').trim().toLowerCase();
-  const orderTotal = parseFloat(body.orderTotal);
-  const orderId = String(body.orderId || '').replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 64);
-
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return resp({ error: 'Valid email required' }, 400, CORS);
-  if (isNaN(orderTotal) || orderTotal <= 0)
-    return resp({ error: 'orderTotal must be > 0' }, 400, CORS);
-  if (orderTotal > 100000)
-    return resp({ error: 'orderTotal exceeds maximum' }, 400, CORS);
-
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
-
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-    // 1. Find customer by email
-    const queryRes = await fetch(`${fsBase}:runQuery`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: 'ipear_customers' }],
-          where: { fieldFilter: { field: { fieldPath: 'email' }, op: 'EQUAL', value: { stringValue: email } } },
-          limit: 1
-        }
-      })
-    });
-    const results = await queryRes.json();
-    const doc = Array.isArray(results) && results[0]?.document;
-    if (!doc) return resp({ error: 'Customer not found' }, 404, CORS);
-
-    const docId = doc.name.split('/').pop();
-    const docPath = `${fsBase}/ipear_customers/${docId}`;
-    const fields = doc.fields || {};
-
-    // 2. Calculate points: 1€ = 10 πόντοι
-    //    Authoritative totals come from the transactional re-read below;
-    //    no need to capture pre-transaction values here.
-    const earnedPoints = Math.floor(orderTotal * 10);
-
-    // 3. Atomic update via Firestore transaction (prevents race condition on concurrent orders)
-    const beginRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:beginTransaction`,
-      { method: 'POST', headers: fsHeaders, body: JSON.stringify({}) }
-    );
-    if (!beginRes.ok) {
-      console.error('[woo-add-points] beginTransaction failed:', beginRes.status);
-      return resp({ error: 'Failed to start transaction' }, 500, CORS);
-    }
-    const { transaction } = await beginRes.json();
-
-    // Re-read inside transaction to get latest points
-    const txReadRes = await fetch(`${docPath}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
-    if (!txReadRes.ok) {
-      console.error('[woo-add-points] transactional read failed:', txReadRes.status);
-      return resp({ error: 'Failed to read customer in transaction' }, 500, CORS);
-    }
-    const txDoc = await txReadRes.json();
-    const txFields = txDoc.fields || {};
-    const txPts = Number(txFields.points?.integerValue || 0) + earnedPoints;
-    const txTot = Number(txFields.totalPoints?.integerValue || 0) + earnedPoints;
-
-    const commitRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`,
-      {
-        method: 'POST', headers: fsHeaders,
-        body: JSON.stringify({
-          transaction,
-          writes: [{
-            update: {
-              name: txDoc.name,
-              fields: { ...txDoc.fields, points: { integerValue: txPts }, totalPoints: { integerValue: txTot } }
-            },
-            updateMask: { fieldPaths: ['points', 'totalPoints'] }
-          }]
-        })
-      }
-    );
-    if (!commitRes.ok) {
-      console.error('[woo-add-points] commit failed:', commitRes.status, await commitRes.text());
-      return resp({ error: 'Failed to update points' }, 500, CORS);
-    }
-
-    // 4. Create transaction record
-    const txRes = await fetch(`${fsBase}/ipear_transactions`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({ fields: {
-        customerId: { stringValue: docId },
-        customerEmail: { stringValue: email },
-        customerName: { stringValue: fields.name?.stringValue || '' },
-        card: { stringValue: fields.card?.stringValue || '' },
-        type: { stringValue: 'add' },
-        points: { integerValue: earnedPoints },
-        amount: { doubleValue: orderTotal },
-        category: { stringValue: '🛒 Αγορά από E-shop' },
-        note: { stringValue: orderId ? `WooCommerce Order #${orderId}` : 'WooCommerce Order' },
-        date: { stringValue: new Date().toISOString() }
-      }})
-    });
-    if (!txRes.ok) {
-      console.error('[woo-add-points] TX create failed:', txRes.status, await txRes.text());
-    }
-
-    // 5. Publish leaderboard — ASYNC via ctx.waitUntil() (decoupled from response)
-    //    The full-collection query is heavy; we return 200 OK immediately and let
-    //    the leaderboard rebuild finish in the background without blocking WooCommerce.
-    if (ctx && ctx.waitUntil) {
-      ctx.waitUntil(_rebuildLeaderboard(fsBase, fsHeaders));
-    } else {
-      // Fallback: if ctx not available (e.g. unit tests), run inline
-      _rebuildLeaderboard(fsBase, fsHeaders).catch(e => console.warn('[leaderboard-fallback]', e.message));
-    }
-
-    return resp({
-      ok: true,
-      email,
-      earnedPoints,
-      newBalance: txPts,
-      newTotalPoints: txTot,
-      orderId: orderId || undefined,
-    }, 200, CORS);
-
-  } catch (e) {
-    console.error('[woo-add-points]', e.message, e.stack);
-    return resp({ error: 'Internal error' }, 500, CORS);
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-//  POST /woo-refund-points  { email, orderTotal, orderId }
-//  Admin-only endpoint called by WooCommerce plugin on order refund.
-//  Reverses the points previously earned: claws back Math.floor(orderTotal * 10) pts.
-//  Points cannot go below 0. Creates a negative transaction record for audit trail.
-// ══════════════════════════════════════════════════════════════════════════
-async function handleWooRefundPoints(request, env, CORS) {
-  let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const email = (body.email || '').trim().toLowerCase();
-  const orderTotal = parseFloat(body.orderTotal);
-  const orderId = String(body.orderId || '').replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 64);
-
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return resp({ error: 'Valid email required' }, 400, CORS);
-  if (isNaN(orderTotal) || orderTotal <= 0)
-    return resp({ error: 'orderTotal must be > 0' }, 400, CORS);
-  if (orderTotal > 100000)
-    return resp({ error: 'orderTotal exceeds maximum' }, 400, CORS);
-
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
-
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-    // 1. Find customer by email
-    const queryRes = await fetch(`${fsBase}:runQuery`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: 'ipear_customers' }],
-          where: { fieldFilter: { field: { fieldPath: 'email' }, op: 'EQUAL', value: { stringValue: email } } },
-          limit: 1
-        }
-      })
-    });
-    const results = await queryRes.json();
-    const doc = Array.isArray(results) && results[0]?.document;
-    if (!doc) return resp({ error: 'Customer not found' }, 404, CORS);
-
-    const docId = doc.name.split('/').pop();
-    const fields = doc.fields || {};
-
-    // 2. Calculate points to claw back (same formula as add: 1€ = 10 pts)
-    const pointsToRemove = Math.floor(orderTotal * 10);
-
-    // 3. Atomic update via Firestore transaction (prevent race condition)
-    const beginRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:beginTransaction`,
-      { method: 'POST', headers: fsHeaders, body: JSON.stringify({}) }
-    );
-    if (!beginRes.ok) {
-      console.error('[woo-refund-points] beginTransaction failed:', beginRes.status);
-      return resp({ error: 'Failed to start transaction' }, 500, CORS);
-    }
-    const { transaction } = await beginRes.json();
-
-    // Re-read inside transaction for atomic consistency
-    const txReadRes = await fetch(`${fsBase}/ipear_customers/${docId}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
-    if (!txReadRes.ok) {
-      console.error('[woo-refund-points] transactional read failed:', txReadRes.status);
-      return resp({ error: 'Failed to read customer in transaction' }, 500, CORS);
-    }
-    const txDoc = await txReadRes.json();
-    const txFields = txDoc.fields || {};
-    const currentPts = Number(txFields.points?.integerValue || 0);
-    const currentTot = Number(txFields.totalPoints?.integerValue || 0);
-    // Clamp to 0 — never go negative
-    const newPts = Math.max(0, currentPts - pointsToRemove);
-    const newTot = Math.max(0, currentTot - pointsToRemove);
-    const actualDeducted = currentPts - newPts;
-
-    const commitRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`,
-      {
-        method: 'POST', headers: fsHeaders,
-        body: JSON.stringify({
-          transaction,
-          writes: [{
-            update: {
-              name: txDoc.name,
-              fields: { ...txDoc.fields, points: { integerValue: newPts }, totalPoints: { integerValue: newTot } }
-            },
-            updateMask: { fieldPaths: ['points', 'totalPoints'] }
-          }]
-        })
-      }
-    );
-    if (!commitRes.ok) {
-      console.error('[woo-refund-points] commit failed:', commitRes.status, await commitRes.text());
-      return resp({ error: 'Failed to update points' }, 500, CORS);
-    }
-
-    // 4. Create transaction record (negative points for audit trail)
-    const txRes = await fetch(`${fsBase}/ipear_transactions`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({ fields: {
-        customerId: { stringValue: docId },
-        customerEmail: { stringValue: email },
-        customerName: { stringValue: fields.name?.stringValue || '' },
-        card: { stringValue: fields.card?.stringValue || '' },
-        type: { stringValue: 'refund_clawback' },
-        points: { integerValue: -actualDeducted },
-        amount: { doubleValue: orderTotal },
-        category: { stringValue: '🔄 E-shop Επιστροφή' },
-        note: { stringValue: orderId ? `WooCommerce Refund — Order #${orderId}` : 'WooCommerce Refund' },
-        date: { stringValue: new Date().toISOString() }
-      }})
-    });
-    if (!txRes.ok) {
-      console.error('[woo-refund-points] TX create failed:', txRes.status, await txRes.text());
-    }
-
-    // Rebuild leaderboard after refund (inline — no ctx.waitUntil available)
-    _rebuildLeaderboard(fsBase, fsHeaders).catch(e => console.warn('[refund-leaderboard]', e.message));
-
-    return resp({
-      ok: true,
-      email,
-      pointsRemoved: actualDeducted,
-      newBalance: newPts,
-      newTotalPoints: newTot,
-      orderId: orderId || undefined,
-    }, 200, CORS);
-
-  } catch (e) {
-    console.error('[woo-refund-points]', e.message, e.stack);
-    return resp({ error: 'Internal error' }, 500, CORS);
-  }
-}
+// Stage 3F: the legacy ADMIN_SECRET loyalty-mutation handlers handleWooAddPoints
+// (/woo-add-points) and handleWooRefundPoints (/woo-refund-points) were REMOVED.
+// The authoritative financial path is handleWooCreditOrder / handleWooRefundOrder
+// (src/worker/lib/woo-integrity.js, WOO_LOYALTY_SECRET + Firestore ledger). Those
+// routes now return 410 endpoint-retired.
 
 // ══════════════════════════════════════════════════════════════════════════
 //  POST /woo-create-coupon  { idToken, offerTitle, discountType, discountAmount, singleUse }
@@ -1932,68 +1573,17 @@ async function handleWooSyncTier(request, env, CORS) {
   }
 }
 
-async function handleRedeemAttempt(request, env, CORS) {
-  if (!env.RATE_LIMIT_KV) {
-    return resp({ error: 'Server not configured for rate-limit storage' }, 503, CORS);
-  }
-
-  let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const action = String(body.action || '').trim(); // check | fail | success
-  if (!['check', 'fail', 'success'].includes(action)) {
-    return resp({ error: 'action must be check|fail|success' }, 400, CORS);
-  }
-
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const sessionId = String(body.sessionId || '').trim().slice(0, 120);
-  const source = String(body.source || 'unknown').trim().slice(0, 40);
-  const actorUid = String(body.actorUid || '').trim().slice(0, 120);
-  const key = makeRedeemRateKey(source, actorUid, sessionId, ip);
-  const failKey = makeFailKey(key);
-  const blockKey = makeBlockKey(key);
-
-  if (await isRedeemBlocked(env, blockKey)) {
-    return resp({ error: 'Too many failed redemption attempts', retryAfter: REDEEM_BLOCK_TTL_SECONDS }, 429, CORS);
-  }
-
-  if (action === 'check') {
-    return resp({ ok: true, blocked: false }, 200, CORS);
-  }
-
-  if (action === 'success') {
-    await clearRedeemRateLimit(env, failKey, blockKey);
-    return resp({ ok: true, reset: true }, 200, CORS);
-  }
-
-  const state = await getRedeemFailState(env, failKey);
-  const fails = state.fails + 1;
-
-  if (fails >= REDEEM_FAIL_LIMIT) {
-    await env.RATE_LIMIT_KV.put(blockKey, '1', { expirationTtl: REDEEM_BLOCK_TTL_SECONDS });
-    await env.RATE_LIMIT_KV.delete(failKey);
-    // Send security alert email to admin
-    sendSecurityAlert(env, `Brute-force εξαργύρωσης blocked — IP: ${ip}, source: ${source}, actor: ${actorUid || 'anon'}`).catch(e => console.warn('[alert]', e.message));
-    return resp({ error: 'Too many failed redemption attempts', retryAfter: REDEEM_BLOCK_TTL_SECONDS }, 429, CORS);
-  }
-
-  await saveRedeemFailState(env, failKey, {
-    fails,
-    firstFailAt: state.firstFailAt || Date.now(),
-  });
-
-  return resp({ ok: true, fails, remaining: REDEEM_FAIL_LIMIT - fails }, 200, CORS);
-}
+// Stage 3F: handleRedeemAttempt (/admin/redeem-attempt) — an orphaned redemption
+// brute-force guard with no active caller in any frontend — was REMOVED along
+// with its exclusively-used KV rate-limit helpers. The route returns 410.
 
 // ══════════════════════════════════════════════════════════════════════════
-//  DELETE AUTH USER (Admin μόνο — requires ADMIN_SECRET)
+//  DELETE AUTH USER — owner-authenticated via /admin/v2/delete-auth-user
+//  (Firebase ID token + admin:true + OWNER_UID + App Check). The legacy
+//  ADMIN_SECRET route was retired in Stage 3D/3F.
 //
-//  POST /admin/delete-auth-user  { uid: "firebase_uid" }
-//
-//  Διαγράφει το Firebase Auth account του χρήστη βάσει UID.
-//  Καλείται αυτόματα όταν ο admin διαγράφει customer από το
-//  admin panel, ώστε ο customer να μπορεί να ξαναεγγραφεί με το ίδιο email/phone.
+//  Διαγράφει το Firebase Auth account του χρήστη βάσει UID + anonymizes any
+//  ipear_redemption_requests identifiers. Called by the admin delete cascade.
 // ══════════════════════════════════════════════════════════════════════════
 // GDPR Art.17 — anonymize personal identifiers left in ipear_redemption_requests
 // after a customer is deleted. This collection denies ALL client writes in
@@ -2323,7 +1913,7 @@ async function handleEmail(request, env, CORS) {
   const chunks = chunkArray(valid, 900);
   let sent = 0, failed = 0;
 
-  // Body is already gated by ADMIN_SECRET (the bearer check upstream), so
+  // Body is already gated by owner auth (requireOwner upstream on /admin/v2/*), so
   // raw HTML from the caller is acceptable. Falls back to the legacy
   // text→wrapped path when only `message` is provided.
   const finalHtml = (htmlContent && htmlContent.trim()) ? htmlContent : buildHtmlEmail(message);
@@ -3390,28 +2980,19 @@ async function handleClientError(request, env, CORS) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  DEEP HEALTH CHECK — /health-deep
-//  Pings Brevo API + Firestore to verify third-party connectivity.
-//  Requires ADMIN_SECRET so it can be called by Cloudflare cron or manually.
+//  DEEP HEALTH CHECK — _runHealthDeep()
+//  Pings Brevo API + Firestore to verify third-party connectivity. Invoked
+//  IN-PROCESS by the scheduled cron (no auth). The HTTP /health-deep route is
+//  retired (410) — see handleHealthDeep.
 // ══════════════════════════════════════════════════════════════════════════
 
-async function handleHealthDeep(request, env, CORS) {
+async function handleHealthDeep(_request, _env, CORS) {
   const H = { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
-  // ── ADMIN FORTRESS Stage 3D — HTTP surface retired (fail-closed) ──
-  //  The deep-health probe is invoked by the cron IN-PROCESS via _runHealthDeep;
-  //  the HTTP route exists only for explicit server-side rollback. Default
-  //  (ADMIN_LEGACY_ROUTES_ENABLED absent or ≠ 'true') → 410, returned BEFORE any
-  //  ADMIN_SECRET comparison so the endpoint is never a secret-validity oracle.
-  if (env.ADMIN_LEGACY_ROUTES_ENABLED !== 'true') {
-    return resp({ error: 'endpoint-retired' }, 410, H);
-  }
-  // Rollback-only: preserve the original Bearer ADMIN_SECRET auth exactly.
-  const secret = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!env.ADMIN_SECRET || !(await timingSafeEqual(secret, env.ADMIN_SECRET))) {
-    return resp({ error: 'Unauthorized' }, 401, H);
-  }
-  const { results, degraded } = await _runHealthDeep(env);
-  return resp(results, degraded ? 503 : 200, H);
+  // ── ADMIN FORTRESS Stage 3F — HTTP surface permanently retired ──
+  //  The deep-health probe runs IN-PROCESS from the cron via _runHealthDeep().
+  //  The HTTP route carries no auth of its own anymore (it used to accept
+  //  ADMIN_SECRET); it is retired UNCONDITIONALLY. No secret, no switch.
+  return resp({ error: 'endpoint-retired' }, 410, H);
 }
 
 // Stage 3D: auth-free, in-process deep-health probe. Returns { results, degraded }.

@@ -1,16 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  legacy-cutover.test.js — proves Phase D of the removal plan works
+//  legacy-cutover.test.js — Stage 3F end-state.
 //
-//  Loads the real worker default export and exercises the router with the
-//  `LOYALTY_LEGACY_MUTATION_DISABLED='true'` flag ON. Asserts:
-//
-//    • /woo-add-points with a valid ADMIN_SECRET → 410 Gone (not 200)
-//    • /woo-refund-points with a valid ADMIN_SECRET → 410 Gone
-//    • Response body carries `migrate_to` hint
-//    • /woo-get-user (read-only) still works with ADMIN_SECRET (not killed)
-//    • Flag OFF (or unset) → legacy path resumes normal behaviour
-//    • The kill-switch is checked BEFORE the ADMIN_SECRET auth so an attacker
-//      holding the admin secret cannot mutate loyalty balance after cutover.
+//  The legacy ADMIN_SECRET loyalty routes (/woo-add-points, /woo-refund-points,
+//  /woo-get-user) are PERMANENTLY retired: the Worker contains no ADMIN_SECRET
+//  comparison, no kill-switch, and no rollback switch. Every one of these paths
+//  returns an unconditional 410 {"error":"endpoint-retired"} regardless of any
+//  credential or env flag. The authoritative replacements are /woo-credit-order
+//  and /woo-refund-order (WOO_LOYALTY_SECRET) and /woo/v2/get-user
+//  (WOO_LOOKUP_SECRET). This file guards against any regression that would
+//  revive a master-secret mutation vector.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -21,7 +19,7 @@ const WOO_SECRET   = 'woo-loyalty-secret-XYZ-2026';
 
 function baseEnv(overrides = {}) {
   return {
-    ADMIN_SECRET,
+    ADMIN_SECRET,                       // still a config string, but no code reads it
     WOO_LOYALTY_SECRET: WOO_SECRET,
     WOO_SITE_URL:       'https://ipear.gr',
     ALLOWED_ORIGINS:    'https://loyalty.ipear.gr',
@@ -41,119 +39,58 @@ function req(path, body, headers = {}) {
   });
 }
 
-describe('Phase D · legacy loyalty-mutation kill-switch', () => {
+describe('Stage 3F · legacy ADMIN_SECRET loyalty routes permanently retired', () => {
   const origFetch = globalThis.fetch;
   beforeEach(() => {
-    // Never hit the network. If any handler tries to fetch after we expect
-    // 410, this will throw and fail the test.
-    globalThis.fetch = vi.fn(async () => { throw new Error('network call not permitted in kill-switch tests'); });
+    // No network permitted — a 410 must be returned before any downstream call.
+    globalThis.fetch = vi.fn(async () => { throw new Error('network call not permitted for a retired route'); });
   });
   afterEach(() => { globalThis.fetch = origFetch; });
 
-  it('kill-switch ON + valid ADMIN_SECRET on /woo-add-points → 410 Gone, no mutation possible', async () => {
-    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true' });
+  const RETIRED = ['/woo-add-points', '/woo-refund-points', '/woo-get-user'];
+
+  it.each(RETIRED)('%s → 410 endpoint-retired with a correct ADMIN_SECRET (no authority)', async (path) => {
     const r = await worker.fetch(
-      req('/woo-add-points', { email: 'x@y.gr', orderTotal: 100, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
-      env, {}
+      req(path, { email: 'x@y.gr', orderTotal: 100, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
+      baseEnv(), {}
     );
     expect(r.status).toBe(410);
-    const body = await r.json();
-    expect(body.error).toBe('gone');
-    expect(body.reason).toBe('legacy-mutation-endpoints-removed');
-    expect(body.migrate_to).toBe('/woo-credit-order');
+    expect((await r.json()).error).toBe('endpoint-retired');
   });
 
-  it('kill-switch ON + valid ADMIN_SECRET on /woo-refund-points → 410 Gone', async () => {
-    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true' });
-    const r = await worker.fetch(
-      req('/woo-refund-points', { email: 'x@y.gr', orderTotal: 10, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
-      env, {}
-    );
-    expect(r.status).toBe(410);
-    expect((await r.json()).migrate_to).toBe('/woo-refund-order');
-  });
-
-  it('kill-switch ON — the kill fires BEFORE ADMIN_SECRET check (missing auth ALSO gets 410, not 401)', async () => {
-    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true' });
-    const r = await worker.fetch(req('/woo-add-points', { email: 'x@y.gr', orderTotal: 100, orderId: '1' }), env, {});
-    // Because gone-check runs first, 410 wins even without a bearer. This
-    // documents that no code path can reach the mutation after cutover.
+  it.each(RETIRED)('%s → 410 with NO credential (identical response, no oracle)', async (path) => {
+    const r = await worker.fetch(req(path, { email: 'x@y.gr', orderTotal: 100, orderId: '1' }), baseEnv(), {});
     expect(r.status).toBe(410);
   });
 
-  it('Stage 3D — /woo-get-user is now RETIRED (410) by default (replacement: /woo/v2/get-user)', async () => {
-    // Stage 3C moved the My-Account lookup to the scoped /woo/v2/get-user
-    // (WOO_LOOKUP_SECRET); Stage 3D retires the legacy ADMIN_SECRET read route.
-    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true' });
+  it.each(RETIRED)('%s → 410 even with the dead rollback switch set', async (path) => {
     const r = await worker.fetch(
-      req('/woo-get-user', { email: 'x@y.gr' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
-      env, {}
+      req(path, { email: 'x@y.gr', orderTotal: 100, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
+      baseEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true', LOYALTY_LEGACY_MUTATION_DISABLED: 'false' }), {}
     );
     expect(r.status).toBe(410);
   });
 
-  it('Stage 3D rollback — /woo-get-user (read-only) still works with ADMIN_SECRET; the mutation flag never killed reads', async () => {
-    // In explicit server-side rollback the legacy read path resumes. The
-    // read-only route was never in the LOYALTY_LEGACY_MUTATION_DISABLED kill list.
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
-    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true', ADMIN_LEGACY_ROUTES_ENABLED: 'true' });
-    const r = await worker.fetch(
-      req('/woo-get-user', { email: 'x@y.gr' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
-      env, {}
-    );
-    expect(r.status).not.toBe(410);
+  it('post-cutover: ADMIN_SECRET on any legacy mutation endpoint cannot change loyalty balance', async () => {
+    for (const p of ['/woo-add-points', '/woo-refund-points']) {
+      const r = await worker.fetch(
+        req(p, { email: 'x@y.gr', orderTotal: 999, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
+        baseEnv(), {}
+      );
+      expect(r.status, `expected 410 for ${p}`).toBe(410);
+    }
   });
 
-  it('Stage 3D — /woo-add-points is retired (410) by DEFAULT even with the mutation flag unset', async () => {
-    // The broader Stage 3D retirement (ADMIN_LEGACY_ROUTES_ENABLED absent)
-    // supersedes the older per-endpoint LOYALTY_LEGACY_MUTATION_DISABLED switch.
-    const env = baseEnv();   // no LOYALTY flag, no rollback switch
-    const r = await worker.fetch(
-      req('/woo-add-points', { email: 'x@y.gr', orderTotal: 100, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
-      env, {}
-    );
-    expect(r.status).toBe(410);
-  });
-
-  it('Stage 3D rollback + mutation flag OFF → /woo-add-points reaches the legacy handler', async () => {
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
-    const env = baseEnv({ ADMIN_LEGACY_ROUTES_ENABLED: 'true' });   // rollback, LOYALTY flag unset
-    const r = await worker.fetch(
-      req('/woo-add-points', { email: 'x@y.gr', orderTotal: 100, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
-      env, {}
-    );
-    expect(r.status).not.toBe(410);
-  });
-
-  it('kill-switch ON does NOT affect the new /woo-credit-order (uses WOO_LOYALTY_SECRET, not ADMIN_SECRET)', async () => {
-    // We want to prove the route is NOT killed by the flag. Building a real
-    // JWT for a fake PEM is out of scope; unset FCM_PROJECT_ID so the handler
-    // hits its own 503 "Server not configured" branch. Any response other
-    // than 410 proves the kill-switch did not fire on this path.
+  it('the authoritative /woo-credit-order is NOT retired (reaches handler; wrong secret → 401)', async () => {
     globalThis.fetch = vi.fn();   // must not be called
-    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true', FCM_PROJECT_ID: '' });
     const r = await worker.fetch(
       req('/woo-credit-order', {
         orderId: '1234', email: 'x@y.gr', eligibleCents: 4560,
         orderCurrency: 'EUR', eventNonce: 'credit-1234-4560',
-      }, { Authorization: 'Bearer ' + WOO_SECRET }),
-      env, {}
+      }, { Authorization: 'Bearer wrong-secret' }),
+      baseEnv(), {}
     );
     expect(r.status).not.toBe(410);
-    expect(r.status).toBe(503);   // reached handler, hit config check
-  });
-
-  it('post-cutover: ADMIN_SECRET on any mutation endpoint cannot change loyalty balance', async () => {
-    // Meta-assertion: enumerate every path that could historically mutate
-    // loyalty balance via ADMIN_SECRET. After Phase D, none of them succeed.
-    const env = baseEnv({ LOYALTY_LEGACY_MUTATION_DISABLED: 'true' });
-    const mutationPaths = ['/woo-add-points', '/woo-refund-points'];
-    for (const p of mutationPaths) {
-      const r = await worker.fetch(
-        req(p, { email: 'x@y.gr', orderTotal: 999, orderId: '1' }, { Authorization: 'Bearer ' + ADMIN_SECRET }),
-        env, {}
-      );
-      expect(r.status, `expected 410 for ${p}`).toBe(410);
-    }
+    expect(r.status).toBe(401);
   });
 });
