@@ -16,6 +16,31 @@ let _lbLastData = null;
 let _lbTop10 = null;
 let _lbMyCard = '';
 let _lbPinnedHtml = '';
+// ── Lifecycle guards (fix: infinite "Φόρτωση…") ──────────────────────────────
+//  `_lbGotSnapshot` records whether the listener's first callback (success OR
+//  error) has fired. `_lbWatchdog` converts a first snapshot that never arrives
+//  (auth/App-Check race, dropped socket) into an explicit RETRY state instead of
+//  an endless spinner. The element is ALWAYS resolved fresh (never captured) so
+//  a Profile re-render can't leave the callback writing to a detached node.
+let _lbWatchdog = null;
+let _lbGotSnapshot = false;
+const LB_WATCHDOG_MS = 10000;
+const _lbEl = () => document.getElementById('lb-container');
+const LB_LOADING_HTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">⏳</div><div class="empty-state__title">Φόρτωση…</div></div>';
+function _lbRetryHtml(title) {
+  return `<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">${title || 'Δεν φορτώθηκε η κατάταξη'}</div><button type="button" onclick="_retryLeaderboard()" style="margin-top:10px;padding:8px 18px;background:var(--gd,#6bb800);color:#fff;border:none;border-radius:10px;font-family:var(--font);font-size:.8rem;font-weight:800;cursor:pointer">Δοκίμασε ξανά</button></div>`;
+}
+function _lbClearWatchdog() { if (_lbWatchdog) { clearTimeout(_lbWatchdog); _lbWatchdog = null; } }
+function _lbArmWatchdog() {
+  _lbClearWatchdog();
+  _lbWatchdog = setTimeout(() => {
+    _lbWatchdog = null;
+    if (_lbGotSnapshot) return;            // snapshot/error already resolved it
+    logger.warn('[leaderboard] first snapshot timed out → retry state');
+    const el = _lbEl();
+    if (el) el.innerHTML = _lbRetryHtml('Δεν φορτώθηκε η κατάταξη');
+  }, LB_WATCHDOG_MS);
+}
 
 function _renderLeaderboardData(lb) {
   _lbLastData = lb;
@@ -112,12 +137,21 @@ function _renderLeaderboardData(lb) {
 }
 
 export function loadLeaderboard() {
-  const el = document.getElementById('lb-container');
+  const el = _lbEl();
   if (!el) return;
-  if (_lbUnsub) return;
+  // Already subscribed: re-render current state into the (possibly re-created)
+  // container instead of no-oping. The old `if (_lbUnsub) return;` left a fresh
+  // Profile render stuck on its static skeleton while the live listener wrote to
+  // a detached node — the infinite-"Φόρτωση…" bug.
+  if (_lbUnsub) {
+    if (_lbLastData) { _renderLeaderboardData(_lbLastData); }
+    else if (_lbGotSnapshot) { el.innerHTML = _lbRetryHtml('Δεν υπάρχουν δεδομένα ακόμα'); }
+    else { el.innerHTML = LB_LOADING_HTML; }   // listener still pending — watchdog owns the timeout
+    return;
+  }
 
   if (window.DEMO) {
-    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Leaderboard διαθέσιμο σύντομα</div><div class="empty-state__sub">Θα φανεί όταν συγκεντρωθούν αρκετά δεδομένα</div></div>';
+    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Η κατάταξη θα είναι διαθέσιμη σύντομα</div><div class="empty-state__sub">Θα φανεί όταν συγκεντρωθούν αρκετά δεδομένα</div></div>';
     return;
   }
   if (!window._db || !window._onSnapshot) {
@@ -125,37 +159,55 @@ export function loadLeaderboard() {
     return;
   }
 
-  el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">⏳</div><div class="empty-state__title">Φόρτωση…</div></div>';
+  el.innerHTML = LB_LOADING_HTML;
+  _lbGotSnapshot = false;
+  _lbArmWatchdog();
 
   try {
     const ref = window._doc(window._db, 'ipear_leaderboard', 'latest');
     _lbUnsub = window._onSnapshot(ref, (snap) => {
+      _lbGotSnapshot = true; _lbClearWatchdog();
+      const elNow = _lbEl();            // resolve fresh — never a captured/detached node
+      if (!elNow) return;
       if (!snap.exists()) {
-        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Το leaderboard ετοιμάζεται…</div></div>';
+        elNow.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Η κατάταξη ετοιμάζεται…</div></div>';
         return;
       }
       _renderLeaderboardData(snap.data());
     }, (err) => {
+      _lbGotSnapshot = true; _lbClearWatchdog();
       logger.warn('[leaderboard] onSnapshot error:', err.message);
+      const elNow = _lbEl();
+      if (!elNow) return;
       if (state.foundCustomer) {
         const t = tier(state.foundCustomer.totalPoints || 0);
         const pct = t.next ? Math.min(100, Math.round(((state.foundCustomer.totalPoints - t.floor) / (t.next - t.floor)) * 100)) : 100;
-        el.innerHTML = `<div style="text-align:center;padding:16px">
+        elNow.innerHTML = `<div style="text-align:center;padding:16px">
           <div style="font-size:2.2rem;margin-bottom:6px">${t.icon}</div>
           <div style="font-weight:800;font-size:1rem;margin-bottom:4px">${esc(t.name)}</div>
           <div style="font-size:.82rem;color:var(--grl)">Επίπεδο ${pct}% — ${t.next ? 'Επόμενο: '+(t.next - (state.foundCustomer.totalPoints||0))+' πόντοι' : 'Ανώτατη κατάταξη!'}</div>
         </div>`;
       } else {
-        el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
+        elNow.innerHTML = _lbRetryHtml('Δεν φορτώθηκε η κατάταξη');
       }
     });
   } catch(e) {
+    _lbClearWatchdog();
     logger.warn('[leaderboard] listener setup failed:', e.message);
-    el.innerHTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">Σύντομα διαθέσιμο</div></div>';
+    el.innerHTML = _lbRetryHtml('Δεν φορτώθηκε η κατάταξη');
   }
 }
 
+// Controlled re-subscription after a stale/failed listener (retry button or
+// lifecycle). Tears down cleanly first to avoid duplicate listeners.
+export function _retryLeaderboard() {
+  stopLbListener();
+  loadLeaderboard();
+}
+
 export function stopLbListener() {
+  _lbClearWatchdog();
+  _lbGotSnapshot = false;
   if (_lbUnsub) { try { _lbUnsub(); } catch(_) {} _lbUnsub = null; }
   _lbExpanded = false;
   _lbLastData = null;

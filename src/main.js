@@ -27,7 +27,7 @@ import {
   offerGenerateEshopCoupon, _copyEshopCoupon,
   _offerTick, _stopOfferRedeemWatch,
   copyReferral, shareReferral,
-  _expandLeaderboard, _collapseLb, _toggleHistory
+  _expandLeaderboard, _collapseLb, _retryLeaderboard, _toggleHistory
 } from './ui-renderers.js';
 import {
   showScreen, _showLogin, autoLogin, _getSavedAccount, _initCheckboxStyle,
@@ -1681,6 +1681,7 @@ window.copyReferral = copyReferral;
 window.shareReferral = shareReferral;
 window._expandLeaderboard = _expandLeaderboard;
 window._collapseLb = _collapseLb;
+window._retryLeaderboard = _retryLeaderboard;
 window._toggleHistory = _toggleHistory;
 window.loadHistoryMore = loadHistoryMore;
 window.generateQR = generateQR;

@@ -27,6 +27,7 @@
 import { logger } from '../../logger.js';
 import { state } from '../../state.js';
 import { esc } from '../../utils.js';
+import { cleanTxLabel } from './tx-labels.js';
 
 const HIST_PAGE_SIZE = 20;
 const HIST_INITIAL_VISIBLE = 5;
@@ -248,7 +249,7 @@ function _renderHistory(el) {
     // familiar glyph; the sign/color path is now driven entirely by dir.
     let ico, lbl;
     if (tx.type === 'add') {
-      ico = '🛒'; lbl = tx.category || 'Αγορά';
+      ico = '🛒'; lbl = cleanTxLabel(tx.category) || 'Αγορά';
     } else if (tx.type === 'redeem') {
       // Prefer the reward's own title (`tx.label`) — dynamic catalog rewards
       // like "Καλώδιο Baseus" are physical items, not euro discounts, so the
@@ -262,19 +263,19 @@ function _renderHistory(el) {
         ? `🎁 ${tx.label}`
         : `Έκπτωση ${tx.discount || ''}€`;
     } else if (tx.type === 'expire') {
-      ico = '⏳'; lbl = '⏳ Εκπνοή Πόντων';
+      ico = '⏳'; lbl = 'Εκπνοή πόντων';
     } else if (tx.type === 'tier_downgrade') {
-      ico = '📉'; lbl = tx.note || 'Tier Downgrade';
+      ico = '📉'; lbl = cleanTxLabel(tx.note) || cleanTxLabel(tx.category) || 'Υποβάθμιση επιπέδου';
     } else if (tx.type === 'referral' || tx.category?.includes('Referral')) {
-      ico = '🎁'; lbl = tx.category || '🎁 Referral Bonus';
+      ico = '🎁'; lbl = cleanTxLabel(tx.category) || 'Μπόνους σύστασης';
     } else if (tx.type === 'subtract' || tx.type === 'refund_clawback') {
       // WooCommerce reversal (either from /woo-refund-order or the legacy
-      // /woo-refund-points path). Icon is a return arrow; label falls back
-      // to the stored category (usually already prefixed with '↩︎').
-      ico = '↩︎'; lbl = tx.category || tx.note || 'Επιστροφή';
+      // /woo-refund-points path). Icon is a return arrow; label is normalized
+      // to natural Greek via the shared tx-label map (never a raw enum).
+      ico = '↩︎'; lbl = cleanTxLabel(tx.category) || cleanTxLabel(tx.note) || 'Επιστροφή';
     } else {
       ico = dir.sign === 'positive' ? '🛒' : (dir.sign === 'negative' ? '💶' : '📄');
-      lbl = tx.category || tx.note || 'Συναλλαγή';
+      lbl = cleanTxLabel(tx.category) || cleanTxLabel(tx.note) || 'Συναλλαγή';
     }
     const displaySign = dir.sign === 'positive' ? '+' : (dir.sign === 'negative' ? '-' : '');
     const displayAmount = dir.magnitude.toLocaleString('el-GR');
@@ -293,7 +294,7 @@ function _renderHistory(el) {
   const hasMorePages = _historyHasMoreUid || _historyHasMoreEmail;
 
   if (!_histExpanded && hiddenCount > 0) {
-    html += `<button id="hist-more-btn" onclick="_toggleHistory()" class="hist-more-btn">Περισσότερα... (+${hiddenCount})</button>`;
+    html += `<button id="hist-more-btn" onclick="_toggleHistory()" class="hist-more-btn">Προβολή ακόμη ${hiddenCount}</button>`;
   } else if (_histExpanded && hasMorePages) {
     html += `<button id="hist-more-btn" onclick="loadHistoryMore()" class="hist-more-btn hist-more-btn--paginate">Φόρτωση παλαιότερων ↓</button>`;
   }

@@ -47,6 +47,7 @@ export {
   stopLbListener,
   _expandLeaderboard,
   _collapseLb,
+  _retryLeaderboard,
 } from './customer/ui/leaderboard-ui.js';
 
 export {
