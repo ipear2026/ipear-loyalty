@@ -29,7 +29,10 @@
 </style>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer integrity="sha384-3zSEDfvllQohrq0PHL1fOXJuC/jSOO34H46t6UQfobFOmxE5BpjjaIJY5F2/bMnU" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js" defer integrity="sha384-sPwMflxqfAN+Q5mvlkLmHiX3PORGbZSXHiSGPTXT9VHCD/AB+b+r+vJWsqprv+7k" crossorigin="anonymous"></script>
+<!-- canvas-confetti 1.9.3 — self-hosted (public/vendor/, sha384 verified against the
+     official jsdelivr build) to avoid the CDN/SRI/CORS failure that intermittently
+     blocked the script. Same-origin: no integrity/crossorigin needed. -->
+<script src="/vendor/confetti-1.9.3.min.js" defer></script>
 
 <!-- ═══ TELEMETRY: Client-side error reporting to Worker /client-error ═══ -->
 <script>

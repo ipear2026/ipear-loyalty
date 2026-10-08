@@ -1,4 +1,8 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
+// v74 (2026-10-08): customer UI deploy — natural-Greek transaction labels,
+// leaderboard infinite-spinner fix, and self-hosted canvas-confetti (public/
+// vendor/, replacing the CDN+SRI script). Bumping CACHE_VER forces returning
+// clients to drop the cached index.html + old bundle and fetch the new build.
 // v73 (2026-09-01): retire caches for all previously deployed asset
 // generations. Rationale: the 21:58 UTC "frozen approval" incident was
 // caused by stale admin tabs holding the pre-key-rotation `firebase-init-*`
@@ -9,7 +13,7 @@
 // served via 302 redirect (opaque cache.addAll failure on install), and
 // manifest-customer.json never existed in the vite build. Replaced with the
 // actual dist filenames (index.html, manifest.json). See tests/sw-precache.test.js.
-const CACHE_VER = 'ipear-loyalty-20260901-v73';
+const CACHE_VER = 'ipear-loyalty-20261008-v74';
 
 const SHELL = [
   'index.html',
