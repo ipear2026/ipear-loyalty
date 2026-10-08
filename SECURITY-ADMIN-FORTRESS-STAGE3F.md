@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-07 · **Role:** Security Architect · **Mode:** elimination. Worker-only deploy; WordPress 2.5.4 produced for owner install. No Stage-2 rules/functions touched, no new master secret, no Cloudflare Access/passkeys/MFA.
 
-> **STATUS: ADMIN_SECRET ELIMINATED.** The Cloudflare Worker secret `ADMIN_SECRET` is **deleted** from the `email-worker` config; the deployed Worker contains **no** ADMIN_SECRET comparison, no rollback switch, and no legacy handler. All former ADMIN_SECRET routes return an unconditional `410 endpoint-retired`. A stolen historical ADMIN_SECRET value now has **no runtime verifier anywhere**. One owner hygiene step remains: install plugin **2.5.4** (purges a now-worthless stored WP string) and delete the local lookup-secret handoff file.
+> **STATUS: ADMIN_SECRET ELIMINATED — CLOSED OUT (owner WordPress cutover confirmed 2026-10-08).** The Cloudflare Worker secret `ADMIN_SECRET` is **deleted**; the deployed Worker contains **no** ADMIN_SECRET comparison, no rollback switch, and no legacy handler — all former ADMIN_SECRET routes return an unconditional `410 endpoint-retired`. WordPress **2.5.4** is installed (owner-confirmed: Admin Secret field gone, only scoped Loyalty + Lookup secrets remain), which removed the field and deleted the stale `ipear_admin_secret` option. A stolen historical ADMIN_SECRET value now has **no runtime verifier anywhere**. See §Final closeout verification.
 
 ---
 
@@ -31,7 +31,7 @@ Static checks: braces/parens/brackets balanced; **0** active `ipear_admin_secret
 ## 4. Worker deployment identity (3F.7/3F.9)
 - Master-secret-free code deployed: **`ca86f0b7-043b-43b4-b925-0537139bd0a3`** (verified live before any secret deletion).
 - Secret deletion redeployed as the current active version: **`c7bd0b6f-00ab-4e03-a93a-309e4665f827`** (100%).
-- Previous (pre-3F) rollback version: `b4c05a77-b24d-496e-b5a3-16beb07c9c0e`. Account `f02bde…`, Worker `email-worker`.
+- Prior version `b4c05a77-b24d-496e-b5a3-16beb07c9c0e` (pre-3F) is recorded for history only and is **NOT a sanctioned rollback** (it still contains ADMIN_SECRET compares behind the removed switch). Account `f02bde…`, Worker `email-worker`.
 
 ## 5. Woo plugin deployment identity (3F.8)
 **2.5.4** — `~/Desktop/ipear-woo-loyalty-2.5.4.zip` (sha256 `65217f95fafc6523b187714354672f7160fdaaa37dfd597cb602aeae344dd2fd`; plugin folder at archive root; php sha256 `06c93c7740b0b78acbf6400086c3976101af7a37db7eb236c2b9b34571137ce3`). **Not yet installed** — owner action (no authorized WordPress write access from this session). Install steps in §Owner actions.
@@ -72,7 +72,7 @@ No successor universal master secret exists (3F.10).
 
 ## 14. New rollback baseline (3F.14)
 Old Worker `e8557bc0` (and anything earlier) is **NOT** a safe rollback — it depends on `ADMIN_SECRET`, which no longer exists, so its admin/woo-legacy routes would 401. The sanctioned rollback baseline is **modern, master-secret-free** only:
-- Worker: current `c7bd0b6f` (or re-deploy `b4c05a77` / `ca86f0b7` — all run correctly without `ADMIN_SECRET`);
+- Worker: active `c7bd0b6f`, or source generation `ca86f0b7`, or a newer reviewed master-secret-free equivalent. **`b4c05a77` and `e8557bc0` (and earlier) are NOT sanctioned** — they still contain/depend on ADMIN_SECRET;
 - owner-auth `/admin/v2/*` + scoped Woo credentials + `BACKUP_SIGNING_KEY`;
 - locked Stage-2 rules (`10df4875…`) + current fortress functions;
 - frontend `admin-DKanSCzM.js`; Woo **2.5.4** (or 2.5.3 scoped-auth).
@@ -99,4 +99,26 @@ None of these grant any ADMIN_SECRET authority.
 ADMIN_SECRET active consumers = **0** · active acceptance = **0** · Worker bindings = **0** · WordPress stored copies = **0 after 2.5.4 install** (currently a dead, verifier-less string) · browser copies = **0** · runtime admin-minting surface = **0** · **GLOBAL ACTIVE ADMIN_SECRET AUTHORITY = 0**.
 
 ### FINAL VERDICT: ADMIN FORTRESS STAGE 3 COMPLETE — ADMIN_SECRET ELIMINATED
-*(Runtime authority, acceptance, and Cloudflare config binding are all zero; no master secret and no verifier exist anywhere. The sole remaining item is owner hygiene — installing 2.5.4 to purge a now-worthless stored WP string and deleting the local handoff file — neither of which confers any authority.)*
+*(Runtime authority, acceptance, and Cloudflare config binding are all zero; no master secret and no verifier exist anywhere. WordPress 2.5.4 cutover is confirmed by the owner.)*
+
+---
+
+## Final closeout verification (2026-10-08)
+Owner confirmed the WordPress cutover (Admin Secret field gone; only scoped Loyalty + Lookup secrets remain). Results:
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 1 | Active plugin = 2.5.4 | ✅ | owner visual (the 2.5.4-only removal of the Admin Secret field is present) |
+| 2 | My-Account lookup via `/woo/v2/get-user` | ✅ | legacy `/woo-get-user` → **410** (dead), `/woo/v2/get-user` → **401** (alive); 2.5.4 lookup code is the scoped `ipear_woo_lookup_secret` path verified live in 3C; customer/admin pages load 200 |
+| 3 | `ipear_admin_secret` option absent/deleted | ✅ | 2.5.4 `delete_option` on upgrade + owner visual (field gone) |
+| 4 | Cloudflare `ADMIN_SECRET` binding absent | ✅ | deletion confirmed last session on account `f02bde…` (post-delete list showed only scoped secrets). NOTE: `wrangler` has since reverted to the wrong account (`063efec`, recurring post-restart flip), so a fresh re-list needs the owner to `wrangler login` → select `f02bde`; it does not affect the completed deletion |
+| 5 | ADMIN_SECRET runtime references = 0 | ✅ | `grep env.ADMIN_SECRET email-worker.js` → 0 |
+| 6 | ADMIN_SECRET active consumers = 0 | ✅ | all surfaces scanned 0 (worker/functions/plugin/live bundles) |
+| 7 | ADMIN_SECRET active acceptance = 0 | ✅ | every former route → **410** live (identical no-cred/wrong-cred) |
+| 8 | Browser copies = 0 | ✅ | live `admin-DKanSCzM.js`: ADMIN_SECRET **0**, owner-auth `/admin/v2/` present, `VITE_ADMIN_OWNER_AUTH:"1"` |
+| 9 | WordPress stored copies = 0 | ✅ | 2.5.4 `delete_option` ran on upgrade + owner visual |
+| 10 | Runtime admin-minting surface = 0 | ✅ | `/admin/create-admin-user` → **410**, handler deleted, no `ipear_admins` write, no claim assignment |
+| 11 | Stage-2 rules/functions unchanged | ✅ | `firestore.rules` sha `10df4875…`; `functions/` at Stage-2 commit `5dcbe37`, no uncommitted changes |
+| 12 | Rollback baseline corrected | ✅ | only master-secret-free builds are safe: Worker **`ca86f0b7` / `c7bd0b6f`** (or a newer reviewed master-secret-free equivalent) + canonical source commit **`620285b`** or newer. **`b4c05a77`, `e8557bc0` and earlier are NOT sanctioned** (they contain/depend on ADMIN_SECRET). No rollback may recreate ADMIN_SECRET or place a master secret in the browser/WordPress |
+
+**Operational note for the owner:** `wrangler` is currently authenticated to the wrong Cloudflare account; before any future Worker/Pages operation, run `wrangler login` and select the `f02bde005d8c8f63cf76a9f7a1c9ee3f` account. **Still pending (optional hygiene, no authority):** delete `~/Desktop/WOO_LOOKUP_SECRET.txt` and empty Trash.
