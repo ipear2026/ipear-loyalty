@@ -57,11 +57,9 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       Αποσύνδεση
     </button>
-    <div id="worker-health" title="Worker Status" style="display:none;align-items:center;gap:5px;cursor:pointer" data-action="checkWorkerHealth">
-      <span style="font-size:.72rem;color:#888;font-weight:600" id="worker-health-txt">Worker</span>
-      <div class="health-dot unknown" id="worker-health-dot"></div>
-    </div>
-    <span class="conn-txt" id="ctxt">Firebase</span>
+    <!-- Worker health moved to System/Advanced (diagnostic). The Firebase
+         connection indicator stays — it is live operational connection state. -->
+    <span class="conn-txt" id="ctxt">Σύνδεση</span>
     <div class="conn-dot" id="cdot"></div>
   </div>
 </header>
@@ -77,15 +75,19 @@
   <button class="tab" data-action="showTab" data-arg="customers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Πελάτες</button>
   <button class="tab" data-action="showTab" data-arg="register"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Εγγραφή</button>
   <button class="tab" data-action="showTab" data-arg="gdpr" id="tab-btn-gdpr" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> GDPR <span id="gdpr-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
   <!-- LOYALTY -->
   <button class="tab" data-action="showTab" data-arg="transactions"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg> Συναλλαγές</button>
   <button class="tab" data-action="showTab" data-arg="approvals" id="tab-btn-approvals" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Εγκρίσεις <span id="approvals-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
   <button class="tab" data-action="showTab" data-arg="rewards"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.5 13.5L17 22l-5-3-5 3 1.5-8.5"/></svg> Ανταμοιβές</button>
   <button class="tab" data-action="showTab" data-arg="offers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg> Προσφορές</button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
   <!-- COMMUNICATION -->
   <button class="tab" data-action="showTab" data-arg="marketing"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg> Μάρκετινγκ</button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
   <!-- REPORTS -->
   <button class="tab" data-action="showTab" data-arg="stats"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Στατιστικά</button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
   <!-- ADVANCED / DIAGNOSTICS (last) -->
   <button class="tab" data-action="showTab" data-arg="system"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Σύστημα</button>
 </div>
@@ -472,13 +474,13 @@
       <div id="approvals-list"><div class="empty"><span class="e">✅</span>Δεν υπάρχουν εκκρεμείς εγκρίσεις</div></div>
     </div>
 
-    <!-- L2.3A: unified Tablet → Admin approval queue -->
+    <!-- Tablet → Admin redemption approval queue -->
     <div class="card" style="margin-top:18px">
       <h2>
-        <span class="ico">🧾</span> Αιτήματα Ταμπλέτας (L2.3A)
+        <span class="ico">🧾</span> Αιτήματα Ταμπλέτας
         <span id="l23a-approvals-badge" style="display:none;background:#ff3b30;color:#fff;font-size:.7rem;font-weight:900;border-radius:12px;padding:2px 8px;margin-left:8px">0</span>
       </h2>
-      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Κάθε QR scan του tablet δημιουργεί ένα pending request στο <code>ipear_redemption_requests</code>. Το Admin εγκρίνει ή απορρίπτει μέσω callable Cloud Function — το tablet δεν αλλάζει πόντους απευθείας.</p>
+      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Κάθε εξαργύρωση από το tablet περιμένει την έγκρισή σου εδώ. Οι πόντοι του πελάτη αλλάζουν μόνο αφού εγκρίνεις το αίτημα.</p>
       <div id="l23a-approvals-list"><div class="empty" style="opacity:.6;padding:16px;text-align:center">Δεν υπάρχουν εκκρεμή αιτήματα</div></div>
     </div>
   </div>
@@ -714,6 +716,15 @@
 
   <!-- ══ SYSTEM TAB (Συντήρηση + Backup) ══ -->
   <div id="tab-system" class="tc">
+    <!-- WORKER / SYSTEM HEALTH — moved here from the header (diagnostic) -->
+    <div class="card" style="margin-bottom:18px">
+      <h2><span class="ico">🩺</span> Κατάσταση Συστήματος</h2>
+      <div id="worker-health" title="Έλεγχος Worker" style="display:flex;align-items:center;gap:8px;cursor:pointer" data-action="checkWorkerHealth">
+        <span style="font-size:.85rem;color:#555;font-weight:700" id="worker-health-txt">Διακομιστής</span>
+        <div class="health-dot unknown" id="worker-health-dot"></div>
+        <span style="font-size:.72rem;color:var(--gray)">(πάτησε για έλεγχο)</span>
+      </div>
+    </div>
     <!-- KILL SWITCH -->
     <div class="kill-switch-wrap" id="kill-switch-wrap">
       <div style="font-size:2rem;flex-shrink:0">🔴</div>

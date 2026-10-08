@@ -117,22 +117,22 @@ export async function checkWorkerHealth() {
   const wrap = document.getElementById('worker-health');
   wrap.style.display = 'flex';
   dot.className = 'health-dot unknown';
-  txt.textContent = 'Worker...';
+  txt.textContent = 'Έλεγχος…';
   try {
     const r = await fetch(workerUrl + '/health', { method: 'GET', signal: AbortSignal.timeout(8000) });
     if (r.ok) {
       const data = await r.json();
       dot.className = 'health-dot ok';
-      txt.textContent = 'Worker ✓';
+      txt.textContent = 'Διακομιστής: ΟΚ';
       txt.title = 'Brevo: ' + (data.brevo ? '✓' : '✗');
     } else {
       dot.className = 'health-dot err';
-      txt.textContent = 'Worker ✗';
+      txt.textContent = 'Διακομιστής: πρόβλημα';
     }
   } catch (e) {
     dot.className = 'health-dot err';
-    txt.textContent = 'Worker ✗';
-    txt.title = e.message;
+    txt.textContent = 'Διακομιστής: πρόβλημα';
+    txt.title = friendlyError(e);
   }
 }
 

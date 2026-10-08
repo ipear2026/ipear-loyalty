@@ -46,7 +46,7 @@ export function initAdminAuth(hooks) {
 // ══════════════════════════════════════
 export function setOnline(on) {
   document.getElementById('cdot').className = 'conn-dot ' + (on ? 'ok' : 'err');
-  document.getElementById('ctxt').textContent = on ? 'Firebase' : 'OFFLINE';
+  document.getElementById('ctxt').textContent = on ? 'Σύνδεση' : 'Χωρίς σύνδεση';
   if (!on) toast('🔴 Χάθηκε το ίντερνετ!', 'error');
 }
 
@@ -188,8 +188,8 @@ export function adminLogout() {
   document.getElementById('cust-result')?.classList.remove('show');
   const sinput = document.getElementById('sinput');
   if (sinput) sinput.value = '';
-  const whEl = document.getElementById('worker-health');
-  if (whEl) whEl.style.display = 'none';
+  // Worker health now lives as a card in the System/Advanced tab (not the
+  // header), so it is not hidden on logout — the tab's own visibility governs it.
   // Clear UI: store badges
   const badge = document.getElementById('store-badge');
   if (badge) { badge.textContent = ''; badge.style.display = 'none'; }

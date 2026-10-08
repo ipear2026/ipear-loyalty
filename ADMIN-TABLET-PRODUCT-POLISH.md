@@ -77,6 +77,13 @@ No change to server-only financial writes, locked ledger, owner-auth, App Check,
 
 Re-scored after this build: **ADMIN** Copy 7→**8**, Async states 6→**7**, IA 6→**7** (grouped; +1 more after authenticated verification), Clarity 6→**7**. **TABLET** Copy 7→**8**, Async states 6→**7**, Error prevention 7→**8**. Safety stays **9** (no auth/financial change).
 
+## 20d. Authenticated-review fixes (owner screenshot feedback)
+1. **Build/version "unknown" badge (bottom-right):** now **always hidden** in the owner UI (`admin-bootstrap.js` — the diagnostic tag is kept for client-error telemetry only, never rendered).
+2. **"Αιτήματα Ταμπλέτας (L2.3A)" card copy:** stripped all developer/backend language (`(L2.3A)`, `ipear_redemption_requests`, `pending request`, `callable Cloud Function`, `direct points-write`) → owner-facing Greek: *"Κάθε εξαργύρωση από το tablet περιμένει την έγκρισή σου εδώ. Οι πόντοι του πελάτη αλλάζουν μόνο αφού εγκρίνεις το αίτημα."* (behavior unchanged; the L2.3A text was in a non-rendered comment, also tidied).
+3. **Top nav:** applied the approved grouped reorder **and** added subtle vertical **group separators** (CUSTOMERS │ LOYALTY │ COMMUNICATION │ REPORTS │ ADVANCED) to reduce the flat/crowded feel — routes/IDs/badges preserved, `search` still the active landing.
+4. **Header "Worker ✓ / Firebase ●":** the diagnostic **Worker health moved into the System/Advanced tab** (as a "Κατάσταση Συστήματος" card with the same check). The header keeps only the live **connection** indicator, now labelled in Greek (**"Σύνδεση"** / **"Χωρίς σύνδεση"** instead of `Firebase`/`OFFLINE`); the Worker-health labels are Greek too ("Διακομιστής: ΟΚ/πρόβλημα").
+No functionality/security change. Build + full suite green (566/566, rules 63/63, locked 15/15); root Worker/rules/functions/customer app untouched.
+
 ## Friendly-error coverage
 Admin: **18/18** raw `e.message` toast sites now route through `friendlyError()` (0 remaining). Tablet: search-error path routed through the operator helper; `_friendlyErrorFor()` fallback Greek-safe; login keeps its code-map with support `[code:]` hints. Console/diagnostic logs still carry the raw technical detail (unchanged).
 

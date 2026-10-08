@@ -78,14 +78,12 @@ if ('serviceWorker' in navigator) {
 function _setBuildStamp() {
   var el = document.getElementById('build-stamp');
   if (!el) return;
-  // Diagnostic-only stamp: show the build tag when present, otherwise hide the
-  // element rather than render a bare "unknown" badge in the owner UI.
-  if (window.ADMIN_BUILD_TAG) {
-    el.textContent = window.ADMIN_BUILD_TAG;
-    el.style.display = '';
-  } else {
-    el.style.display = 'none';
-  }
+  // The build tag is a developer/diagnostic value (not auto-bumped), so it is
+  // NOT shown in the owner UI — it only ever read "unknown"/stale. The element
+  // is kept in the DOM (hidden) and the tag stays available to client-error
+  // telemetry; it is never rendered as a visible badge.
+  el.textContent = '';
+  el.style.display = 'none';
 }
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _setBuildStamp);
