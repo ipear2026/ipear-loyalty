@@ -149,11 +149,22 @@ The **8.3** is **projected**, not current; the **current** reviewed-build score 
 | P3-2 | Customer | Greek casing/copy sweep | polish | P3 | copy pass | low | S |
 
 ---
+## 16d. Predeploy window (2026-10-08) — confetti SRI + deploy gate
+- **Confetti SRI root cause:** the integrity hash in `index.html` **matched** the served file (verified: `sha384-sPwMfl…` == computed) — the block was a **transient CDN/CORS failure**, not a stale hash. **Fix:** self-hosted the exact pinned, SHA-384-verified `canvas-confetti@1.9.3` at `public/vendor/confetti-1.9.3.min.js` and reference it **same-origin** (no CDN/SRI/CORS failure mode). Commit `870cd45`.
+- **Service-worker cache:** bumped `CACHE_VER` → `v74` so returning clients drop the cached `index.html`/bundle and receive this build + the prior label/leaderboard fixes. (Found via QA: the SW was serving a cached page — without the bump the deploy would not reach existing users.)
+- **Build/tests:** vitest **555/555**, rules **63/63**, locked **15/15**, lint clean, no maps/secrets; admin/tablet bundles byte-identical; Worker/rules/functions/plugin untouched.
+- **DEPLOYED (2026-10-08):** after owner re-auth to the correct account (`ipear2026@gmail.com` / `f02bde005d8c8f63cf76a9f7a1c9ee3f`), deployed to Cloudflare Pages **`ipear-loyalty` / branch `main` (Production)**.
+  - **Deployment:** `f123be10` (`https://f123be10.ipear-loyalty.pages.dev`), source HEAD `870cd45`.
+  - **Bundles:** customer `assets/main-BS8ApiFA.js` sha256 `6831e638…`; admin `assets/admin-DKanSCzM.js` sha256 `497bd674…` (**unchanged filename**); tablet `assets/tablet-BKe1cKHP.js` sha256 `9845ed5b…`; vendor `vendor/confetti-1.9.3.min.js` sha256 `cfc4a191…`.
+  - **Passive live smoke (PASS):** `loyalty.ipear.gr` / `/admin` / `/tablet` → **200**; `/vendor/confetti-1.9.3.min.js` → 200; **zero** jsdelivr-confetti references; SW `CACHE_VER=v74`; live `window.confetti === 'function'` (old SRI block gone); **no console errors**; admin owner-auth flag **ON**, financial flag **ON**.
+  - **Post-deploy security (PASS):** Worker version `c7bd0b6f` unchanged; `ADMIN_SECRET` bindings = **0**; `firestore.rules` `10df4875…` unchanged; 5 fortress functions + Woo 2.5.4 untouched; no credential changes.
+- **Live score:** the deployed P0/P2 fixes move the **current LIVE score to ~7.3/10** (customer-facing); **target 8.3/10** after the remaining owner-approved P1/P2 (authenticated-session a11y/responsive pass, admin IA, confetti already done). Full-confidence re-score of the authenticated screens awaits the owner's live customer QA.
+
 # FINAL STATUS (tracks separated)
 
 **SECURITY IDENTITY MIGRATION: MIGRATION INCOMPLETE — OWNER/GCP ACTION REQUIRED.**
 
 **UI/UX PRODUCT AUDIT: COMPLETE** (both P0 root causes proven + fixed with tests; safe P2 polish implemented; live responsive QA on all three shells; full suite + build + scans green; current reviewed-build score 7.3/10). Remaining items are owner-approved P1/P2 (live-session a11y/responsive pass on authenticated screens, admin IA declutter, tablet operator pass, confetti SRI) — none blocking a customer-bundle deploy.
 
-## READY FOR UI/UX PRODUCTION DEPLOYMENT
-Customer-bundle changes only (`admin-DKanSCzM.js` byte-identical; Worker/rules/functions untouched). **Not deployed** — deploy in its **own** window, never combined with the Track A Worker identity cutover.
+## CUSTOMER UI DEPLOYED — OWNER AUTHENTICATED QA REQUIRED
+Deployed to Cloudflare Pages Production (`ipear-loyalty`/`main`), deployment `f123be10`, source `870cd45`. Passive smoke + post-deploy security all green; admin/tablet bundles unchanged; Worker/rules/functions/Woo-plugin untouched; Track A Worker identity migration **not** touched (remains MIGRATION INCOMPLETE). **Remaining:** an owner-run authenticated-customer QA on production (profile/history/leaderboard) — no financial mutations — to visually confirm the normalized labels, `Προβολή ακόμη N`, leaderboard states/retry, and no stale UI.
