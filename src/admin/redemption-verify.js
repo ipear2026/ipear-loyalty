@@ -9,6 +9,7 @@
 //  reaching into globals.
 // ═══════════════════════════════════════════════════════════════════════════
 import { escHtml, escJs } from '../utils.js';
+import { friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 import { publishLeaderboard } from './leaderboard.js';
 // ADMIN FORTRESS Stage 2 — server-authoritative code verification (flag-gated).
@@ -115,7 +116,7 @@ export async function verifyCode() {
       </div>`;
     }
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -277,7 +278,7 @@ export async function confirmVerify(redemptionId, code) {
     toast(`✅ ${found.label} — ${found.customerName}`, 'success');
     _ctx.refreshAdminViews();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
     if (vBtn && document.body.contains(vBtn)) {
       vBtn.disabled = false;
       vBtn.textContent = '💶 Επιβεβαίωση & Εξαργύρωση';
@@ -421,7 +422,7 @@ export async function confirmOfferVerify(redemptionId) {
     _ctx.refreshAdminViews();
     if (bonus > 0) publishLeaderboard().catch(() => {});
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
     if (vBtn && document.body.contains(vBtn)) {
       vBtn.disabled = false;
       vBtn.textContent = '🎁 Έγκριση Προσφοράς';

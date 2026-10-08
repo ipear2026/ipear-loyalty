@@ -8,6 +8,7 @@
 //  is user-created and not authoritative.
 // ═══════════════════════════════════════════════════════════════════════════
 import { escHtml, escJs } from '../utils.js';
+import { friendlyError } from '../utils.js';
 import { logger } from '../logger.js';
 import { toast } from './ui.js';
 import { publishLeaderboard } from './leaderboard.js';
@@ -204,7 +205,7 @@ export async function approveOffer(redemptionId) {
     _ctx.refreshAdminViews();
     if (bonus > 0) publishLeaderboard().catch(() => {});
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     if (clickedBtn) {
       clickedBtn.disabled = false;
@@ -230,7 +231,7 @@ export async function rejectOffer(redemptionId) {
     });
     toast('❌ Προσφορά απορρίφθηκε.', 'error');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _rejectOfferBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;

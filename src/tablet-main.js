@@ -261,7 +261,7 @@ async function _doLookup(query) {
     else if (res.blocked) _showResultAsNotFound('🚫 Ο πελάτης είναι blocked.');
     else { _renderCustomerProjection(res.projection); _showResult(); }
   } catch (e) {
-    _showToast('❌ ' + (e?.message || e?.code || 'Σφάλμα αναζήτησης'));
+    _showToast('❌ ' + _friendlyErrorFor(e));
   } finally {
     if (btn) { btn.innerHTML = 'Αναζήτηση'; btn.disabled = false; }
   }
@@ -504,8 +504,10 @@ function _friendlyErrorFor(e) {
   }
   if (String(c).includes('resource-exhausted')) return 'Πάρα πολλά scans — περίμενε 1 λεπτό.';
   if (String(c).includes('not-found')) return 'Ο κωδικός δεν υπάρχει.';
-  if (String(c).includes('failed-precondition')) return m;
-  return m;
+  if (String(c).includes('failed-precondition')) return m; // server business msgs are Greek
+  // Unknown error: keep an already-Greek message, otherwise a safe generic —
+  // never surface a raw English/technical string to the store operator.
+  return /[Ͱ-Ͽ]/.test(m) ? m : 'Κάτι πήγε στραβά. Δοκίμασε ξανά.';
 }
 
 function _watchRequest(requestId) {

@@ -19,6 +19,7 @@
 //  avoid an extra hook for it.
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from '../logger.js';
+import { friendlyError } from '../utils.js';
 import { authState } from './auth-state.js';
 import { toast, closeM } from './ui.js';
 import { publishLeaderboard as _publishLeaderboard } from './leaderboard.js';
@@ -157,7 +158,7 @@ export async function confirmAdd() {
     _publishLeaderboard(); // refresh leaderboard after points change
   } catch(e) {
     logger.warn('[confirmAdd] failed:', e?.message);
-    toast('❌ '+e.message,'error');
+    toast('❌ ' + friendlyError(e),'error');
   }
   finally { _txnBusy = false; if (addBtn) { addBtn.disabled=false; addBtn.textContent='✅ Καταχώρηση'; } }
 }
@@ -267,7 +268,7 @@ export async function confirmRedeem() {
     _publishLeaderboard(); // refresh leaderboard after points change
   } catch(e) {
     logger.warn('[confirmRedeem] failed:', e?.message);
-    toast('❌ '+e.message,'error');
+    toast('❌ ' + friendlyError(e),'error');
   }
   finally { _txnBusy = false; if (redeemBtn) { redeemBtn.disabled=false; redeemBtn.textContent='💶 Εξαργύρωση'; } }
 }

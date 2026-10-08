@@ -3,7 +3,7 @@
 //  Renders the offers list, opens the create/edit modal (with image upload
 //  + compression to base64 ≤900px / 0.78 quality), toggles active state.
 // ═══════════════════════════════════════════════════════════════════════════
-import { escHtml, escJs } from '../utils.js';
+import { escHtml, escJs, friendlyError } from '../utils.js';
 import { toast, closeM } from './ui.js';
 import { authState } from './auth-state.js';
 
@@ -229,7 +229,7 @@ export async function saveOffer() {
     closeM();
     loadOffers();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '✅ Αποθήκευση';
@@ -248,7 +248,7 @@ export async function toggleOffer(id, current) {
     loadOffers();
     toast(current ? '⏸ Απενεργοποιήθηκε' : '▶️ Ενεργοποιήθηκε', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _toggleOfferBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;
@@ -267,7 +267,7 @@ export async function deleteOffer(id) {
     loadOffers();
     toast('🗑 Η προσφορά διαγράφηκε.', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _deleteOfferBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;

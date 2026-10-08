@@ -15,7 +15,7 @@
 //   • deleteCust                — the actual deletion executor, owned by
 //     admin-main.js (will move to customers-crud.js in a later commit)
 // ═══════════════════════════════════════════════════════════════════════════
-import { escHtml, escJs } from '../utils.js';
+import { escHtml, escJs, friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 
 const DB = () => window._db;
@@ -78,7 +78,7 @@ export async function gdprDeleteCustomer(docId, _name) {
     await _hooks.deleteCust();
     loadDeletionRequests();
   } catch(e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
   const { cid } = _hooks.getCidCdata();
   if (!cid) _hooks.setCidCdata({ cid: prevCid, cdata: prevCdata });

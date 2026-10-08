@@ -16,7 +16,7 @@
 //    createdAt   string
 //    updatedAt   string
 // ═══════════════════════════════════════════════════════════════════════════
-import { escHtml, escJs } from '../utils.js';
+import { escHtml, escJs, friendlyError } from '../utils.js';
 import { toast, closeM } from './ui.js';
 
 const DB = () => window._db;
@@ -232,7 +232,7 @@ export async function saveReward() {
     closeM();
     loadRewards();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -253,7 +253,7 @@ export async function toggleReward(id, current) {
     loadRewards();
     toast(current ? '⏸ Απενεργοποιήθηκε' : '▶️ Ενεργοποιήθηκε', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _toggleRewardBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;
@@ -273,7 +273,7 @@ export async function deleteReward(id) {
     loadRewards();
     toast('🗑 Η ανταμοιβή διαγράφηκε.', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _deleteRewardBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;

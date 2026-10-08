@@ -17,7 +17,7 @@
 //  out its refresh without going through another hook.
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from '../logger.js';
-import { escHtml } from '../utils.js';
+import { escHtml, friendlyError } from '../utils.js';
 import { authState } from './auth-state.js';
 import { toast } from './ui.js';
 import { loadStats } from './stats.js';
@@ -233,7 +233,7 @@ export async function exportBk() {
     a.download=`iPear_Backup_${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}.json`;
     a.click(); URL.revokeObjectURL(a.href);
     toast(`✅ Backup εξήχθη! (${custs.length} πελάτες)`,'success');
-  } catch(e) { toast('❌ '+e.message,'error'); }
+  } catch(e) { toast('❌ ' + friendlyError(e),'error'); }
   document.getElementById('exspin').classList.remove('show');
 }
 
@@ -271,7 +271,7 @@ export async function importBk(ev) {
       // Fan out the post-import refresh. loadStats + loadTx ship from this
       // module; loadAll still lives in admin-main.js so it goes through a hook.
       loadStats(); loadTx(); _hooks.reloadAfterImport();
-    } catch(err){ toast('❌ '+err.message,'error'); }
+    } catch(err){ toast('❌ ' + friendlyError(err),'error'); }
     ev.target.value='';
   };
   reader.readAsText(file);

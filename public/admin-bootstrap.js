@@ -77,7 +77,15 @@ if ('serviceWorker' in navigator) {
 // guarding for safety since admin-main.js loads as type=module — deferred).
 function _setBuildStamp() {
   var el = document.getElementById('build-stamp');
-  if (el) el.textContent = window.ADMIN_BUILD_TAG || 'unknown';
+  if (!el) return;
+  // Diagnostic-only stamp: show the build tag when present, otherwise hide the
+  // element rather than render a bare "unknown" badge in the owner UI.
+  if (window.ADMIN_BUILD_TAG) {
+    el.textContent = window.ADMIN_BUILD_TAG;
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
 }
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _setBuildStamp);

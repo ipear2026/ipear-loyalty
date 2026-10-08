@@ -1,7 +1,7 @@
 import {
   getDb, collection, doc, query, where, getDocs, deleteDoc,
 } from '../services/firebase.js';
-import { escHtml } from '../utils.js';
+import { escHtml, friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 // ADMIN FORTRESS Stage 2 — append-only ledger: the admin UI must not delete
 // financial evidence. Flag-gated to preserve rollback.
@@ -165,7 +165,7 @@ export async function deleteOrphanTxs(customerId) {
     toast('✅ Διαγράφηκαν ' + count + ' ορφανές συναλλαγές', 'success');
     scanOrphans();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -178,7 +178,7 @@ export async function deleteGhostCustomer(id, name) {
     scanOrphans();
     _onDataChanged();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -212,7 +212,7 @@ export async function deleteSecondaryOrphans(collectionName) {
     scanOrphans();
     _onDataChanged();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 

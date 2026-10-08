@@ -1,7 +1,7 @@
 import {
   getDb, collection, doc, getDocs, runTransaction,
 } from '../services/firebase.js';
-import { tier, escHtml } from '../utils.js';
+import { tier, escHtml, friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 import { authState } from './auth-state.js';
 import { publishLeaderboard } from './leaderboard.js';
@@ -73,7 +73,7 @@ export async function previewExpirePoints() {
     btn.style.display = '';
   } catch (e) {
     previewEl.innerHTML = '';
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -210,7 +210,7 @@ export async function previewTierDowngrade() {
     btn.style.display = '';
   } catch (e) {
     previewEl.innerHTML = '';
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 

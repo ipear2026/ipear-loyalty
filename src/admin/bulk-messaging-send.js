@@ -1,4 +1,5 @@
 import { getDb, collection, getDocs } from '../services/firebase.js';
+import { friendlyError } from '../utils.js';
 import { tier, escHtml } from '../utils.js';
 import { toast } from './ui.js';
 import { getWorkerSecret } from './worker-secret.js';
@@ -178,7 +179,7 @@ export async function sendSMSBulk() {
   } catch (e) {
     prog.style.display = 'none';
     res.innerHTML = `<div style="background:#fff3f3;border:1px solid #e53935;border-radius:10px;padding:14px;color:#c62828;font-size:.85rem">❌ Σφάλμα: ${escHtml(e.message)}</div>`;
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '📱 Αποστολή Μαζικού SMS';

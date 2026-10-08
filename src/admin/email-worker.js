@@ -3,7 +3,7 @@
 //  Config UI, connection test, health probe, single-customer search,
 //  template fill, and authenticated bulk-email broadcast via Brevo.
 // ═══════════════════════════════════════════════════════════════════════════
-import { tier, escHtml, escJs } from '../utils.js';
+import { tier, escHtml, escJs, friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 import { getWorkerSecret, setWorkerSecret } from './worker-secret.js';
 // ADMIN FORTRESS Stage 3B — owner-auth path (flag ON). Mutually exclusive with
@@ -383,7 +383,7 @@ export async function sendEmailBulk() {
     prog.style.display = 'none';
     res.innerHTML = `<div style="background:#fff3f3;border:1px solid #e53935;border-radius:10px;padding:14px;color:#c62828;font-size:.85rem">
       ❌ Σφάλμα: ${escHtml(e.message)}</div>`;
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     btn.disabled = false;
     spin.classList.remove('show');

@@ -20,7 +20,7 @@
 //  admin-auth.js mirrors them there on login, so no extra hook.
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from '../logger.js';
-import { tier, escHtml, escJs } from '../utils.js';
+import { tier, escHtml, escJs, friendlyError } from '../utils.js';
 import { authState } from './auth-state.js';
 import { toast, closeM } from './ui.js';
 import { publishLeaderboard as _publishLeaderboard } from './leaderboard.js';
@@ -158,7 +158,7 @@ export async function register() {
     document.getElementById('rterms').checked=false;
     window._emailAllCustomers = null; // invalidate search cache
     loadStats(); loadAll(); // loadAll also publishes leaderboard
-  } catch(e) { toast('❌ '+e.message,'error'); }
+  } catch(e) { toast('❌ ' + friendlyError(e),'error'); }
   finally {
     // IAM-FIX: always restore UI even if catch itself throws
     document.getElementById('rspin').classList.remove('show');
@@ -219,7 +219,7 @@ export async function search() {
 
     if (found) { _hooks.setScope({ cid: foundId, cdata: found }); renderCust(found); }
     else document.getElementById('no-res').style.display='block';
-  } catch(e) { toast('❌ '+e.message,'error'); }
+  } catch(e) { toast('❌ ' + friendlyError(e),'error'); }
   document.getElementById('sspin').classList.remove('show');
 }
 
@@ -333,7 +333,7 @@ export async function blockCust() {
     cdata.blocked = !isBlocked;
     renderCust(cdata);
     toast(isBlocked ? '✅ Ο πελάτης ξεμπλοκαρίστηκε.' : '🚫 Ο πελάτης μπλοκαρίστηκε.', 'success');
-  } catch(e) { toast('❌ ' + e.message, 'error'); }
+  } catch(e) { toast('❌ ' + friendlyError(e), 'error'); }
   finally { _blockCustBusy = false; }
 }
 
@@ -565,7 +565,7 @@ export async function deleteCust() {
     _hooks.setScope({ cid: null, cdata: null });
     toast('🗑 Ο πελάτης διαγράφηκε (Auth + Firestore).','success');
     loadStats(); loadAll();
-  } catch(e) { toast('❌ '+e.message,'error'); }
+  } catch(e) { toast('❌ ' + friendlyError(e),'error'); }
   finally { _deleteCustBusy = false; }
 }
 
@@ -601,7 +601,7 @@ export async function saveEdit() {
     renderCust(cdata);
     toast('✅ Τα στοιχεία ενημερώθηκαν!','success'); closeM();
     loadAll();
-  } catch(e) { toast('❌ '+e.message,'error'); }
+  } catch(e) { toast('❌ ' + friendlyError(e),'error'); }
 }
 
 // ══════════════════════════════════════
@@ -706,7 +706,7 @@ export async function quickSel(id) {
       _hooks.showTab('search');
       renderCust(snap.data());
     }
-  } catch(e) { toast('❌ '+e.message,'error'); }
+  } catch(e) { toast('❌ ' + friendlyError(e),'error'); }
 }
 
 // ══════════════════════════════════════

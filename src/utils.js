@@ -220,3 +220,33 @@ export function escJs(s) {
 
 // tierFloor removed — the `floor` field is now returned by tier() itself,
 // so callers use `tier(tot).floor` instead of duplicating the ladder.
+// ── Friendly error mapping (Admin + Tablet + Customer) ───────────────────────
+//  Maps raw Firebase / HTTP / network errors to a natural-Greek, operator-safe
+//  message. Technical detail stays in console/diagnostic logs (callers still
+//  logger.warn the raw error); only the UI toast uses this. Never throws.
+export function friendlyError(e) {
+  const raw = (e && (e.code || e.message)) ? String(e.code || e.message) : String(e ?? '');
+  const s = raw.toLowerCase();
+  // Permission / auth
+  if (s.includes('permission') || s.includes('insufficient') || s.includes('unauthenticated') ||
+      s.includes('unauthorized') || s.includes('forbidden') || s.includes('403') || s.includes('401') ||
+      s.includes('app-check') || s.includes('appcheck'))
+    return 'Δεν έχετε δικαίωμα για αυτή την ενέργεια.';
+  // Network / offline
+  if (s.includes('network') || s.includes('failed to fetch') || s.includes('offline') ||
+      s.includes('unavailable') || s.includes('load failed') || s.includes('err_'))
+    return 'Δεν ήταν δυνατή η σύνδεση. Δοκιμάστε ξανά.';
+  // Timeout / aborted
+  if (s.includes('timeout') || s.includes('timed out') || s.includes('deadline') || s.includes('abort'))
+    return 'Η ενέργεια άργησε περισσότερο από το αναμενόμενο. Δοκιμάστε ξανά.';
+  // Not found
+  if (s.includes('not-found') || s.includes('not found') || s.includes('404') || s.includes('no document'))
+    return 'Δεν βρέθηκε το στοιχείο.';
+  // Rate limit / exhausted
+  if (s.includes('resource-exhausted') || s.includes('too many') || s.includes('rate') || s.includes('429'))
+    return 'Πολλές προσπάθειες. Δοκιμάστε ξανά σε λίγο.';
+  // Already Greek (contains Greek letters) → trust the caller's message
+  if (/[Ͱ-Ͽ]/.test(raw)) return raw;
+  // Generic fallback — never leak a bare English/technical string
+  return 'Κάτι πήγε στραβά. Δοκιμάστε ξανά.';
+}
