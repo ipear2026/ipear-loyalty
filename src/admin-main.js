@@ -88,17 +88,12 @@ import {
   confirmVerify,
   confirmOfferVerify,
 } from './admin/redemption-verify.js';
-import {
-  initApprovals,
-  startApprovalListener,
-  stopApprovalListener,
-  approveOffer,
-  rejectOffer,
-} from './admin/approvals.js';
-// L2.3A: new unified approval queue (Tablet → Admin flow).
+// L2.3A: unified approval queue (Tablet / commercial-system → Admin flow).
 // The listener starts after auth completes; it renders into
-// #l23a-approvals-list (see admin.html), independent of the legacy
-// ipear_offer_redemptions queue in ./admin/approvals.js above.
+// #l23a-approvals-list (see admin.html). The pre-L2.3A offer-approvals queue
+// (ipear_offer_redemptions + status=pending_approval) was a dead path with no
+// writer and has been removed — this is now the single canonical approval
+// surface.
 import {
   startL23aApprovalListener,
   stopL23aApprovalListener,
@@ -138,14 +133,9 @@ initCustomerLiveSync({
   onCustomerChange: (id, data) => updateCachedCustomerRow(id, data),
 });
 
-// Wire approvals + redemption-verify modules. Store context resolved from
-// authState directly — admin-auth.js mirrors storeId/storeName there on
-// login, so we don't need to keep a local copy in admin-main anymore.
-initApprovals({
-  getStoreContext: () => ({ storeId: authState.storeId, storeName: authState.storeName }),
-  refreshAdminViews: () => { loadTx(); loadStats(); },
-});
-
+// Wire redemption-verify module. Store context resolved from authState
+// directly — admin-auth.js mirrors storeId/storeName there on login, so we
+// don't need to keep a local copy in admin-main anymore.
 initRedemptionVerify({
   getStoreContext: () => ({ storeId: authState.storeId, storeName: authState.storeName }),
   onRedemptionApproved: ({ customerId, newPoints }) => {
@@ -251,13 +241,12 @@ initAdminAuth({
   onLoginComplete: () => {
     configureSystemHealth({ onDataChanged: loadStats });
     configureStats({ onSnapshot: renderSegments });
-    loadStats(); loadTx(); loadAll(); loadOffers(); startApprovalListener(); startL23aApprovalListener({}); _startCustomerLiveSync();
+    loadStats(); loadTx(); loadAll(); loadOffers(); startL23aApprovalListener({}); _startCustomerLiveSync();
     processReferralQueue(); loadKpiOverview(); startMaintenanceListener(); checkWorkerHealth();
     loadDeletionRequests();
   },
   onLogout: () => {
     // Stop real-time listeners (prevent leak + stale re-login)
-    stopApprovalListener();
     stopL23aApprovalListener();
     stopCustomerLiveSync();
     stopMaintenanceListener();
@@ -270,7 +259,7 @@ initAdminAuth({
     showTab('search');
   },
   keepAliveRefresh: () => {
-    loadStats(); loadTx(); loadOffers(); startApprovalListener(); startL23aApprovalListener({}); _startCustomerLiveSync();
+    loadStats(); loadTx(); loadOffers(); startL23aApprovalListener({}); _startCustomerLiveSync();
     loadKpiOverview(); checkWorkerHealth();
   },
 });
@@ -289,19 +278,21 @@ initAdminAuth({
 // Store context (storeId / storeName) lives in authState — all modules read
 // it from there directly. admin-auth.js mirrors it on login.
 let cid = null, cdata = null, msgCh = '';
-const TABS = ['search','register','customers','transactions','approvals','offers','rewards','marketing','stats','system','gdpr'];
 
 // ── Online indicator + keep-alive moved to ./admin/admin-auth.js ──
 
 // ══════════════════════════════════════
 //  TABS
 // ══════════════════════════════════════
+// Active-state is derived directly from the nav button that owns this tab
+// (its `data-arg`), NOT from a separate index array that has to stay in the
+// same order as the DOM. Content pane (`#tab-<n>`) and the highlighted nav
+// item therefore always agree, regardless of how the nav is grouped/reordered.
 function showTab(n) {
   document.querySelectorAll('.tc').forEach(e => e.classList.remove('show'));
   document.querySelectorAll('.tab').forEach(e => e.classList.remove('active'));
-  document.getElementById('tab-'+n).classList.add('show');
-  const idx = TABS.indexOf(n);
-  document.querySelectorAll('.tab')[idx]?.classList.add('active');
+  document.getElementById('tab-'+n)?.classList.add('show');
+  document.querySelector('.tab[data-action="showTab"][data-arg="'+n+'"]')?.classList.add('active');
   if (n==='stats') { loadStats(); loadAnalytics(); }
   if (n==='transactions') loadTx();
   if (n==='customers') loadAll();
@@ -425,8 +416,6 @@ window.previewOfferImage = previewOfferImage;
 window.removeOfferImage = removeOfferImage;
 window.previewRewardImage = previewRewardImage;
 window.removeRewardImage = removeRewardImage;
-window.approveOffer = approveOffer;
-window.rejectOffer = rejectOffer;
 window.openDrillDown = openDrillDown;
 window.filterBySegment = filterBySegment;
 window.clearSegmentFilter = clearSegmentFilter;

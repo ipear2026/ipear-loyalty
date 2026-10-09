@@ -468,19 +468,13 @@
 
   <!-- ── APPROVALS TAB ── -->
   <div id="tab-approvals" class="tc">
+    <!-- Canonical approval queue (redemptions + offers awaiting owner approval) -->
     <div class="card">
-      <h2><span class="ico">🔔</span> Εκκρεμείς Εγκρίσεις Προσφορών</h2>
-      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Οι προσφορές που περιμένουν έγκριση από το tablet εμφανίζονται εδώ σε πραγματικό χρόνο.</p>
-      <div id="approvals-list"><div class="empty"><span class="e">✅</span>Δεν υπάρχουν εκκρεμείς εγκρίσεις</div></div>
-    </div>
-
-    <!-- Tablet → Admin redemption approval queue -->
-    <div class="card" style="margin-top:18px">
       <h2>
-        <span class="ico">🧾</span> Αιτήματα Ταμπλέτας
+        <span class="ico">🔔</span> Εκκρεμείς Εγκρίσεις
         <span id="l23a-approvals-badge" style="display:none;background:#ff3b30;color:#fff;font-size:.7rem;font-weight:900;border-radius:12px;padding:2px 8px;margin-left:8px">0</span>
       </h2>
-      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Κάθε εξαργύρωση από το tablet περιμένει την έγκρισή σου εδώ. Οι πόντοι του πελάτη αλλάζουν μόνο αφού εγκρίνεις το αίτημα.</p>
+      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Εδώ εμφανίζονται οι εξαργυρώσεις και οι προσφορές που περιμένουν την έγκρισή σου. Οι πόντοι του πελάτη αλλάζουν μόνο αφού εγκρίνεις το αίτημα.</p>
       <div id="l23a-approvals-list"><div class="empty" style="opacity:.6;padding:16px;text-align:center">Δεν υπάρχουν εκκρεμή αιτήματα</div></div>
     </div>
   </div>
@@ -718,11 +712,13 @@
   <div id="tab-system" class="tc">
     <!-- WORKER / SYSTEM HEALTH — moved here from the header (diagnostic) -->
     <div class="card" style="margin-bottom:18px">
-      <h2><span class="ico">🩺</span> Κατάσταση Συστήματος</h2>
-      <div id="worker-health" title="Έλεγχος Worker" style="display:flex;align-items:center;gap:8px;cursor:pointer" data-action="checkWorkerHealth">
+      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <span><span class="ico">🩺</span> Κατάσταση Συστήματος</span>
+        <button class="btn btn-sm btn-primary" data-action="checkWorkerHealth">🩺 Έλεγχος διακομιστή</button>
+      </h2>
+      <div id="worker-health" style="display:flex;align-items:center;gap:8px">
         <span style="font-size:.85rem;color:#555;font-weight:700" id="worker-health-txt">Διακομιστής</span>
         <div class="health-dot unknown" id="worker-health-dot"></div>
-        <span style="font-size:.72rem;color:var(--gray)">(πάτησε για έλεγχο)</span>
       </div>
     </div>
     <!-- KILL SWITCH -->
