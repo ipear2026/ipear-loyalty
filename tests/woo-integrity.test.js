@@ -19,7 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   handleWooCreditOrder, handleWooRefundOrder,
-  decideCredit, decideRefund, STATE, _test,
+  decideCredit, decideRefund, applyRefundBalances, STATE, _test,
 } from '../src/worker/lib/woo-integrity.js';
 
 const { siteHashFromEnv, ledgerDocId, auditCreditDocId, auditRefundDocId, pointsFromCents, verifyWooSecret } = _test;
@@ -1416,5 +1416,88 @@ describe('9 · Firestore REST commit schema (regression for the #12809 400)', ()
     expect(body.error.status).toBe('INVALID_ARGUMENT');
     expect(body.error.details[0].fieldViolations[0].field).toBe('writes[0].update.name');
     expect(fake.state.rejections).toHaveLength(1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  R2 · Negative spendable balance + totalPoints qualifying reversal
+//  (pure accounting — applyRefundBalances). Tier is derived from totalPoints.
+// ═══════════════════════════════════════════════════════════════════════════
+function tierName(t) {
+  if (t >= 10000) return 'Platinum';
+  if (t >= 6000)  return 'Diamond';
+  if (t >= 3000)  return 'Gold';
+  if (t >= 1000)  return 'Silver';
+  return 'Bronze';
+}
+
+describe('R2 · applyRefundBalances — negative spendable, no clamp', () => {
+  it('A1 · points 100, refund 500 → -400 (no zero clamp)', () => {
+    const r = applyRefundBalances(100, 100000, 500);
+    expect(r.ok).toBe(true);
+    expect(r.newPoints).toBe(-400);
+  });
+  it('A1b · spendable can stay negative across small reversals', () => {
+    expect(applyRefundBalances(-100, 100000, 50).newPoints).toBe(-150);
+  });
+  it('A2 · spendable delta equals the trusted reversal, never derived from balance', () => {
+    // delta is the ledger decision; balance does not cap it.
+    expect(applyRefundBalances(10, 100000, 999).newPoints).toBe(-989);
+  });
+});
+
+describe('R2 · applyRefundBalances — totalPoints qualifying reversal + fail-closed', () => {
+  it('B8 · partial refund reverses totalPoints by the same qualifying delta', () => {
+    const r = applyRefundBalances(500, 500, 200);
+    expect(r.ok).toBe(true);
+    expect(r.newTotalPoints).toBe(300);
+    expect(r.newPoints).toBe(300);
+  });
+  it('B10 · full remaining reversal brings this order’s qualifying effect to zero', () => {
+    // started +500 totalPoints; already reversed 200 (tot 300); now reverse 300.
+    const r = applyRefundBalances(300, 300, 300);
+    expect(r.ok).toBe(true);
+    expect(r.newTotalPoints).toBe(0);
+  });
+  it('B13 · reversal that would push totalPoints negative → FAIL CLOSED (no mutation)', () => {
+    const r = applyRefundBalances(50, 100, 300); // inconsistent: tot 100 < delta 300
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('totalPoints-would-go-negative');
+    expect(r.newPoints).toBeUndefined();
+    expect(r.newTotalPoints).toBeUndefined();
+  });
+  it('invariant · supported path keeps totalPoints >= 0', () => {
+    expect(applyRefundBalances(0, 500, 500).newTotalPoints).toBe(0);
+    expect(applyRefundBalances(1000, 500, 500).newTotalPoints).toBe(0);
+  });
+});
+
+describe('R2 · tier derives from totalPoints after refund', () => {
+  it('C14 · refund crosses Gold → Silver', () => {
+    const before = 3100, delta = 200;
+    const after = applyRefundBalances(9999, before, delta).newTotalPoints;
+    expect(tierName(before)).toBe('Gold');
+    expect(after).toBe(2900);
+    expect(tierName(after)).toBe('Silver');
+  });
+  it('C15 · partial refund staying above threshold keeps tier', () => {
+    const before = 3500, delta = 200;
+    const after = applyRefundBalances(9999, before, delta).newTotalPoints;
+    expect(tierName(before)).toBe('Gold');
+    expect(tierName(after)).toBe('Gold');
+  });
+});
+
+describe('R2 · cumulative cap still bounds the reversal (decideRefund unchanged)', () => {
+  it('B12 · a refund never reverses more than originalPointsAwarded', () => {
+    const ledger = {
+      state: STATE.CREDITED, pointsPerEuro: 10,
+      creditedEligibleCents: 5000, originalPointsAwarded: 500,
+      cumPostCreditRefundedCents: 0, alreadyReversedPoints: 0,
+      refunds: [], preCreditRefunds: [],
+    };
+    const d = decideRefund(ledger, { refundId: 'r-huge', refundCents: 999999 });
+    expect(d.kind).toBe('apply');
+    expect(d.pointsDelta).toBe(500); // capped at original, not 99999
   });
 });

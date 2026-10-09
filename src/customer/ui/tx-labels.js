@@ -47,6 +47,8 @@ const RAW_LABEL_MAP = [
   ['redemption',           'Εξαργύρωση'],
   ['reward',               'Εξαργύρωση'],
   ['redeem',               'Εξαργύρωση'],
+  ['purchase refund',      'Επιστροφή αγοράς'],
+  ['e-shop refund',        'Επιστροφή αγοράς'],   // legacy Worker category '↩︎ E-shop refund'
   ['refund',               'Επιστροφή'],
   ['refund_clawback',      'Επιστροφή'],
   ['clawback',             'Επιστροφή'],

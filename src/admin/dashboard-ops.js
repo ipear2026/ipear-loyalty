@@ -195,12 +195,23 @@ export async function loadTx() {
       }
       else if (t.type==='expire')    { cls='redeem'; det=`⏳ Εκπνοή Πόντων`; }
       else if (t.type==='tier_downgrade') { cls='redeem'; det=`📉 Tier Downgrade`; }
+      else if (t.type==='subtract' || t.type==='refund_clawback') {
+        // Woo purchase refund. The Worker stores `points` as a POSITIVE
+        // magnitude with type 'subtract', so this MUST render as a red,
+        // negative reversal — never a green credit (the pre-R2 bug).
+        cls='redeem';
+        det = (t.category && /Επιστροφ/.test(t.category)) ? t.category : 'Επιστροφή αγοράς';
+      }
       else { cls=t.points>=0?'add':'redeem'; det=t.category||t.type||'Συναλλαγή'; }
       if (t.note && t.type!=='tier_downgrade') det+=` · ${t.note}`;
-      const ptsSign = t.points>=0?'+':'';
+      // 'subtract'/'refund_clawback' carry a positive magnitude by convention →
+      // force a negative display. Every other type already has the correct sign.
+      const _isReversalMag = (t.type==='subtract' || t.type==='refund_clawback');
+      const _displayPts = _isReversalMag ? -Math.abs(Number(t.points)) : Number(t.points);
+      const ptsSign = _displayPts>=0?'+':'';
       html+=`<div class="tx-item">
         <div><div class="tx-name">${escHtml(t.customerName||'—')}</div><div class="tx-det">${escHtml(t.card||'—')} · ${escHtml(det)}</div></div>
-        <div><div class="tx-pts ${cls}">${ptsSign}${Number(t.points).toLocaleString('el-GR')}</div><div class="tx-date">${ds}</div></div>
+        <div><div class="tx-pts ${cls}">${ptsSign}${_displayPts.toLocaleString('el-GR')}</div><div class="tx-date">${ds}</div></div>
       </div>`;
     });
     el.innerHTML=html;

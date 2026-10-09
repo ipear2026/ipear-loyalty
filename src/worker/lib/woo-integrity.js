@@ -447,6 +447,31 @@ export function decideRefund(ledger, incoming) {
   return { kind: 'conflict', reason: `refund-not-allowed-from-${st}` };
 }
 
+// Apply a refund's qualifying reversal to the customer's spendable + qualifying
+// balances. PURE (no Firestore) so the full negative-balance + totalPoints
+// invariant is unit-testable.
+//
+//   • Spendable `points` MAY go negative — ledger truth wins, no zero clamp.
+//   • `totalPoints` (net qualifying / tier basis) is reversed by the SAME
+//     qualifying delta. Because the refund FSM caps cumulative reversal at the
+//     order's originalPointsAwarded, a refund can never reverse more qualifying
+//     points than that order added, so totalPoints should never go negative in
+//     the supported path. If it WOULD (unexpected/inconsistent historical
+//     state — e.g. an external tier_downgrade already reduced totalPoints),
+//     we FAIL CLOSED: caller must roll back and mutate nothing.
+//
+// `delta` is the spendable points being reversed by THIS refund event; for the
+// base-only Woo credit, the qualifying delta equals the spendable delta.
+export function applyRefundBalances(curPts, curTot, delta) {
+  const d = Number(delta) || 0;
+  const newPoints = Number(curPts) - d;          // negative allowed (ledger truth)
+  const newTotalPoints = Number(curTot) - d;     // qualifying reversal
+  if (newTotalPoints < 0) {
+    return { ok: false, reason: 'totalPoints-would-go-negative', curTot: Number(curTot), delta: d };
+  }
+  return { ok: true, newPoints, newTotalPoints };
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 //  Router-facing handlers
 // ══════════════════════════════════════════════════════════════════════════
@@ -755,7 +780,19 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
 
       const custFields = custRead.doc.fields || {};
       const curPts = Number(custFields.points?.integerValue || 0);
-      const newPts = Math.max(0, curPts - decision.pointsDelta);
+      const curTot = Number(custFields.totalPoints?.integerValue || 0);
+      // Spendable may go negative (no clamp); totalPoints qualifying reversal
+      // fails closed if it would go negative (inconsistent state). The reversal
+      // amount is the trusted ledger-derived decision.pointsDelta, NEVER the
+      // current balance or any plugin/client-supplied value.
+      const bal = applyRefundBalances(curPts, curTot, decision.pointsDelta);
+      if (!bal.ok) {
+        await fsRollback(fsBase, fsHeaders, txn);
+        console.error(`[woo-refund-order] fail-closed (${bal.reason}) order=${orderId} refund=${refundId}`);
+        return resp({ error: 'refund-inconsistent', reason: bal.reason, state: ledger.state }, 409, CORS);
+      }
+      const newPts = bal.newPoints;
+      const newTot = bal.newTotalPoints;
 
       const newRefunds = truncate([...(ledger.refunds || []), {
         refundId, cents: refundCents, points: decision.pointsDelta, at: now, nonce,
@@ -794,9 +831,9 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
         writes.push({
           update: {
             name: custRead.doc.name,
-            fields: { ...custFields, points: wrap(newPts) },
+            fields: { ...custFields, points: wrap(newPts), totalPoints: wrap(newTot) },
           },
-          updateMask: { fieldPaths: ['points'] },
+          updateMask: { fieldPaths: ['points', 'totalPoints'] },
         });
       }
       writes.push({
@@ -814,13 +851,19 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
               customerEmail: ledger.customerEmail,
               customerName:  unwrap(custFields.name) || '',
               card:          unwrap(custFields.card) || '',
-              type:          'subtract',
-              points:        decision.pointsDelta,
-              amount:        refundCents / 100,
-              category:      '↩︎ E-shop refund',
-              note:          `WooCommerce Refund #${refundId} on Order #${orderId} (ledger v${ledger.version + 1})`,
-              date:          now,
-              source:        'woo-integrity/v2',
+              type:              'subtract',
+              points:            decision.pointsDelta,
+              amount:            refundCents / 100,
+              category:          '🛒 Επιστροφή αγοράς',
+              note:              `Επιστροφή #${refundId} · Παραγγελία #${orderId}`,
+              orderId:           String(orderId),
+              refundId:          String(refundId),
+              balanceBefore:     curPts,
+              balanceAfter:      newPts,
+              totalPointsBefore: curTot,
+              totalPointsAfter:  newTot,
+              date:              now,
+              source:            'woo-integrity/v2',
             }).fields,
           },
         });

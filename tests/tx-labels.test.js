@@ -59,3 +59,22 @@ describe('txLabel — whole-transaction resolution', () => {
     expect(txLabel({ type: 'mystery' })).toBe('Συναλλαγή');
   });
 });
+
+// ── R2 · Woo purchase-refund labels (customer history) ───────────────────────
+describe('R2 · Woo refund labels', () => {
+  it('new Worker refund category (Greek) → "Επιστροφή αγοράς"', () => {
+    expect(txLabel({ type: 'subtract', category: '🛒 Επιστροφή αγοράς', points: 200 }))
+      .toBe('Επιστροφή αγοράς');
+  });
+  it('legacy English Worker category → "Επιστροφή αγοράς"', () => {
+    expect(cleanTxLabel('↩︎ E-shop refund')).toBe('Επιστροφή αγοράς');
+  });
+  it('generic subtract with no category → "Επιστροφή" (legacy compatible)', () => {
+    expect(txLabel({ type: 'subtract', points: 100 })).toBe('Επιστροφή');
+  });
+  it('unrelated manual deduction is NOT relabeled as a purchase refund', () => {
+    // An admin "Προσαρμογή πόντων" deduction keeps its own meaning.
+    expect(txLabel({ type: 'subtract', category: 'Admin Adjustment', points: 50 }))
+      .toBe('Προσαρμογή πόντων');
+  });
+});
