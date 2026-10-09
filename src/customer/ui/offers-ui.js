@@ -15,7 +15,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from '../../logger.js';
 import { state } from '../../state.js';
-import { esc, showToast, _trackEvent, _trapFocus, _releaseFocus, _fireConfetti, _WORKER_URL, _haptic } from '../../utils.js';
+import { esc, showToast, _trackEvent, _trapFocus, _releaseFocus, _fireConfetti, _WORKER_URL, _haptic, offerRuntimeStatus } from '../../utils.js';
 import { _migrateCustomerToUid } from '../../main.js';
 import { _safeImgEl, _safeImgTag } from './_shared.js';
 
@@ -88,33 +88,12 @@ async function _loadOffersOnce() {
   }
 }
 
+// Effective offer validity for the customer app. Authoritative status lives on
+// the server (canonicalOfferValue); this is the display/redeemability filter and
+// now shares the exact same rule: date-aware, Europe/Athens business-day
+// boundaries, and also excludes not-yet-started (scheduled) offers.
 function _isOfferActive(o) {
-  if (!o.active) return false;
-  const raw = o.endDate;
-  if (raw === null || raw === undefined || raw === '') return true;
-  try {
-    let ms;
-    if (typeof raw.toDate === 'function') {
-      ms = raw.toDate().getTime();
-    } else if (typeof raw === 'number') {
-      ms = raw > 1e12 ? raw : raw * 1000;
-    } else if (typeof raw === 'string') {
-      const s = /^\d{4}-\d{2}-\d{2}$/.test(raw.trim()) ? raw.trim() + 'T23:59:59' : raw;
-      ms = new Date(s).getTime();
-    } else {
-      logger.warn('[offers] unknown endDate type:', typeof raw, raw);
-      return true;
-    }
-    if (isNaN(ms)) {
-      logger.warn('[offers] endDate parse returned NaN:', raw);
-      return true;
-    }
-    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-    return ms >= todayStart.getTime();
-  } catch(e) {
-    logger.warn('[offers] endDate exception:', raw, e);
-    return true;
-  }
+  return offerRuntimeStatus(o) === 'active';
 }
 
 function _renderOffersSnap(snap) {

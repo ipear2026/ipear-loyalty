@@ -3,7 +3,7 @@
 //  Renders the offers list, opens the create/edit modal (with image upload
 //  + compression to base64 ≤900px / 0.78 quality), toggles active state.
 // ═══════════════════════════════════════════════════════════════════════════
-import { escHtml, escJs, friendlyError } from '../utils.js';
+import { escHtml, escJs, friendlyError, offerRuntimeStatus, offerStatusLabel } from '../utils.js';
 import { toast, closeM } from './ui.js';
 import { authState } from './auth-state.js';
 
@@ -29,11 +29,19 @@ export async function loadOffers() {
       const o = d.data();
       const start = o.startDate ? new Date(o.startDate).toLocaleDateString('el-GR') : '—';
       const end = o.endDate ? new Date(o.endDate).toLocaleDateString('el-GR') : '—';
+      // Authoritative, date-aware status (Europe/Athens) — NOT just the toggle.
+      // An expired offer with active===true reads "Έληξε", never "Ενεργή".
+      const status = offerRuntimeStatus(o);
+      const statusLabel = offerStatusLabel(status);
+      const statusColor = status === 'active' ? '#2e7d32'
+        : status === 'scheduled' ? '#1565c0'
+          : status === 'expired' ? '#c62828'
+            : '#777';
       const safeImg =
         o.imageUrl && (o.imageUrl.startsWith('https://') || o.imageUrl.startsWith('data:image/'))
           ? o.imageUrl
           : '';
-      html += `<div class="offer-card" style="${o.active ? '' : 'opacity:.55'}">
+      html += `<div class="offer-card" style="${status === 'active' ? '' : 'opacity:.55'}">
         ${
           safeImg
             ? `<div style="width:54px;height:54px;border-radius:11px;flex-shrink:0;background:url('${encodeURI(safeImg).replace(/'/g, '%27').replace(/\(/g, '%28').replace(/\)/g, '%29')}') center/cover no-repeat"></div>`
@@ -46,7 +54,7 @@ export async function loadOffers() {
         </div>
         <div class="offer-actions">
           <div class="offer-toggle">
-            <span>${o.active ? 'Ενεργή' : 'Ανενεργή'}</span>
+            <span style="font-weight:800;color:${statusColor}">${statusLabel}</span>
             <div class="toggle-sw ${o.active ? 'on' : ''}" data-action="toggleOffer" data-arg="${escJs(d.id)}" data-arg2="${!!o.active}"></div>
           </div>
           <div style="display:flex;gap:6px">

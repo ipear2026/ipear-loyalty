@@ -37,13 +37,75 @@
  * @param {object|null} offer  the ipear_offers doc data
  * @returns {{ok:boolean, canonicalBonus?:number, reason?:string}}
  */
-function canonicalOfferValue(offer) {
+// ── Europe/Athens business-day semantics (DST-safe, no external deps) ────────
+// Offer start/end dates are authored as date-only (YYYY-MM-DD) and represent a
+// local Greek business day: an offer ending 2026-09-30 stays valid through the
+// whole of 30/09 Athens and becomes expired at 00:00 Athens on 01/10. We never
+// parse those date-only strings through UTC (which would expire them 2–3h early
+// depending on DST). Instead we reduce both "now" and the boundary to an Athens
+// calendar date (YYYY-MM-DD) and compare lexically — exact and DST-proof.
+function athensDateStr(ms) {
+  // en-CA formats as YYYY-MM-DD.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Athens",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
+}
+
+// Normalize a stored offer date to an Athens calendar date string (YYYY-MM-DD),
+// or null when absent/unparseable (treated as "no boundary"). Accepts a
+// date-only string (used verbatim — it is already a calendar date), an ISO
+// string, an epoch (s or ms), or a Firestore Timestamp.
+function toAthensDateStr(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+    const ms = Date.parse(t);
+    return Number.isFinite(ms) ? athensDateStr(ms) : null;
+  }
+  if (typeof v === "number") {
+    return Number.isFinite(v) ? athensDateStr(v > 1e12 ? v : v * 1000) : null;
+  }
+  if (v && typeof v.toDate === "function") {
+    try { return athensDateStr(v.toDate().getTime()); } catch (_) { return null; }
+  }
+  if (v && typeof v.toMillis === "function") {
+    try { return athensDateStr(v.toMillis()); } catch (_) { return null; }
+  }
+  return null;
+}
+
+// Authoritative runtime status for an offer. Separates the configured `active`
+// toggle from the effective, date-aware status. Pure.
+//   returns 'inactive' | 'scheduled' | 'expired' | 'active'
+function offerRuntimeStatus(offer, nowMs) {
+  if (!offer || typeof offer !== "object" || offer.active !== true) return "inactive";
+  const today = athensDateStr(typeof nowMs === "number" ? nowMs : Date.now());
+  const start = toAthensDateStr(offer.startDate);
+  const end = toAthensDateStr(offer.endDate);
+  if (start && today < start) return "scheduled";
+  if (end && today > end) return "expired";
+  return "active";
+}
+
+function canonicalOfferValue(offer, nowMs) {
   if (!offer || typeof offer !== "object") {
     return { ok: false, reason: "offer-missing" };
   }
-  // Eligibility — parity with the admin-client approval path (active === true).
-  if (offer.active !== true) {
-    return { ok: false, reason: "offer-ineligible" };
+  // Eligibility — date-aware authoritative status, not just the stored toggle.
+  // An expired or not-yet-started offer is NEVER creditable even with
+  // active === true (fail-closed, Europe/Athens business-day boundaries).
+  const status = offerRuntimeStatus(offer, nowMs);
+  if (status !== "active") {
+    return {
+      ok: false,
+      reason: status === "expired" ? "offer-expired"
+        : status === "scheduled" ? "offer-scheduled"
+          : "offer-ineligible",
+    };
   }
   const raw = offer.bonusPoints != null ? offer.bonusPoints : offer.pointsCost;
   const canonical = Math.floor(Number(raw));
@@ -53,9 +115,9 @@ function canonicalOfferValue(offer) {
   return { ok: true, canonicalBonus: canonical };
 }
 
-function canonicalOfferCredit(offer, requestRewardCost) {
-  const v = canonicalOfferValue(offer);
-  if (!v.ok) return v; // offer-missing / offer-ineligible / invalid-canonical
+function canonicalOfferCredit(offer, requestRewardCost, nowMs) {
+  const v = canonicalOfferValue(offer, nowMs);
+  if (!v.ok) return v; // offer-missing / offer-expired / offer-scheduled / offer-ineligible / invalid-canonical
   const canonical = v.canonicalBonus;
   // request stores the credit as a NEGATIVE rewardCost.
   const requested = -Number(requestRewardCost);
@@ -67,4 +129,10 @@ function canonicalOfferCredit(offer, requestRewardCost) {
   return { ok: true, canonicalBonus: canonical };
 }
 
-module.exports = { canonicalOfferCredit, canonicalOfferValue };
+module.exports = {
+  canonicalOfferCredit,
+  canonicalOfferValue,
+  offerRuntimeStatus,
+  athensDateStr,
+  toAthensDateStr,
+};

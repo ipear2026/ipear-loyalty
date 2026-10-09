@@ -97,7 +97,9 @@ function planOfferRedeem(redemption, offer, customer, customerId, existingLedger
   if (!st.ok) return { ok: false, code: "failed-precondition", reason: st.reason };
   if (existingLedger) return { ok: true, idempotent: true };
 
-  const v = canonicalOfferValue(offer); // H1: amount from the offer, never the doc/request
+  // H1: amount from the offer, never the doc/request. nowMs makes the
+  // date-aware expiry/scheduled guard deterministic under test.
+  const v = canonicalOfferValue(offer, ctx.nowMs);
   if (!v.ok) return { ok: false, code: "failed-precondition", reason: v.reason };
   if (!customer) return { ok: false, code: "not-found", reason: "customer-not-found" };
   if (customer.blocked === true) return { ok: false, code: "failed-precondition", reason: "customer-blocked" };

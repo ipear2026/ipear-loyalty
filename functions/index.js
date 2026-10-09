@@ -4,7 +4,7 @@ const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 const { createHash } = require("node:crypto");
-const { canonicalOfferCredit } = require("./lib/offer-credit");
+const { canonicalOfferCredit, offerRuntimeStatus } = require("./lib/offer-credit");
 // ADMIN FORTRESS Stage 0/1 — owner authorization + server-authoritative mutations.
 const { checkOwner } = require("./lib/owner");
 const {
@@ -686,6 +686,38 @@ async function _createRedemptionRequestHandler(request) {
       throw new HttpsError("not-found", "Invalid or expired code.");
     }
 
+    // Fail-closed on OFFER validity at request-creation time (defense-in-depth
+    // + immediate tablet feedback). The authoritative guard is re-applied at
+    // approval via canonicalOfferValue, but rejecting here means an expired /
+    // not-yet-started / disabled offer never even creates a pending request —
+    // so a replayed old QR or a stale cached offer screen is denied up front.
+    if (type === "offer_credit") {
+      const offerId = redemptionData.offerId || null;
+      let offerDoc = null;
+      if (offerId) {
+        const os = await db.collection("ipear_offers").doc(offerId).get();
+        if (os.exists) {
+          offerDoc = os.data();
+        } else {
+          const oq = await db
+            .collection("ipear_offers")
+            .where("title", "==", offerId)
+            .limit(1)
+            .get();
+          if (!oq.empty) offerDoc = oq.docs[0].data();
+        }
+      }
+      const offerStatus = offerRuntimeStatus(offerDoc, Date.now());
+      if (offerStatus !== "active") {
+        throw new HttpsError(
+          "failed-precondition",
+          offerStatus === "expired" ? "Offer expired."
+            : offerStatus === "scheduled" ? "Offer not started yet."
+              : "Offer not available.",
+        );
+      }
+    }
+
     // Resolve customer ref outside txn (needs id lookup, sometimes with
     // customerUid fallback).
     const customerId = redemptionData.customerId;
@@ -1036,7 +1068,11 @@ async function _approveRedemptionHandler(request) {
             "failed-precondition",
             decision.reason === "value-mismatch"
               ? "Offer value changed since the scan — please re-scan."
-              : "Offer not eligible.",
+              : decision.reason === "offer-expired"
+                ? "Offer expired."
+                : decision.reason === "offer-scheduled"
+                  ? "Offer not started yet."
+                  : "Offer not eligible.",
           );
         }
         const bonus = decision.canonicalBonus; // server-derived, authoritative

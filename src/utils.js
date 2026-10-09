@@ -250,3 +250,54 @@ export function friendlyError(e) {
   // Generic fallback — never leak a bare English/technical string
   return 'Κάτι πήγε στραβά. Δοκιμάστε ξανά.';
 }
+
+// ── Offer validity (Europe/Athens business-day semantics) ────────────────────
+// Browser mirror of functions/lib/offer-credit.js#offerRuntimeStatus — the
+// server is the economic authority; this drives truthful Admin status display
+// and the customer active-offers filter. Date-only offer boundaries (YYYY-MM-DD)
+// are Greek business days: an offer ending 2026-09-30 is valid through all of
+// 30/09 Athens and expired from 00:00 Athens on 01/10. DST-safe via Intl.
+export function athensDateStr(ms) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Athens', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(ms));
+}
+
+export function toAthensDateStr(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+    const ms = Date.parse(t);
+    return Number.isFinite(ms) ? athensDateStr(ms) : null;
+  }
+  if (typeof v === 'number') {
+    return Number.isFinite(v) ? athensDateStr(v > 1e12 ? v : v * 1000) : null;
+  }
+  if (v && typeof v.toDate === 'function') {
+    try { return athensDateStr(v.toDate().getTime()); } catch (_) { return null; }
+  }
+  if (v && typeof v.toMillis === 'function') {
+    try { return athensDateStr(v.toMillis()); } catch (_) { return null; }
+  }
+  return null;
+}
+
+// returns 'inactive' | 'scheduled' | 'expired' | 'active'
+export function offerRuntimeStatus(offer, nowMs) {
+  if (!offer || typeof offer !== 'object' || offer.active !== true) return 'inactive';
+  const today = athensDateStr(typeof nowMs === 'number' ? nowMs : Date.now());
+  const start = toAthensDateStr(offer.startDate);
+  const end = toAthensDateStr(offer.endDate);
+  if (start && today < start) return 'scheduled';
+  if (end && today > end) return 'expired';
+  return 'active';
+}
+
+// Greek label for an offer runtime status (Admin display).
+export function offerStatusLabel(status) {
+  return status === 'active' ? 'Ενεργή'
+    : status === 'scheduled' ? 'Προγραμματισμένη'
+      : status === 'expired' ? 'Έληξε'
+        : 'Ανενεργή';
+}
