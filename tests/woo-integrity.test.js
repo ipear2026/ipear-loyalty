@@ -1501,3 +1501,164 @@ describe('R2 · cumulative cap still bounds the reversal (decideRefund unchanged
     expect(d.pointsDelta).toBe(500); // capped at original, not 99999
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  R2 · Handler E2E — negative spendable + totalPoints reversal + atomicity
+//  Uses the in-memory Firestore fake (makeFirestoreFake) to exercise the full
+//  credit→refund commit path incl. both balances.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('R2 · credit → refund reverses BOTH points and totalPoints', () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = origFetch; });
+
+  it('partial refund reverses the proportional qualifying delta from both', async () => {
+    const fake = makeFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 500 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    expect(fake.state.customers.USER1.points).toBe(556);       // +456
+    expect(fake.state.customers.USER1.totalPoints).toBe(956);  // +456
+
+    const r = await handleWooRefundOrder(makeReq('/woo-refund-order', validRefund()), mockEnv(), CORS, null, makeDeps());
+    expect(r.status).toBe(200);
+    expect((await r.json()).refundedPoints).toBe(150);          // 1500c × 10 / 100
+    expect(fake.state.customers.USER1.points).toBe(406);        // 556 − 150
+    expect(fake.state.customers.USER1.totalPoints).toBe(806);   // 956 − 150
+    expect(fake.state.ledger.alreadyReversedPoints).toBe(150);
+    // Refund audit row carries the qualifying before/after metadata.
+    const row = Object.values(fake.state.txns).find(t => t.type === 'subtract');
+    expect(row.totalPointsBefore).toBe(956);
+    expect(row.totalPointsAfter).toBe(806);
+    expect(row.balanceBefore).toBe(556);
+    expect(row.balanceAfter).toBe(406);
+    expect(row.category).toBe('🛒 Επιστροφή αγοράς');
+  });
+
+  it('refund can drive spendable NEGATIVE (no clamp); totalPoints stays correct', async () => {
+    const fake = makeFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 5000 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    // Simulate the customer having spent most of the balance after the credit.
+    fake.state.customers.USER1.points = 50;
+    const full = { ...validRefund(), refundId: 'r-full', refundCents: 4560, eventNonce: 'refund-1234-r-full' };
+    const r = await handleWooRefundOrder(makeReq('/woo-refund-order', full), mockEnv(), CORS, null, makeDeps());
+    expect(r.status).toBe(200);
+    expect((await r.json()).refundedPoints).toBe(456);
+    expect(fake.state.customers.USER1.points).toBe(-406);        // 50 − 456, NO clamp
+    expect(fake.state.customers.USER1.totalPoints).toBe(5000);   // 5456 − 456
+  });
+
+  it('FAIL-CLOSED: refund that would push totalPoints negative → 409, NOTHING mutates', async () => {
+    const fake = makeFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 1000, totalPoints: 5000 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    // Inject an inconsistent state: totalPoints below the order's contribution.
+    fake.state.customers.USER1.totalPoints = 100;
+    const ptsBefore = fake.state.customers.USER1.points;
+    const ledgerVerBefore = fake.state.ledger.version;
+    const txCountBefore = Object.keys(fake.state.txns).length;
+    const full = { ...validRefund(), refundId: 'r-full2', refundCents: 4560, eventNonce: 'refund-1234-r-full2' };
+    const r = await handleWooRefundOrder(makeReq('/woo-refund-order', full), mockEnv(), CORS, null, makeDeps());
+    expect(r.status).toBe(409);
+    expect((await r.json()).reason).toBe('totalPoints-would-go-negative');
+    // No partial mutation.
+    expect(fake.state.customers.USER1.points).toBe(ptsBefore);
+    expect(fake.state.customers.USER1.totalPoints).toBe(100);
+    expect(fake.state.ledger.version).toBe(ledgerVerBefore);
+    expect(Object.keys(fake.state.txns).length).toBe(txCountBefore);
+  });
+
+  it('duplicate refund replay → no second mutation of either balance', async () => {
+    const fake = makeFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 500 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    await handleWooRefundOrder(makeReq('/woo-refund-order', validRefund()), mockEnv(), CORS, null, makeDeps());
+    const pts = fake.state.customers.USER1.points, tot = fake.state.customers.USER1.totalPoints;
+    const r2 = await handleWooRefundOrder(makeReq('/woo-refund-order', validRefund()), mockEnv(), CORS, null, makeDeps());
+    expect((await r2.json()).replay).toBe(true);
+    expect(fake.state.customers.USER1.points).toBe(pts);
+    expect(fake.state.customers.USER1.totalPoints).toBe(tot);
+  });
+});
+
+describe('R2 · refund atomicity — all-or-nothing', () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = origFetch; });
+
+  it('SUCCESS: customer(points+totalPoints) + ledger + audit row land in ONE commit', async () => {
+    const fake = makeFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 500 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    const commitsBefore = fake.state.commits.length;
+    await handleWooRefundOrder(makeReq('/woo-refund-order', validRefund()), mockEnv(), CORS, null, makeDeps());
+    const refundCommit = fake.state.commits[fake.state.commits.length - 1];
+    expect(fake.state.commits.length).toBe(commitsBefore + 1); // exactly one refund commit
+    const names = (refundCommit.writes || []).map(w => w.update?.name || '');
+    expect(names.some(n => n.includes('/ipear_customers/'))).toBe(true);
+    expect(names.some(n => n.includes('/ipear_woo_events/'))).toBe(true);
+    expect(names.some(n => n.includes('/ipear_transactions/'))).toBe(true);
+  });
+
+  it('FORCED COMMIT FAILURE before commit → NO partial state (points/totalPoints/ledger/tx all unchanged)', async () => {
+    const fake = makeFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 100, totalPoints: 500 } },
+    });
+    globalThis.fetch = fake.fetch;
+    await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    const before = {
+      points: fake.state.customers.USER1.points,
+      totalPoints: fake.state.customers.USER1.totalPoints,
+      ledgerVer: fake.state.ledger.version,
+      txCount: Object.keys(fake.state.txns).length,
+    };
+    // Make every refund commit hard-fail (non-contention) → handler must not partially mutate.
+    globalThis.fetch = (url, opts) => {
+      if (String(url).includes(':commit')) return Promise.resolve(new Response('{"error":"boom"}', { status: 500 }));
+      return fake.fetch(url, opts);
+    };
+    const r = await handleWooRefundOrder(makeReq('/woo-refund-order', validRefund()), mockEnv(), CORS, null, makeDeps());
+    expect(r.status).toBeGreaterThanOrEqual(400);               // failed, not silently OK
+    expect(fake.state.customers.USER1.points).toBe(before.points);
+    expect(fake.state.customers.USER1.totalPoints).toBe(before.totalPoints);
+    expect(fake.state.ledger.version).toBe(before.ledgerVer);
+    expect(Object.keys(fake.state.txns).length).toBe(before.txCount);
+  });
+});
+
+describe('R2 · pre-credit refund produces correct BOTH balances', () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = origFetch; });
+
+  it('refund before credit → recorded only; later credit lands net points + net totalPoints; no double reversal', async () => {
+    const fake = makeFirestoreFake({
+      customers: { USER1: { email: 'test@example.com', name: 'T', card: 'IP-1', points: 1000, totalPoints: 2000 } },
+    });
+    globalThis.fetch = fake.fetch;
+    // Refund arrives first (order not credited yet) — records preCreditRefunds, no balance mutation.
+    const pre = { ...validRefund(), refundId: 'r-pre', refundCents: 1500, eventNonce: 'refund-1234-r-pre' };
+    const r1 = await handleWooRefundOrder(makeReq('/woo-refund-order', pre), mockEnv(), CORS, null, makeDeps());
+    expect(r1.status).toBe(200);
+    expect(fake.state.customers.USER1.points).toBe(1000);        // unchanged
+    expect(fake.state.customers.USER1.totalPoints).toBe(2000);   // unchanged
+    expect(fake.state.ledger.state).toBe(STATE.PRE_REFUNDED);
+    // Credit now lands: gross 4560 (456), net of the 1500 pre-refund (150) → +306 to BOTH.
+    const r2 = await handleWooCreditOrder(makeReq('/woo-credit-order', validCredit()), mockEnv(), CORS, null, makeDeps());
+    expect(r2.status).toBe(200);
+    expect(fake.state.customers.USER1.points).toBe(1306);        // 1000 + 306 net
+    expect(fake.state.customers.USER1.totalPoints).toBe(2306);   // 2000 + 306 net
+    // A later replay of the SAME pre-credit refund id must not reverse again.
+    const r3 = await handleWooRefundOrder(makeReq('/woo-refund-order', pre), mockEnv(), CORS, null, makeDeps());
+    expect((await r3.json()).replay).toBe(true);
+    expect(fake.state.customers.USER1.points).toBe(1306);
+    expect(fake.state.customers.USER1.totalPoints).toBe(2306);
+  });
+});

@@ -19,7 +19,7 @@ const {
   offerRuntimeStatus,
   athensDateStr,
 } = require('../functions/lib/offer-credit.js');
-const { planOfferRedeem } = require('../functions/lib/redemption.js');
+const { planOfferRedeem, planRewardRedeem } = require('../functions/lib/redemption.js');
 
 // req.rewardCost is stored NEGATIVE for offer_credit, so a legitimate request
 // for an N-point offer carries rewardCost = -N.
@@ -187,5 +187,41 @@ describe('planOfferRedeem (adminVerifyRedemption path) — expiration fails clos
     const p = planOfferRedeem(redemption, { active: true, bonusPoints: 50, startDate: '2026-12-01' }, customer, 'C1', null, ctx(T_BEFORE_START));
     expect(p.ok).toBe(false);
     expect(p.reason).toBe('offer-scheduled');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  R2 · Negative-balance redemption safety (server-authoritative decision layer)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('R2 · negative balance cannot redeem (planRewardRedeem)', () => {
+  const ctx = (nowMs) => ({ nowMs, nowIso: new Date(nowMs).toISOString(), actorUid: 'owner', storeId: 's1' });
+  const reward = (cost) => ({ isActive: true, cost, title: 'R', discount: 0 });
+  const redemption = { rewardId: 'RW1', customerUid: 'U1' };
+
+  it('A · points -400, reward cost 1 → DENIED (insufficient-balance)', () => {
+    const p = planRewardRedeem(redemption, reward(1), { points: -400 }, 'C1', null, ctx(Date.now()));
+    expect(p.ok).toBe(false);
+    expect(p.reason).toBe('insufficient-balance');
+  });
+  it('B · after earning back to 100, reward cost 50 → ALLOWED', () => {
+    const p = planRewardRedeem(redemption, reward(50), { points: 100 }, 'C1', null, ctx(Date.now()));
+    expect(p.ok).toBe(true);
+    expect(p.after).toBe(50);
+  });
+  it('B-edge · exact balance equals cost → ALLOWED (boundary)', () => {
+    const p = planRewardRedeem(redemption, reward(50), { points: 50 }, 'C1', null, ctx(Date.now()));
+    expect(p.ok).toBe(true);
+    expect(p.after).toBe(0);
+  });
+  it('C · negative balance may still RECEIVE a non-points offer bonus (not blanket-blocked)', () => {
+    const p = planOfferRedeem(
+      { offerId: 'OF1', offerTitle: 'X', customerUid: 'U1' },
+      { active: true, bonusPoints: 50 },
+      { points: -400, totalPoints: 1000 }, 'C1', null,
+      { nowMs: Date.now(), nowIso: new Date().toISOString(), actorUid: 'owner' },
+    );
+    expect(p.ok).toBe(true);     // earning is allowed while negative
+    expect(p.amount).toBe(50);
+    expect(p.after).toBe(-350);  // -400 + 50, truthful
   });
 });
