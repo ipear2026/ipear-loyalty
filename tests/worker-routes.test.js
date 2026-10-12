@@ -893,3 +893,182 @@ describe('/woo-create-coupon — hardened server-authoritative e-shop coupon', (
     expect(await codeFor('uid-A')).not.toBe(await codeFor('uid-B'));
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  /woo-reward-coupon — POINTS-BASED e-shop reward (spends Loyalty points)
+//  Flow B: server-authoritative charge → Woo coupon → compensate state machine.
+// ═══════════════════════════════════════════════════════════════════════════
+function stubRewardBackend(stub, {
+  uid = 'uid-user-1', email = 'user@test.gr', blocked = false,
+  points = 1000, custUpdateTime = '2026-01-01T00:00:00Z',
+  reward = { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5 euro' },
+  rewardExists = true,
+  existingRedemption = null,
+  commitOk = true,
+  wooCreate = 'ok',
+  wooCouponId = 77,
+} = {}) {
+  defaultAuthStubs(stub, { uid, email });
+  stub.on('ipear_rewards/', () => rewardExists
+    ? jsonResponse({ fields: {
+        isActive:      { booleanValue: reward.isActive },
+        eshopEligible: { booleanValue: reward.eshopEligible },
+        cost:          { integerValue: String(reward.cost) },
+        discount:      { doubleValue: reward.discount },
+        title:         { stringValue: reward.title },
+      } })
+    : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404));
+  stub.on('ipear_offer_redemptions/', ({ opts }) => {
+    if ((opts?.method || 'GET') === 'GET') {
+      return existingRedemption
+        ? jsonResponse({ fields: {
+            status:    { stringValue: existingRedemption.status },
+            code:      { stringValue: existingRedemption.code || 'IPEAR-RXXXXXXXXX' },
+            expiresAt: { stringValue: '2099-01-01' },
+          } })
+        : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404);
+    }
+    return jsonResponse({ name: 'patched' });
+  });
+  stub.on('ipear_customers/', () => jsonResponse({
+    fields: {
+      email: { stringValue: email }, points: { integerValue: String(points) },
+      blocked: { booleanValue: blocked }, name: { stringValue: 'Tester' }, card: { stringValue: 'IP-TEST' },
+    },
+    updateTime: custUpdateTime,
+  }));
+  stub.on('ipear_transactions/', () => jsonResponse({ error: { status: 'NOT_FOUND' } }, 404)); // ledgers not pre-existing
+  stub.on('ipear_security_events', () => jsonResponse({ name: 'sec' }));
+  stub.on(':commit', () => commitOk
+    ? jsonResponse({ commitTime: '2026-01-01T00:00:01Z', writeResults: [] })
+    : jsonResponse({ error: { code: 400, message: 'failed precondition' } }, 400));
+  stub.on(/wc\/v3\/coupons/, ({ url, opts }) => {
+    const method = opts?.method || 'GET';
+    if (method === 'GET') { const m = url.match(/[?&]code=([^&]+)/); return jsonResponse([{ id: wooCouponId, code: (m ? decodeURIComponent(m[1]) : 'x').toLowerCase() }]); }
+    if (wooCreate === 'fail') return jsonResponse({ code: 'woo_error', message: 'boom' }, 500);
+    const posted = (opts?.body && JSON.parse(opts.body).code) || 'ipear-rxxx';
+    return jsonResponse({ id: wooCouponId, code: String(posted).toLowerCase() }, 201);
+  });
+}
+
+function rewardReq(body) {
+  return makeRequest('/woo-reward-coupon', { body: { idToken: 'id-token', idempotencyKey: 'key-abcdefgh', ...body } });
+}
+
+describe('/woo-reward-coupon — points-based e-shop reward (flow B)', () => {
+  it('valid reward → deducts points exactly once (atomic) + creates fixed_cart coupon, email-bound, single-use', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { points: 1000, reward: { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5€' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    expect(j.ok).toBe(true);
+    expect(j.pointsSpent).toBe(500);
+    expect(j.newBalance).toBe(500);
+    expect(j.discountAmount).toBe(5);
+    expect(j.code).toMatch(/^ipear-r[0-9a-f]{10}$/i);
+    // ONE charge commit: points-=cost (updateMask points only) + immutable redeem tx (exists:false)
+    const commits = stub.calls.filter(c => c.url.includes(':commit'));
+    expect(commits.length).toBe(1);
+    const cb = JSON.parse(commits[0].body);
+    const custW = cb.writes.find(w => w.update.name.includes('ipear_customers'));
+    expect(custW.update.fields.points.integerValue).toBe('500');
+    expect(custW.updateMask.fieldPaths).toEqual(['points']);   // never touches totalPoints
+    expect(custW.currentDocument.updateTime).toBeTruthy();
+    const ledW = cb.writes.find(w => w.update.name.includes('ipear_transactions'));
+    expect(ledW.currentDocument.exists).toBe(false);
+    expect(ledW.update.fields.type.stringValue).toBe('redeem');
+    expect(ledW.update.fields.points.integerValue).toBe('-500');
+    // Woo coupon payload
+    const post = stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST');
+    const p = JSON.parse(post.body);
+    expect(p.discount_type).toBe('fixed_cart');
+    expect(p.amount).toBe('5');
+    expect(p.usage_limit).toBe(1);
+    expect(p.usage_limit_per_user).toBe(1);
+    expect(p.email_restrictions).toEqual(['user@test.gr']);
+  });
+
+  it('insufficient points → 409, NO charge, NO coupon', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { points: 100, reward: { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5€' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
+    expect(res.status).toBe(409);
+    expect(stub.calls.find(c => c.url.includes(':commit'))).toBeUndefined();
+    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+  });
+
+  it('reward not active → 403', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { reward: { isActive: false, eshopEligible: true, cost: 500, discount: 5, title: 'x' } });
+    globalThis.fetch = stub;
+    expect((await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).status).toBe(403);
+  });
+
+  it('reward not flagged e-shop eligible → 403 (in-store rewards stay in-store)', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { reward: { isActive: true, eshopEligible: false, cost: 500, discount: 5, title: 'x' } });
+    globalThis.fetch = stub;
+    expect((await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).status).toBe(403);
+  });
+
+  it('reward not found → 404', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { rewardExists: false }); globalThis.fetch = stub;
+    expect((await worker.fetch(rewardReq({ rewardId: 'ghost' }), couponEnv(), {})).status).toBe(404);
+  });
+
+  it('missing rewardId → 400; bad idempotencyKey → 400', async () => {
+    const stub = makeFetchStub(); defaultAuthStubs(stub); globalThis.fetch = stub;
+    expect((await worker.fetch(rewardReq({ idempotencyKey: 'key-abcdefgh' }), couponEnv(), {})).status).toBe(400);
+    const stub2 = makeFetchStub(); defaultAuthStubs(stub2); globalThis.fetch = stub2;
+    expect((await worker.fetch(makeRequest('/woo-reward-coupon', { body: { idToken: 'id-token', rewardId: 'rw-1', idempotencyKey: 'short' } }), couponEnv(), {})).status).toBe(400);
+  });
+
+  it('idempotent replay — already-created redemption returns same code, NO 2nd charge, NO 2nd coupon', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { existingRedemption: { status: 'created', code: 'IPEAR-RDEADBEEF0' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    expect(j.replay).toBe(true);
+    expect(j.code).toBe('IPEAR-RDEADBEEF0');
+    expect(stub.calls.find(c => c.url.includes(':commit'))).toBeUndefined();
+    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+  });
+
+  it('a prior compensated redemption (same key) is rejected → 409 (needs a new key)', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { existingRedemption: { status: 'compensated', code: 'IPEAR-RX' } });
+    globalThis.fetch = stub;
+    expect((await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).status).toBe(409);
+  });
+
+  it('Woo hard failure → COMPENSATES (immutable reversal +cost) and returns 502', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { points: 1000, reward: { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5€' }, wooCreate: 'fail' });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
+    expect(res.status).toBe(502);
+    const commits = stub.calls.filter(c => c.url.includes(':commit'));
+    expect(commits.length).toBe(2); // charge + compensation
+    const comp = JSON.parse(commits[1].body);
+    const compLed = comp.writes.find(w => w.update.name.includes('ipear_transactions'));
+    expect(compLed.currentDocument.exists).toBe(false);
+    expect(compLed.update.fields.type.stringValue).toBe('add');
+    expect(compLed.update.fields.points.integerValue).toBe('500'); // points returned
+    const redW = comp.writes.find(w => w.update.name.includes('ipear_offer_redemptions'));
+    expect(redW.update.fields.status.stringValue).toBe('compensated');
+  });
+
+  it('reward coupon code deterministic for (reward, uid, idempotencyKey)', async () => {
+    const run = async () => {
+      const stub = makeFetchStub(); stubRewardBackend(stub); globalThis.fetch = stub;
+      return (await (await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).json()).code;
+    };
+    expect(await run()).toBe(await run());
+  });
+
+  it('different idempotencyKey → different code (allows legit repeat redemptions)', async () => {
+    const codeFor = async (key) => {
+      const stub = makeFetchStub(); stubRewardBackend(stub); globalThis.fetch = stub;
+      return (await (await worker.fetch(rewardReq({ rewardId: 'rw-1', idempotencyKey: key }), couponEnv(), {})).json()).code;
+    };
+    expect(await codeFor('key-aaaaaaaa')).not.toBe(await codeFor('key-bbbbbbbb'));
+  });
+});

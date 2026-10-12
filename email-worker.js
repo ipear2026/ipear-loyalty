@@ -316,6 +316,12 @@ export default {
     //  the ADMIN_SECRET acceptance surface (it carries no master-secret authority).
     if (path === '/woo-create-coupon') return handleWooCreateCoupon(request, env, CORS);
 
+    // ── POINTS-BASED e-shop reward → Woo coupon (customer idToken; spends
+    //    Loyalty points server-authoritatively with an explicit charge →
+    //    create → compensate state machine). Distinct from the promotional
+    //    /woo-create-coupon flow, which costs no points.
+    if (path === '/woo-reward-coupon') return handleWooRewardCoupon(request, env, CORS);
+
     // ── ERP integration: phone-based customer lookup ──
     //
     //  POST /erp/lookup-by-phone  { phone: "6912345678" }
@@ -1354,13 +1360,33 @@ async function handleErpLookup(request, env, CORS) {
 //  concurrency / retry / lost-response safety.
 //  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*.
 // ══════════════════════════════════════════════════════════════════════════
-// Deterministic, unpredictable coupon code for (offerId, uid). Secret-keyed so
-// it cannot be guessed off-site; stable so a retry maps to the SAME Woo coupon.
-async function _eshopCouponCode(offerId, uid, secret) {
+// Convert a plain object to Firestore REST typed `fields`. Integers →
+// integerValue, other numbers → doubleValue, booleans → booleanValue, strings →
+// stringValue. null/undefined are skipped.
+function wrapFields(obj) {
+  const fields = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v == null) continue;
+    if (typeof v === 'number')       fields[k] = Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+    else if (typeof v === 'boolean') fields[k] = { booleanValue: v };
+    else                             fields[k] = { stringValue: String(v) };
+  }
+  return fields;
+}
+
+// Deterministic coupon-code derivation via HMAC-SHA256 keyed by a DEDICATED
+// secret (COUPON_HMAC_KEY; falls back to WOO_SECRET only until the dedicated
+// secret is provisioned). Coupon SECURITY does not rely on code secrecy —
+// email_restrictions + usage_limit=1 are the real controls — but a keyed HMAC
+// gives an unpredictable, collision-resistant, STABLE code per inputs so a
+// retry maps to the SAME Woo coupon (idempotency anchor via Woo's unique code).
+async function _couponCode(prefix, parts, env) {
+  const secret = env.COUPON_HMAC_KEY || env.WOO_SECRET || '';
   const enc = new TextEncoder();
-  const buf = await crypto.subtle.digest('SHA-256', enc.encode(`${offerId}|${uid}|${secret}`));
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const buf = await crypto.subtle.sign('HMAC', key, enc.encode(parts.join('|')));
   const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-  return 'IPEAR-' + hex.slice(0, 10).toUpperCase();
+  return prefix + hex.slice(0, 10).toUpperCase();
 }
 
 // Best-effort structured security event (awaited on deny paths so it lands;
@@ -1463,7 +1489,7 @@ async function handleWooCreateCoupon(request, env, CORS) {
 
     // 4. Idempotent per (offer, customer): deterministic redemption doc + code.
     const redemptionId = `eshop__${offerId}__${callerUid}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 1400);
-    const code = await _eshopCouponCode(offerId, callerUid, env.WOO_SECRET);
+    const code = await _couponCode('IPEAR-', [offerId, callerUid], env);
 
     // Fast replay — already created → return the stored coupon (no 2nd coupon).
     const existRes = await fetch(`${fsBase}/ipear_offer_redemptions/${redemptionId}`, { headers: fsHeaders });
@@ -1563,6 +1589,227 @@ async function handleWooCreateCoupon(request, env, CORS) {
 
   } catch (e) {
     console.error('[woo-create-coupon]', e.message, e.stack);
+    return resp({ error: 'Internal error' }, 500, CORS);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  POST /woo-reward-coupon  { idToken, rewardId, idempotencyKey }
+//  Customer-authenticated (Firebase ID token). POINTS-BASED e-shop reward:
+//  the customer SPENDS Loyalty points for a WooCommerce coupon. Everything
+//  authoritative (cost, value, eligibility, balance, identity) is read
+//  server-side from ipear_rewards + ipear_customers — never from the client.
+//
+//  Explicit state machine (Firestore and Woo cannot share one atomic txn):
+//    reserve/charge (atomic: points-=cost + immutable redeem tx + redemption
+//      'charged', idempotent via deterministic ledger id with exists:false)
+//    → create Woo coupon (deterministic code; Woo unique-code = retry/concurrency
+//      anchor) → finalize 'created'
+//    → on definitive Woo failure: COMPENSATE (atomic: points+=cost + immutable
+//      reversal tx + redemption 'compensated'). Never points-lost+no-coupon;
+//      never coupon+no-charge. All ledger rows immutable (deterministic ids).
+//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*,
+//  COUPON_HMAC_KEY (falls back to WOO_SECRET until provisioned).
+// ══════════════════════════════════════════════════════════════════════════
+async function handleWooRewardCoupon(request, env, CORS) {
+  let body;
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+
+  const idToken = (body.idToken || '').trim();
+  if (!idToken) return resp({ error: 'idToken required' }, 400, CORS);
+  const rewardId = String(body.rewardId || '').trim().slice(0, 128);
+  if (!rewardId) return resp({ error: 'rewardId required' }, 400, CORS);
+  // Client-supplied idempotency token: dedups retries/double-clicks while still
+  // allowing legitimate repeat redemptions (a NEW key = a new redemption). It is
+  // NOT a trusted value — cost/value are always read from the reward doc.
+  const idemKey = String(body.idempotencyKey || '').trim();
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(idemKey))
+    return resp({ error: 'idempotencyKey required (8-64 url-safe chars)' }, 400, CORS);
+
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  { const _rl = await rateLimitOrBlock(env, ip, 'woo-reward', 10, 3600, CORS, 'Too many redemption requests. Try again later.'); if (_rl) return _rl; }
+
+  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
+    return resp({ error: 'Server not configured' }, 503, CORS);
+  if (!env.WOO_URL || !env.WOO_KEY || !env.WOO_SECRET)
+    return resp({ error: 'WooCommerce API not configured (WOO_URL, WOO_KEY, WOO_SECRET)' }, 503, CORS);
+
+  try {
+    // 1. Verify Firebase ID token → caller UID
+    const verifyRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
+    );
+    const verifyData = await verifyRes.json();
+    const callerUid = verifyData?.users?.[0]?.localId;
+    if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
+
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId = env.FCM_PROJECT_ID;
+    const fsBase    = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+
+    // 2. Load reward (AUTHORITATIVE cost / value / eligibility)
+    const rewardRes = await fetch(`${fsBase}/ipear_rewards/${encodeURIComponent(rewardId)}`, { headers: fsHeaders });
+    if (!rewardRes.ok) return resp({ error: 'Reward not found' }, 404, CORS);
+    const rf = (await rewardRes.json()).fields || {};
+    if (rf.isActive?.booleanValue !== true) return resp({ error: 'Reward not active' }, 403, CORS);
+    if (rf.eshopEligible?.booleanValue !== true) return resp({ error: 'Reward not available as e-shop coupon' }, 403, CORS);
+    const cost     = Math.floor(Number(rf.cost?.integerValue ?? rf.cost?.doubleValue ?? 0));
+    const discount = Number(rf.discount?.doubleValue ?? rf.discount?.integerValue ?? 0);
+    const rewardTitle = (rf.title?.stringValue || 'Reward').slice(0, 100);
+    if (!(cost > 0) || !(discount > 0)) return resp({ error: 'Reward misconfigured' }, 400, CORS);
+
+    const redemptionId = `rwdcpn__${rewardId}__${callerUid}__${idemKey}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 1400);
+    const ledgerId     = `rwdcpn_sub__${redemptionId}`.slice(0, 1400);
+    const compLedgerId = `rwdcpn_comp__${redemptionId}`.slice(0, 1400);
+    const code         = await _couponCode('IPEAR-R', [rewardId, callerUid, idemKey], env);
+    const nowIso       = new Date().toISOString();
+    const plus30 = new Date(); plus30.setDate(plus30.getDate() + 30);
+    const expiryStr = plus30.toISOString().split('T')[0];
+
+    const redRef = `${fsBase}/ipear_offer_redemptions/${redemptionId}`;
+
+    // 3. Replay / resume by redemption state.
+    const exRes = await fetch(redRef, { headers: fsHeaders });
+    let charged = false;
+    if (exRes.ok) {
+      const ex = (await exRes.json()).fields || {};
+      const st = ex.status?.stringValue;
+      if (st === 'created') {
+        return resp({ ok: true, replay: true, code: ex.code?.stringValue || code, discountType: 'fixed_cart', discountAmount: discount, pointsSpent: cost, expiresAt: ex.expiresAt?.stringValue || expiryStr }, 200, CORS);
+      }
+      if (st === 'compensated' || st === 'failed') {
+        return resp({ error: 'redemption-failed', reason: 'previous attempt rolled back; use a new idempotencyKey' }, 409, CORS);
+      }
+      if (st === 'charged') charged = true; // points already deducted → resume at coupon creation
+    }
+
+    // 4. CHARGE — atomic points deduction + immutable redeem tx + reservation.
+    //    Idempotent: the deterministic ledger doc (exists:false) prevents a 2nd
+    //    deduction; the customer updateTime precondition prevents lost updates.
+    let newBalance = null;
+    if (!charged) {
+      let done = false;
+      for (let attempt = 0; attempt < 4 && !done; attempt++) {
+        const custRes = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
+        if (!custRes.ok) return resp({ error: 'Customer not found' }, 404, CORS);
+        const custJson = await custRes.json();
+        const cf = custJson.fields || {};
+        const custUpdateTime = custJson.updateTime;
+        const email = (cf.email?.stringValue || '').trim().toLowerCase();
+        if (!email) return resp({ error: 'Customer has no email' }, 400, CORS);
+        if (cf.blocked?.booleanValue === true) return resp({ error: 'Account blocked' }, 403, CORS);
+        const points = Math.floor(Number(cf.points?.integerValue ?? cf.points?.doubleValue ?? 0));
+        if (points < cost) {
+          await _logWorkerSecurityEvent(fsBase, fsHeaders, 'reward_insufficient_balance', { route: 'woo-reward-coupon', rewardId, customerId: callerUid, cost, balance: points, result: 'deny' });
+          return resp({ error: 'insufficient-points', reason: 'not enough points', balance: points, cost }, 409, CORS);
+        }
+        newBalance = points - cost;
+        const custDocName = `projects/${projectId}/databases/(default)/documents/ipear_customers/${callerUid}`;
+        const ledgerName  = `projects/${projectId}/databases/(default)/documents/ipear_transactions/${ledgerId}`;
+        const redName     = `projects/${projectId}/databases/(default)/documents/ipear_offer_redemptions/${redemptionId}`;
+        const commitBody = { writes: [
+          { update: { name: custDocName, fields: { points: { integerValue: String(newBalance) } } },
+            updateMask: { fieldPaths: ['points'] },
+            currentDocument: { updateTime: custUpdateTime } },
+          { update: { name: ledgerName, fields: wrapFields({
+              customerId: callerUid, customerUid: callerUid, customerEmail: email,
+              customerName: cf.name?.stringValue || '', card: cf.card?.stringValue || '',
+              type: 'redeem', points: -cost, discount, label: rewardTitle,
+              category: '🎟️ Εξαργύρωση e-shop', method: 'eshop-reward',
+              rewardId, redemptionId, channel: 'reward-eshop',
+              balanceBefore: points, balanceAfter: newBalance, date: nowIso, source: 'reward-eshop/v1',
+            }) },
+            currentDocument: { exists: false } },
+          { update: { name: redName, fields: wrapFields({
+              code, rewardId, rewardTitle, customerId: callerUid, customerUid: callerUid,
+              customerEmail: email, discountType: 'fixed_cart', discountAmount: discount,
+              pointsSpent: cost, channel: 'reward-eshop', status: 'charged', used: false,
+              idempotencyKey: idemKey, createdAt: nowIso, expiresAt: expiryStr,
+            }) } },
+        ] };
+        const commitRes = await fetch(`${fsBase}:commit`, { method: 'POST', headers: fsHeaders, body: JSON.stringify(commitBody) });
+        if (commitRes.ok) { done = true; charged = true; break; }
+        // Precondition failed: disambiguate ledger-exists (already charged) vs
+        // stale customer updateTime (concurrent change → retry).
+        const ledRes = await fetch(`${fsBase}/ipear_transactions/${ledgerId}`, { headers: fsHeaders });
+        if (ledRes.ok) { charged = true; done = true; break; } // already charged by a concurrent request
+        // else loop and retry the read-charge
+      }
+      if (!charged) return resp({ error: 'charge-contention', reason: 'please retry' }, 409, CORS);
+    }
+
+    // 5. CREATE the Woo coupon (deterministic code → retry/concurrency safe).
+    //    Need the email for the restriction; re-read customer (cheap, read-only).
+    const cust2 = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
+    const email2 = ((await cust2.json()).fields?.email?.stringValue || '').trim().toLowerCase();
+    const wooBase = env.WOO_URL.replace(/\/+$/, '');
+    const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
+    const couponPayload = {
+      code, discount_type: 'fixed_cart', amount: String(discount),
+      individual_use: true, usage_limit: 1, usage_limit_per_user: 1,
+      email_restrictions: email2 ? [email2] : [], date_expires: expiryStr,
+      description: 'iPear Reward: ' + rewardTitle,
+    };
+    const wooRes = await fetch(wooBase + '/wp-json/wc/v3/coupons', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + wooAuth }, body: JSON.stringify(couponPayload),
+    });
+    let wooCoupon = null;
+    if (wooRes.ok) { wooCoupon = await wooRes.json(); }
+    else {
+      const errBody = await wooRes.text();
+      if (wooRes.status === 400 || /already exists|code_exists|term_exists|invalid_coupon/i.test(errBody)) {
+        const g = await fetch(`${wooBase}/wp-json/wc/v3/coupons?code=${encodeURIComponent(code)}`, { headers: { 'Authorization': 'Basic ' + wooAuth } });
+        if (g.ok) { const arr = await g.json(); wooCoupon = Array.isArray(arr) ? arr.find(c => String(c.code || '').toLowerCase() === code.toLowerCase()) : null; }
+      }
+      if (!wooCoupon) {
+        // 5b. COMPENSATE — refund the points, immutable reversal tx, mark compensated.
+        //     Idempotent via deterministic comp-ledger id (exists:false).
+        console.error('[woo-reward-coupon] Woo create failed, compensating:', wooRes.status, errBody);
+        for (let a = 0; a < 4; a++) {
+          const cr = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
+          const cj = await cr.json(); const ff = cj.fields || {};
+          const pts = Math.floor(Number(ff.points?.integerValue ?? ff.points?.doubleValue ?? 0));
+          const back = pts + cost;
+          const custDocName = `projects/${projectId}/databases/(default)/documents/ipear_customers/${callerUid}`;
+          const compName    = `projects/${projectId}/databases/(default)/documents/ipear_transactions/${compLedgerId}`;
+          const redName     = `projects/${projectId}/databases/(default)/documents/ipear_offer_redemptions/${redemptionId}`;
+          // If the compensation ledger already exists, we already refunded → stop.
+          const compExists = await fetch(`${fsBase}/ipear_transactions/${compLedgerId}`, { headers: fsHeaders });
+          if (compExists.ok) break;
+          const cBody = { writes: [
+            { update: { name: custDocName, fields: { points: { integerValue: String(back) } } }, updateMask: { fieldPaths: ['points'] }, currentDocument: { updateTime: cj.updateTime } },
+            { update: { name: compName, fields: wrapFields({
+                customerId: callerUid, customerUid: callerUid, customerEmail: email2,
+                type: 'add', points: cost, discount: 0, label: rewardTitle,
+                category: '↩︎ Επιστροφή πόντων εξαργύρωσης', method: 'eshop-reward-compensation',
+                rewardId, redemptionId, channel: 'reward-eshop',
+                balanceBefore: pts, balanceAfter: back, date: new Date().toISOString(), source: 'reward-eshop/v1',
+              }) }, currentDocument: { exists: false } },
+            { update: { name: redName, fields: wrapFields({ status: 'compensated', compensatedAt: new Date().toISOString() }) }, updateMask: { fieldPaths: ['status', 'compensatedAt'] } },
+          ] };
+          const cRes = await fetch(`${fsBase}:commit`, { method: 'POST', headers: fsHeaders, body: JSON.stringify(cBody) });
+          if (cRes.ok) break;
+        }
+        await _logWorkerSecurityEvent(fsBase, fsHeaders, 'reward_woo_failed_compensated', { route: 'woo-reward-coupon', rewardId, customerId: callerUid, cost, result: 'compensated' });
+        return resp({ error: 'coupon-unavailable', reason: 'points refunded; please try again' }, 502, CORS);
+      }
+    }
+
+    // 6. FINALIZE — mark created (idempotent patch).
+    await fetch(redRef, { method: 'PATCH', headers: fsHeaders, body: JSON.stringify({ fields: wrapFields({
+      code: wooCoupon.code || code, rewardId, rewardTitle, customerId: callerUid, customerUid: callerUid,
+      customerEmail: email2, discountType: 'fixed_cart', discountAmount: discount, pointsSpent: cost,
+      channel: 'reward-eshop', status: 'created', used: false, idempotencyKey: idemKey,
+      wooCouponId: Number(wooCoupon.id || 0), createdAt: nowIso, expiresAt: expiryStr,
+    }) }) });
+
+    return resp({ ok: true, code: wooCoupon.code || code, discountType: 'fixed_cart', discountAmount: discount, pointsSpent: cost, newBalance, expiresAt: expiryStr }, 200, CORS);
+
+  } catch (e) {
+    console.error('[woo-reward-coupon]', e.message, e.stack);
     return resp({ error: 'Internal error' }, 500, CORS);
   }
 }
