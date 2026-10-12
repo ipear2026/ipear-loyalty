@@ -1021,7 +1021,7 @@ const _REDEEM_COOLDOWN = 2000;
 //   - new path: first arg is a string reward id, label optional (server doc wins)
 //   - legacy:   first arg is a number (= points cost), label required — kept
 //               so cached HTML or in-flight overlays don't break mid-deploy
-export async function startRedemption(rewardIdOrPoints, label, channel, idemKey) {
+export async function startRedemption(rewardIdOrPoints, label, channel) {
   if (state._maintenanceMode) { showToast('🔧 Αναβάθμιση σε εξέλιξη. Δοκίμασε σε λίγο', 'warn'); return; }
   if (_redeemInProgress) return;
   const now = Date.now();
@@ -1029,7 +1029,7 @@ export async function startRedemption(rewardIdOrPoints, label, channel, idemKey)
   _redeemLastAt = now;
   _redeemInProgress = true;
   _haptic('pop');
-  try { await _startRedemptionInner(rewardIdOrPoints, label, channel, idemKey); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
+  try { await _startRedemptionInner(rewardIdOrPoints, label, channel); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
 }
 
 function _escRw(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
@@ -1039,8 +1039,6 @@ function _escRw(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => 
 function _showRewardChannelChoice(spec) {
   const safeId = String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '');
   const jsLabel = String(spec.label || '').replace(/[\\'"]/g, '');
-  const key = (self.crypto && crypto.randomUUID) ? crypto.randomUUID()
-            : ('k' + Date.now() + Math.random().toString(36).slice(2, 12));
   document.getElementById('reward-channel-overlay')?.remove();
   const ov = document.createElement('div');
   ov.id = 'reward-channel-overlay';
@@ -1053,18 +1051,30 @@ function _showRewardChannelChoice(spec) {
       '<div style="font-weight:800;margin-bottom:4px;color:var(--bk,#111)">' + _escRw(spec.label) + '</div>' +
       '<div style="font-size:.82rem;color:var(--grl,#888);margin-bottom:18px">' + _escRw(spec.cost) + ' πόντοι · ' + _escRw(spec.discount) + '€ έκπτωση</div>' +
       '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'instore\')" style="display:block;width:100%;padding:13px;margin-bottom:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">📱 Εξαργύρωση στο κατάστημα</button>' +
-      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'eshop\',\'' + key + '\')" style="display:block;width:100%;padding:13px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">🛒 Κουπόνι e-shop</button>' +
+      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'eshop\')" style="display:block;width:100%;padding:13px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">🛒 Κουπόνι e-shop</button>' +
     '</div>';
   document.body.appendChild(ov);
 }
 
 // Flow B — call the server-authoritative points-based reward coupon endpoint.
 // The server deducts points exactly once + creates the Woo coupon (idempotent).
-async function _redeemRewardEshop(spec, idemKey) {
+async function _redeemRewardEshop(spec) {
   const authUser = window._auth?.currentUser;
   if (!authUser) { showToast('⚠️ Συνδέσου ξανά', 'red'); return; }
-  const key = (/^[A-Za-z0-9_-]{8,64}$/.test(idemKey || '')) ? idemKey
-            : ((self.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('k' + Date.now() + Math.random().toString(36).slice(2, 12)));
+
+  // PERSISTED idempotency key per reward: survives double-click, network retry,
+  // lost response, page refresh and browser restart, so a retried/in-flight
+  // redemption resumes the SAME server redemption (replay — no second charge or
+  // coupon). Cleared only on a successful (or replayed) response, so a later
+  // DELIBERATE re-redemption of the same reward starts a fresh one.
+  const lsKey = 'ipear_rwdcpn_' + String(spec.rewardId);
+  let key = '';
+  try { key = localStorage.getItem(lsKey) || ''; } catch (_) {}
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(key)) {
+    key = (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('k' + Date.now() + Math.random().toString(36).slice(2, 12));
+    try { localStorage.setItem(lsKey, key); } catch (_) {}
+  }
+
   showToast('⏳ Δημιουργία κουπονιού…');
   try {
     const idToken = await authUser.getIdToken(true);
@@ -1074,12 +1084,19 @@ async function _redeemRewardEshop(spec, idemKey) {
     });
     const data = await res.json();
     if (!data.ok) {
+      // Terminal rejection → free the key so a clean fresh attempt can start.
+      // Transient (5xx / contention / thrown) → KEEP the key so a retry replays.
+      if (data.error === 'redemption-failed' || data.error === 'insufficient-points') {
+        try { localStorage.removeItem(lsKey); } catch (_) {}
+      }
       const m = data.reason || data.error || 'Σφάλμα δημιουργίας κουπονιού';
-      showToast('❌ ' + (m === 'insufficient-points' ? 'Δεν φτάνουν οι πόντοι' : m), 'red');
+      showToast('❌ ' + (data.error === 'insufficient-points' ? 'Δεν φτάνουν οι πόντοι' : m), 'red');
       return;
     }
+    try { localStorage.removeItem(lsKey); } catch (_) {} // success/replay → allow a future NEW redemption
     _showRewardCouponResult(data.code, (Number(data.discountAmount) || spec.discount) + '€', data.expiresAt);
   } catch (e) {
+    // Network/thrown → KEEP the key; a retry resumes the same redemption.
     logger.warn('[reward-eshop]', e);
     showToast('❌ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
   }
@@ -1145,7 +1162,7 @@ function _resolveRewardSpec(arg, fallbackLabel) {
   return null;
 }
 
-async function _startRedemptionInner(rewardIdOrPoints, label, channel, idemKey) {
+async function _startRedemptionInner(rewardIdOrPoints, label, channel) {
   const spec = _resolveRewardSpec(rewardIdOrPoints, label);
   if (!spec) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
   const { rewardId, cost, discount, label: resolvedLabel } = spec;
@@ -1163,7 +1180,7 @@ async function _startRedemptionInner(rewardIdOrPoints, label, channel, idemKey) 
   }
   if (channel === 'eshop') {
     if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
-    await _redeemRewardEshop(spec, idemKey);
+    await _redeemRewardEshop(spec);
     return;
   }
   if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
