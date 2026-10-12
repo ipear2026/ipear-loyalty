@@ -1021,7 +1021,7 @@ const _REDEEM_COOLDOWN = 2000;
 //   - new path: first arg is a string reward id, label optional (server doc wins)
 //   - legacy:   first arg is a number (= points cost), label required — kept
 //               so cached HTML or in-flight overlays don't break mid-deploy
-export async function startRedemption(rewardIdOrPoints, label) {
+export async function startRedemption(rewardIdOrPoints, label, channel, idemKey) {
   if (state._maintenanceMode) { showToast('🔧 Αναβάθμιση σε εξέλιξη. Δοκίμασε σε λίγο', 'warn'); return; }
   if (_redeemInProgress) return;
   const now = Date.now();
@@ -1029,7 +1029,83 @@ export async function startRedemption(rewardIdOrPoints, label) {
   _redeemLastAt = now;
   _redeemInProgress = true;
   _haptic('pop');
-  try { await _startRedemptionInner(rewardIdOrPoints, label); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
+  try { await _startRedemptionInner(rewardIdOrPoints, label, channel, idemKey); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
+}
+
+function _escRw(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+// Flow B — channel choice overlay for an e-shop-eligible reward. Generates ONE
+// stable idempotency key per tap so the e-shop button is retry/double-click safe.
+function _showRewardChannelChoice(spec) {
+  const safeId = String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '');
+  const jsLabel = String(spec.label || '').replace(/[\\'"]/g, '');
+  const key = (self.crypto && crypto.randomUUID) ? crypto.randomUUID()
+            : ('k' + Date.now() + Math.random().toString(36).slice(2, 12));
+  document.getElementById('reward-channel-overlay')?.remove();
+  const ov = document.createElement('div');
+  ov.id = 'reward-channel-overlay';
+  ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true');
+  ov.style.cssText = 'display:flex;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML =
+    '<div style="background:var(--card,#fff);border-radius:18px;max-width:360px;width:100%;padding:22px;text-align:center;position:relative">' +
+      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove()" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
+      '<div style="font-size:2.4rem;margin-bottom:8px">🎟️</div>' +
+      '<div style="font-weight:800;margin-bottom:4px;color:var(--bk,#111)">' + _escRw(spec.label) + '</div>' +
+      '<div style="font-size:.82rem;color:var(--grl,#888);margin-bottom:18px">' + _escRw(spec.cost) + ' πόντοι · ' + _escRw(spec.discount) + '€ έκπτωση</div>' +
+      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'instore\')" style="display:block;width:100%;padding:13px;margin-bottom:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">📱 Εξαργύρωση στο κατάστημα</button>' +
+      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'eshop\',\'' + key + '\')" style="display:block;width:100%;padding:13px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">🛒 Κουπόνι e-shop</button>' +
+    '</div>';
+  document.body.appendChild(ov);
+}
+
+// Flow B — call the server-authoritative points-based reward coupon endpoint.
+// The server deducts points exactly once + creates the Woo coupon (idempotent).
+async function _redeemRewardEshop(spec, idemKey) {
+  const authUser = window._auth?.currentUser;
+  if (!authUser) { showToast('⚠️ Συνδέσου ξανά', 'red'); return; }
+  const key = (/^[A-Za-z0-9_-]{8,64}$/.test(idemKey || '')) ? idemKey
+            : ((self.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('k' + Date.now() + Math.random().toString(36).slice(2, 12)));
+  showToast('⏳ Δημιουργία κουπονιού…');
+  try {
+    const idToken = await authUser.getIdToken(true);
+    const res = await fetch(_WORKER_URL + '/woo-reward-coupon', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken, rewardId: spec.rewardId, idempotencyKey: key }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      const m = data.reason || data.error || 'Σφάλμα δημιουργίας κουπονιού';
+      showToast('❌ ' + (m === 'insufficient-points' ? 'Δεν φτάνουν οι πόντοι' : m), 'red');
+      return;
+    }
+    _showRewardCouponResult(data.code, (Number(data.discountAmount) || spec.discount) + '€', data.expiresAt);
+  } catch (e) {
+    logger.warn('[reward-eshop]', e);
+    showToast('❌ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
+  }
+}
+
+function _showRewardCouponResult(code, discountLabel, expiresAt) {
+  document.getElementById('reward-channel-overlay')?.remove();
+  document.getElementById('reward-coupon-overlay')?.remove();
+  const expDate = expiresAt ? new Date(expiresAt).toLocaleDateString('el-GR') : '';
+  const ov = document.createElement('div');
+  ov.id = 'reward-coupon-overlay';
+  ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true');
+  ov.style.cssText = 'display:flex;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML =
+    '<div style="background:var(--card,#fff);border-radius:18px;max-width:360px;width:100%;padding:24px 16px;text-align:center;position:relative">' +
+      '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove()" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
+      '<div style="font-size:3rem;margin-bottom:12px">🛒</div>' +
+      '<div style="font-size:1.1rem;font-weight:800;color:var(--bk,#111);margin-bottom:4px">Το κουπόνι σου είναι έτοιμο!</div>' +
+      '<div style="font-size:.82rem;color:var(--grl,#888);margin-bottom:20px">Έκπτωση ' + _escRw(discountLabel) + ' στο e-shop</div>' +
+      '<div style="background:linear-gradient(135deg,#f0fff0,#e8ffe8);border:2.5px dashed var(--g,#b7e33b);border-radius:14px;padding:18px;margin-bottom:16px">' +
+        '<div id="reward-coupon-code" style="font-size:1.5rem;font-weight:900;letter-spacing:2px;color:var(--gd,#2a7);font-family:monospace">' + _escRw(String(code).toUpperCase()) + '</div>' +
+      '</div>' +
+      '<button onclick="(function(){var t=document.getElementById(\'reward-coupon-code\').textContent;if(navigator.clipboard)navigator.clipboard.writeText(t);})()" style="padding:12px 24px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">📋 Αντιγραφή κωδικού</button>' +
+      '<div style="font-size:.76rem;color:var(--grl,#888);margin-top:10px">' + (expDate ? 'Ισχύει έως ' + _escRw(expDate) : '') + ' · Μόνο για το email σου</div>' +
+    '</div>';
+  document.body.appendChild(ov);
 }
 
 // Resolve `arg` → { rewardId, cost, discount, label }. Cost+discount must
@@ -1050,6 +1126,7 @@ function _resolveRewardSpec(arg, fallbackLabel) {
         cost: Number(hit.cost) || 0,
         discount: Number(hit.discount) || 0,
         label: fallbackLabel || hit.title || '',
+        eshopEligible: !!hit.eshopEligible,
       };
     }
     // Fallback ids like `fallback-1000` from the seeded fallback list — map
@@ -1068,13 +1145,27 @@ function _resolveRewardSpec(arg, fallbackLabel) {
   return null;
 }
 
-async function _startRedemptionInner(rewardIdOrPoints, label) {
+async function _startRedemptionInner(rewardIdOrPoints, label, channel, idemKey) {
   const spec = _resolveRewardSpec(rewardIdOrPoints, label);
   if (!spec) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
   const { rewardId, cost, discount, label: resolvedLabel } = spec;
 
   const pts = state.foundCustomer?.points || 0;
   if (!Number.isInteger(cost) || cost <= 0) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
+
+  // Flow B: e-shop-eligible rewards let the customer pick the channel. The
+  // choice overlay re-enters startRedemption with an explicit channel + a
+  // STABLE idempotency key (so a double-click replays, never double-charges).
+  if (spec.eshopEligible && rewardId && !channel) {
+    if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
+    _showRewardChannelChoice(spec);
+    return;
+  }
+  if (channel === 'eshop') {
+    if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
+    await _redeemRewardEshop(spec, idemKey);
+    return;
+  }
   if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
 
   await _cancelActiveRedemption('replaced-by-new-code');

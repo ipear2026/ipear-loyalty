@@ -146,6 +146,7 @@ export function openRewardModal() {
   document.getElementById('rw-discount').value = '5';
   document.getElementById('rw-order').value = '0';
   document.getElementById('rw-active').checked = true;
+  document.getElementById('rw-eshop').checked = false;
   _rewardPendingFile = null;
   removeRewardImage(null);
   document.getElementById('m-reward').classList.add('show');
@@ -164,6 +165,7 @@ export async function openRewardEdit(id) {
   document.getElementById('rw-discount').value = Number(data.discount) || 0;
   document.getElementById('rw-order').value = Number(data.order) || 0;
   document.getElementById('rw-active').checked = !!data.isActive;
+  document.getElementById('rw-eshop').checked = !!data.eshopEligible;
   _rewardPendingFile = null;
   showExistingRewardImg(data.imageUrl || '');
   document.getElementById('m-reward').classList.add('show');
@@ -218,6 +220,10 @@ export async function saveReward() {
       discount,
       order: parseInt(document.getElementById('rw-order').value, 10) || 0,
       isActive: document.getElementById('rw-active').checked,
+      // Flow B gate: only rewards explicitly flagged here can be redeemed as an
+      // online WooCommerce coupon via /woo-reward-coupon. Absent/false ⇒ in-store
+      // QR only (unchanged behaviour).
+      eshopEligible: document.getElementById('rw-eshop').checked,
       updatedAt: new Date().toISOString(),
     };
     const editId = document.getElementById('reward-edit-id').value;
