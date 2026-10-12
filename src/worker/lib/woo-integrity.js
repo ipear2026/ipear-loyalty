@@ -624,6 +624,7 @@ export async function handleWooCreditOrder(request, env, CORS, ctx, deps) {
             name: auditName,
             fields: wrapMap({
               customerId:    customer.docId,
+              customerUid:   customer.docId,
               customerEmail: email,
               customerName:  unwrap(custFields.name) || '',
               card:          unwrap(custFields.card) || '',
@@ -848,6 +849,7 @@ export async function handleWooRefundOrder(request, env, CORS, ctx, deps) {
             name: auditName,
             fields: wrapMap({
               customerId:    ledger.customerUid,
+              customerUid:   ledger.customerUid,
               customerEmail: ledger.customerEmail,
               customerName:  unwrap(custFields.name) || '',
               card:          unwrap(custFields.card) || '',
