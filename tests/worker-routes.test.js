@@ -705,3 +705,191 @@ describe('Stage 3F — the rollback switch is permanently inert (ADMIN_SECRET go
     expect(res.status).toBe(410);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  /woo-create-coupon — hardened, server-AUTHORITATIVE e-shop coupon
+//  (Phase 2/3: offer-authoritative discount, idempotent, usage-limited,
+//   email-bound, lost-response recovery, forgery-proof)
+// ═══════════════════════════════════════════════════════════════════════════
+function couponEnv(over = {}) {
+  return envWoo({ WOO_URL: 'https://shop.test', WOO_KEY: 'ck_test', WOO_SECRET: 'cs_test', ...over });
+}
+
+function stubCouponBackend(stub, {
+  uid = 'uid-user-1', email = 'user@test.gr',
+  offer = { active: true, title: 'Test Offer', eshopDiscountType: 'percent', eshopDiscountAmount: 5, singleUse: true, endDate: '' },
+  offerExists = true,
+  existingRedemption = null,
+  wooCreate = 'ok',
+  wooCouponId = 42,
+} = {}) {
+  defaultAuthStubs(stub, { uid, email });
+  stub.on('ipear_customers/', () => jsonResponse({ fields: { email: { stringValue: email } } }));
+  stub.on('ipear_offers/', () => offerExists
+    ? jsonResponse({ fields: {
+        active:              { booleanValue: offer.active },
+        title:               { stringValue: offer.title },
+        eshopDiscountType:   { stringValue: offer.eshopDiscountType },
+        eshopDiscountAmount: { doubleValue: offer.eshopDiscountAmount },
+        singleUse:           { booleanValue: offer.singleUse },
+        ...(offer.endDate ? { endDate: { stringValue: offer.endDate } } : {}),
+      } })
+    : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404));
+  stub.on('ipear_offer_redemptions/', ({ opts }) => {
+    if ((opts?.method || 'GET') === 'GET') {
+      return existingRedemption
+        ? jsonResponse({ fields: {
+            status:    { stringValue: existingRedemption.status },
+            code:      { stringValue: existingRedemption.code },
+            expiresAt: { stringValue: '2099-01-01' },
+          } })
+        : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404);
+    }
+    return jsonResponse({ name: 'patched' }); // PATCH reserve/done
+  });
+  stub.on('ipear_security_events', () => jsonResponse({ name: 'sec' }));
+  stub.on(/wc\/v3\/coupons/, ({ url, opts }) => {
+    const method = opts?.method || 'GET';
+    if (method === 'GET') {
+      const m = url.match(/[?&]code=([^&]+)/);
+      const c = m ? decodeURIComponent(m[1]) : 'x';
+      return jsonResponse([{ id: wooCouponId, code: c.toLowerCase() }]);
+    }
+    if (wooCreate === 'fail') return jsonResponse({ code: 'woo_error', message: 'boom' }, 500);
+    if (wooCreate === 'exists')
+      return new Response(JSON.stringify({ code: 'woocommerce_rest_coupon_code_already_exists', message: 'already exists' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } });
+    const posted = (opts?.body && JSON.parse(opts.body).code) || 'ipear-xxxx';
+    return jsonResponse({ id: wooCouponId, code: String(posted).toLowerCase() }, 201);
+  });
+}
+
+function couponReq(body) {
+  return makeRequest('/woo-create-coupon', { body: { idToken: 'id-token', ...body } });
+}
+
+describe('/woo-create-coupon — hardened server-authoritative e-shop coupon', () => {
+  it('valid active offer → coupon with discount FROM THE OFFER + usage limits + email restriction', async () => {
+    const stub = makeFetchStub(); stubCouponBackend(stub); globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1', discountType: 'fixed_cart', discountAmount: 999 }), couponEnv(), {});
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    expect(j.ok).toBe(true);
+    expect(j.discountType).toBe('percent'); // from offer, NOT client 'fixed_cart'
+    expect(j.discountAmount).toBe(5);       // from offer, NOT client 999
+    expect(j.code).toMatch(/^ipear-[0-9a-f]{10}$/i);
+    const post = stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST');
+    const payload = JSON.parse(post.body);
+    expect(payload.individual_use).toBe(true);
+    expect(payload.usage_limit).toBe(1);
+    expect(payload.usage_limit_per_user).toBe(1);
+    expect(payload.email_restrictions).toEqual(['user@test.gr']);
+    expect(payload.amount).toBe('5');
+    expect(payload.discount_type).toBe('percent');
+  });
+
+  it('client CANNOT forge the discount — a €100 fixed request still yields the €5 percent offer', async () => {
+    const stub = makeFetchStub();
+    stubCouponBackend(stub, { offer: { active: true, title: 'O', eshopDiscountType: 'percent', eshopDiscountAmount: 5, singleUse: true, endDate: '' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1', discountType: 'fixed_cart', discountAmount: 100 }), couponEnv(), {});
+    const j = await res.json();
+    expect(j.discountAmount).toBe(5);
+    expect(j.discountType).toBe('percent');
+  });
+
+  it('offer discount above the hard cap is clamped (defence in depth)', async () => {
+    const stub = makeFetchStub();
+    stubCouponBackend(stub, { offer: { active: true, title: 'O', eshopDiscountType: 'percent', eshopDiscountAmount: 200, singleUse: true, endDate: '' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+    expect((await res.json()).discountAmount).toBe(50);
+  });
+
+  it('missing offerId → 400', async () => {
+    const stub = makeFetchStub(); defaultAuthStubs(stub); globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({}), couponEnv(), {});
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/offerId/i);
+  });
+
+  it('inactive offer → 403 (no coupon created)', async () => {
+    const stub = makeFetchStub();
+    stubCouponBackend(stub, { offer: { active: false, title: 'O', eshopDiscountType: 'percent', eshopDiscountAmount: 5, singleUse: true, endDate: '' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+    expect(res.status).toBe(403);
+    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+  });
+
+  it('expired offer → 410', async () => {
+    const stub = makeFetchStub();
+    stubCouponBackend(stub, { offer: { active: true, title: 'O', eshopDiscountType: 'percent', eshopDiscountAmount: 5, singleUse: true, endDate: '2000-01-01' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+    expect(res.status).toBe(410);
+  });
+
+  it('offer without an e-shop coupon → 400', async () => {
+    const stub = makeFetchStub();
+    stubCouponBackend(stub, { offer: { active: true, title: 'O', eshopDiscountType: '', eshopDiscountAmount: 0, singleUse: true, endDate: '' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+    expect(res.status).toBe(400);
+  });
+
+  it('offer not found → 404 and NO coupon created', async () => {
+    const stub = makeFetchStub(); stubCouponBackend(stub, { offerExists: false }); globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'ghost' }), couponEnv(), {});
+    expect(res.status).toBe(404);
+    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+  });
+
+  it('idempotent replay — an already-created redemption returns the SAME code, no new Woo coupon', async () => {
+    const stub = makeFetchStub();
+    stubCouponBackend(stub, { existingRedemption: { status: 'created', code: 'IPEAR-DEADBEEF01' } });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    expect(j.replay).toBe(true);
+    expect(j.code).toBe('IPEAR-DEADBEEF01');
+    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+  });
+
+  it('Woo "code already exists" → recovers the existing coupon (lost-response / concurrency safety)', async () => {
+    const stub = makeFetchStub(); stubCouponBackend(stub, { wooCreate: 'exists' }); globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+    expect(res.status).toBe(200);
+    const j = await res.json();
+    expect(j.ok).toBe(true);
+    expect(j.code).toMatch(/^ipear-[0-9a-f]{10}$/i);
+    expect(stub.calls.find(c => /wc\/v3\/coupons\?code=/.test(c.url))).toBeTruthy();
+  });
+
+  it('Woo create hard failure → 502, fail closed', async () => {
+    const stub = makeFetchStub(); stubCouponBackend(stub, { wooCreate: 'fail' }); globalThis.fetch = stub;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+    expect(res.status).toBe(502);
+  });
+
+  it('coupon code is deterministic for (offer, customer) — same inputs → same code', async () => {
+    const run = async () => {
+      const stub = makeFetchStub(); stubCouponBackend(stub); globalThis.fetch = stub;
+      const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+      return (await res.json()).code;
+    };
+    const a = await run(); const b = await run();
+    expect(a).toBe(b);
+    expect(a).toMatch(/^ipear-[0-9a-f]{10}$/i);
+  });
+
+  it('different customers get DIFFERENT codes for the same offer', async () => {
+    const codeFor = async (uid) => {
+      const stub = makeFetchStub(); stubCouponBackend(stub, { uid, email: uid + '@test.gr' }); globalThis.fetch = stub;
+      const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), couponEnv(), {});
+      return (await res.json()).code;
+    };
+    expect(await codeFor('uid-A')).not.toBe(await codeFor('uid-B'));
+  });
+});

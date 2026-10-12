@@ -1345,11 +1345,43 @@ async function handleErpLookup(request, env, CORS) {
 // routes now return 410 endpoint-retired.
 
 // ══════════════════════════════════════════════════════════════════════════
-//  POST /woo-create-coupon  { idToken, offerTitle, discountType, discountAmount, singleUse }
-//  Public endpoint — authenticated via Firebase ID token.
-//  Creates a real WooCommerce coupon via REST API.
-//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY
+//  POST /woo-create-coupon  { idToken, offerId }
+//  Customer-authenticated (Firebase ID token). Server-AUTHORITATIVE e-shop
+//  coupon for an OFFER: discount type/amount/expiry are read from the offer
+//  doc (ipear_offers) — NEVER trusted from the client. Idempotent per
+//  (offer, customer) via a deterministic, secret-keyed coupon code + a
+//  deterministic redemption doc; WooCommerce's unique-code constraint anchors
+//  concurrency / retry / lost-response safety.
+//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*.
 // ══════════════════════════════════════════════════════════════════════════
+// Deterministic, unpredictable coupon code for (offerId, uid). Secret-keyed so
+// it cannot be guessed off-site; stable so a retry maps to the SAME Woo coupon.
+async function _eshopCouponCode(offerId, uid, secret) {
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(`${offerId}|${uid}|${secret}`));
+  const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return 'IPEAR-' + hex.slice(0, 10).toUpperCase();
+}
+
+// Best-effort structured security event (awaited on deny paths so it lands;
+// never throws, never blocks the financial result). No secrets, no raw PII.
+async function _logWorkerSecurityEvent(fsBase, fsHeaders, eventType, meta) {
+  try {
+    const doc = { fields: {
+      eventType: { stringValue: String(eventType).slice(0, 64) },
+      timestamp: { stringValue: new Date().toISOString() },
+      source:    { stringValue: 'worker' },
+    }};
+    for (const [k, v] of Object.entries(meta || {})) {
+      if (v == null) continue;
+      if (typeof v === 'number')      doc.fields[k] = { doubleValue: v };
+      else if (typeof v === 'boolean') doc.fields[k] = { booleanValue: v };
+      else                             doc.fields[k] = { stringValue: String(v).slice(0, 256) };
+    }
+    await fetch(`${fsBase}/ipear_security_events`, { method: 'POST', headers: fsHeaders, body: JSON.stringify(doc) });
+  } catch (_) { /* never throw */ }
+}
+
 async function handleWooCreateCoupon(request, env, CORS) {
   let body;
   try { body = await readJsonCapped(request, 32 * 1024); }
@@ -1358,19 +1390,13 @@ async function handleWooCreateCoupon(request, env, CORS) {
   const idToken = (body.idToken || '').trim();
   if (!idToken) return resp({ error: 'idToken required' }, 400, CORS);
 
-  const offerTitle = String(body.offerTitle || '').trim().slice(0, 100);
-  const discountType = ['percent', 'fixed_cart'].includes(body.discountType) ? body.discountType : 'percent';
-  // SEC-FIX: cap discount — percent max 50%, fixed_cart max 100€
-  const maxDiscount = discountType === 'percent' ? 50 : 100;
-  const discountAmount = Math.max(0, Math.min(parseFloat(body.discountAmount) || 0, maxDiscount));
-  const singleUse = !!body.singleUse;
+  const offerId = String(body.offerId || '').trim().slice(0, 128);
+  if (!offerId) return resp({ error: 'offerId required' }, 400, CORS);
 
-  if (discountAmount <= 0)
-    return resp({ error: 'discountAmount must be > 0' }, 400, CORS);
-
-  // SEC-FIX: rate limit coupon creation per IP
+  // Rate limit coupon creation per IP (idempotent replays are cheap; this
+  // caps offer-enumeration abuse).
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  { const _rl = await rateLimitOrBlock(env, ip, 'woo-coupon', 3, 3600, CORS, 'Too many coupon requests. Try again later.'); if (_rl) return _rl; }
+  { const _rl = await rateLimitOrBlock(env, ip, 'woo-coupon', 5, 3600, CORS, 'Too many coupon requests. Try again later.'); if (_rl) return _rl; }
 
   if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
@@ -1378,7 +1404,7 @@ async function handleWooCreateCoupon(request, env, CORS) {
     return resp({ error: 'WooCommerce API not configured (WOO_URL, WOO_KEY, WOO_SECRET)' }, 503, CORS);
 
   try {
-    // 1. Verify Firebase ID token → get caller UID + email
+    // 1. Verify Firebase ID token → caller UID
     const verifyRes = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
@@ -1387,83 +1413,150 @@ async function handleWooCreateCoupon(request, env, CORS) {
     const callerUid = verifyData?.users?.[0]?.localId;
     if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
 
-    // 2. Look up customer email from Firestore
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
     const projectId = env.FCM_PROJECT_ID;
     const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
     const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
 
+    // 2. Customer → email
     const custRes = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
     if (!custRes.ok) return resp({ error: 'Customer not found' }, 404, CORS);
     const custDoc = await custRes.json();
     const email = (custDoc.fields?.email?.stringValue || '').trim().toLowerCase();
     if (!email) return resp({ error: 'Customer has no email' }, 400, CORS);
 
-    // 3. Create WooCommerce coupon
-    const rnd = Array.from(crypto.getRandomValues(new Uint8Array(4)))
-      .map(b => b.toString(36)).join('').toUpperCase().slice(0, 6);
-    const code = 'IPEAR-' + rnd;
+    // 3. Load the OFFER — AUTHORITATIVE source of discount type/amount/expiry.
+    //    The client's values are never trusted.
+    const offerRes = await fetch(`${fsBase}/ipear_offers/${encodeURIComponent(offerId)}`, { headers: fsHeaders });
+    if (!offerRes.ok) {
+      await _logWorkerSecurityEvent(fsBase, fsHeaders, 'coupon_offer_not_found', { route: 'woo-create-coupon', offerId, customerId: callerUid, result: 'deny' });
+      return resp({ error: 'Offer not found' }, 404, CORS);
+    }
+    const offerDoc = await offerRes.json();
+    const of = offerDoc.fields || {};
+    const offerActive    = of.active?.booleanValue === true;
+    const offerTitle     = (of.title?.stringValue || '').slice(0, 100);
+    const dType          = of.eshopDiscountType?.stringValue || '';
+    const dAmtRaw        = Number(of.eshopDiscountAmount?.doubleValue ?? of.eshopDiscountAmount?.integerValue ?? 0);
+    const offerSingleUse = of.singleUse?.booleanValue === true;
+    const endDateStr     = of.endDate?.stringValue || '';
 
-    const expiry = new Date();
-    expiry.setDate(expiry.getDate() + 30);
-    const expiryStr = expiry.toISOString().split('T')[0];
+    if (!offerActive) return resp({ error: 'Offer not active' }, 403, CORS);
+    if (!['percent', 'fixed_cart'].includes(dType) || !(dAmtRaw > 0))
+      return resp({ error: 'Offer has no e-shop coupon' }, 400, CORS);
 
+    // Coupon must not outlive the offer; reject an already-expired offer.
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (endDateStr && endDateStr < todayStr)
+      return resp({ error: 'Offer expired' }, 410, CORS);
+    const plus30 = new Date(); plus30.setDate(plus30.getDate() + 30);
+    let expiryStr = plus30.toISOString().split('T')[0];
+    if (endDateStr && endDateStr < expiryStr) expiryStr = endDateStr;
+
+    // Hard safety cap (defence in depth): percent ≤ 50, fixed ≤ €100.
+    const cap = dType === 'percent' ? 50 : 100;
+    let discountAmount = dAmtRaw;
+    if (discountAmount > cap) {
+      await _logWorkerSecurityEvent(fsBase, fsHeaders, 'coupon_discount_capped', { route: 'woo-create-coupon', offerId, customerId: callerUid, requested: dAmtRaw, cap, result: 'clamp' });
+      discountAmount = cap;
+    }
+
+    // 4. Idempotent per (offer, customer): deterministic redemption doc + code.
+    const redemptionId = `eshop__${offerId}__${callerUid}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 1400);
+    const code = await _eshopCouponCode(offerId, callerUid, env.WOO_SECRET);
+
+    // Fast replay — already created → return the stored coupon (no 2nd coupon).
+    const existRes = await fetch(`${fsBase}/ipear_offer_redemptions/${redemptionId}`, { headers: fsHeaders });
+    if (existRes.ok) {
+      const ex = await existRes.json();
+      if (ex.fields?.status?.stringValue === 'created' && ex.fields?.code?.stringValue) {
+        return resp({
+          ok: true, replay: true, code: ex.fields.code.stringValue,
+          discountType: dType, discountAmount, expiresAt: ex.fields.expiresAt?.stringValue || expiryStr,
+        }, 200, CORS);
+      }
+    }
+
+    // Reserve (deterministic id → idempotent write, survives retries).
+    const baseFields = {
+      code:           { stringValue: code },
+      offerId:        { stringValue: offerId },
+      offerTitle:     { stringValue: offerTitle },
+      customerId:     { stringValue: callerUid },
+      customerUid:    { stringValue: callerUid },
+      customerEmail:  { stringValue: email },
+      discountType:   { stringValue: dType },
+      discountAmount: { doubleValue: discountAmount },
+      channel:        { stringValue: 'eshop' },
+      used:           { booleanValue: false },
+      singleUse:      { booleanValue: offerSingleUse },
+      createdAt:      { stringValue: new Date().toISOString() },
+      expiresAt:      { stringValue: expiryStr },
+    };
+    await fetch(`${fsBase}/ipear_offer_redemptions/${redemptionId}`, {
+      method: 'PATCH', headers: fsHeaders,
+      body: JSON.stringify({ fields: { ...baseFields, status: { stringValue: 'creating' } } }),
+    });
+
+    // 5. Create the Woo coupon with the DETERMINISTIC code. Unique-code
+    //    constraint makes concurrent/retry/lost-response creation safe.
     const wooBase = env.WOO_URL.replace(/\/+$/, '');
     const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
-
     const couponPayload = {
       code,
-      discount_type: discountType,
-      amount: String(discountAmount),
-      individual_use: true,
-      usage_limit: singleUse ? 1 : 0,
-      email_restrictions: [email],
-      date_expires: expiryStr,
-      description: 'iPear Loyalty: ' + offerTitle,
+      discount_type:       dType,
+      amount:              String(discountAmount),
+      individual_use:      true,
+      usage_limit:         1,
+      usage_limit_per_user: 1,
+      email_restrictions:  [email],
+      date_expires:        expiryStr,
+      description:         'iPear Loyalty: ' + offerTitle,
     };
-
     const wooRes = await fetch(wooBase + '/wp-json/wc/v3/coupons', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Basic ' + wooAuth,
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + wooAuth },
       body: JSON.stringify(couponPayload),
     });
 
-    if (!wooRes.ok) {
+    let wooCoupon = null;
+    if (wooRes.ok) {
+      wooCoupon = await wooRes.json();
+    } else {
+      // Recovery: code already exists (lost response / concurrent create) →
+      // fetch the existing coupon by code so we return the same one, idempotently.
       const errBody = await wooRes.text();
-      console.error('[woo-create-coupon] WooCommerce API error:', wooRes.status, errBody);
-      return resp({ error: 'WooCommerce API error: ' + wooRes.status }, 502, CORS);
+      if (wooRes.status === 400 || /already exists|code_exists|term_exists|invalid_coupon/i.test(errBody)) {
+        const getRes = await fetch(`${wooBase}/wp-json/wc/v3/coupons?code=${encodeURIComponent(code)}`, { headers: { 'Authorization': 'Basic ' + wooAuth } });
+        if (getRes.ok) {
+          const arr = await getRes.json();
+          wooCoupon = Array.isArray(arr) ? arr.find(c => String(c.code || '').toLowerCase() === code.toLowerCase()) : null;
+        }
+      }
+      if (!wooCoupon) {
+        console.error('[woo-create-coupon] WooCommerce API error:', wooRes.status, errBody);
+        // Leave the reservation in 'creating' so a later retry recovers it.
+        return resp({ error: 'WooCommerce API error: ' + wooRes.status }, 502, CORS);
+      }
     }
 
-    const wooCoupon = await wooRes.json();
-
-    // 4. Log redemption in Firestore
-    const redemptionDoc = {
-      fields: {
-        code:           { stringValue: wooCoupon.code || code },
-        offerId:        { stringValue: offerTitle },
-        offerTitle:     { stringValue: offerTitle },
-        customerId:     { stringValue: callerUid },
-        customerEmail:  { stringValue: email },
-        discountType:   { stringValue: discountType },
-        discountAmount: { doubleValue: discountAmount },
-        channel:        { stringValue: 'eshop' },
-        status:         { stringValue: 'created' },
-        used:           { booleanValue: false },
-        createdAt:      { stringValue: new Date().toISOString() },
-        expiresAt:      { stringValue: expiryStr },
-      }
-    };
-    await fetch(`${fsBase}/ipear_offer_redemptions`, {
-      method: 'POST', headers: fsHeaders, body: JSON.stringify(redemptionDoc),
+    // 6. Mark created (idempotent; deterministic id).
+    await fetch(`${fsBase}/ipear_offer_redemptions/${redemptionId}`, {
+      method: 'PATCH', headers: fsHeaders,
+      body: JSON.stringify({ fields: {
+        ...baseFields,
+        code:              { stringValue: wooCoupon.code || code },
+        status:            { stringValue: 'created' },
+        wooCouponId:       { integerValue: String(wooCoupon.id || 0) },
+        usageLimit:        { integerValue: '1' },
+        usageLimitPerUser: { integerValue: '1' },
+      } }),
     });
 
     return resp({
       ok: true,
       code: wooCoupon.code || code,
-      discountType,
+      discountType: dType,
       discountAmount,
       expiresAt: expiryStr,
     }, 200, CORS);

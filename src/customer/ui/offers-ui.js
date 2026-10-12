@@ -857,6 +857,10 @@ export async function offerGenerateEshopCoupon() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idToken,
+        // Server-authoritative: the Worker reads discount type/amount/expiry
+        // from ipear_offers/{offerId}. The fields below are legacy/no-ops kept
+        // only for backward log compatibility; they are ignored server-side.
+        offerId: o.id || '',
         offerTitle: o.title || '',
         discountType: discType,
         discountAmount: discAmt,
