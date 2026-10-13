@@ -895,180 +895,251 @@ describe('/woo-create-coupon — hardened server-authoritative e-shop coupon', (
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  /woo-reward-coupon — POINTS-BASED e-shop reward (spends Loyalty points)
-//  Flow B: server-authoritative charge → Woo coupon → compensate state machine.
+//  /woo-reward-coupon — POINTS-BASED e-shop reward (flow B), SERVER-AUTHORITATIVE
+//  open-redemption model. Idempotency/recovery is proven WITHOUT any client key
+//  (the server pointer ipear_reward_redemption_active is the source of truth).
 // ═══════════════════════════════════════════════════════════════════════════
-function stubRewardBackend(stub, {
-  uid = 'uid-user-1', email = 'user@test.gr', blocked = false,
-  points = 1000, custUpdateTime = '2026-01-01T00:00:00Z',
-  reward = { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5 euro' },
-  rewardExists = true,
-  existingRedemption = null,
-  commitOk = true,
-  wooCreate = 'ok',
-  wooCouponId = 77,
-} = {}) {
+function stubRewardBackend(stub, opts = {}) {
+  const {
+    uid = 'uid-user-1', email = 'user@test.gr', blocked = false,
+    points = 1000, custUpdateTime = '2026-01-01T00:00:00Z',
+    reward = { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5 euro' },
+    rewardExists = true,
+    pointer = null,        // null | { gen, status, redemptionId, completedAt }
+    pointerSeq = null,     // array of pointer states for successive GETs (concurrency)
+    redemptionDoc = null,  // ipear_offer_redemptions/{id} GET body (replay within window)
+    ledgerExists = false,  // charge-ledger GET
+    compExists = false,
+    pointerCasFail = false,
+    wooCreate = 'ok',
+    wooCouponId = 77,
+  } = opts;
+
+  const S = { pointerGets: 0, pointerCommits: 0, chargeCommits: 0, compCommits: 0 };
+  stub._rw = S;
+
   defaultAuthStubs(stub, { uid, email });
+
   stub.on('ipear_rewards/', () => rewardExists
     ? jsonResponse({ fields: {
-        isActive:      { booleanValue: reward.isActive },
-        eshopEligible: { booleanValue: reward.eshopEligible },
-        cost:          { integerValue: String(reward.cost) },
-        discount:      { doubleValue: reward.discount },
-        title:         { stringValue: reward.title },
+        isActive: { booleanValue: reward.isActive }, eshopEligible: { booleanValue: reward.eshopEligible },
+        cost: { integerValue: String(reward.cost) }, discount: { doubleValue: reward.discount }, title: { stringValue: reward.title },
       } })
     : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404));
+
+  stub.on('ipear_reward_redemption_active/', () => {
+    const p = pointerSeq ? pointerSeq[Math.min(S.pointerGets, pointerSeq.length - 1)] : pointer;
+    S.pointerGets++;
+    if (!p) return jsonResponse({ error: { status: 'NOT_FOUND' } }, 404);
+    return jsonResponse({ updateTime: '2026-01-01T00:00:00Z', fields: {
+      gen: { integerValue: String(p.gen) }, status: { stringValue: p.status },
+      redemptionId: { stringValue: p.redemptionId || ('rwdcpn__rw-1__' + uid + '__g' + p.gen) },
+      ...(p.completedAt ? { completedAt: { stringValue: p.completedAt } } : {}),
+    } });
+  });
+
   stub.on('ipear_offer_redemptions/', ({ opts }) => {
     if ((opts?.method || 'GET') === 'GET') {
-      return existingRedemption
+      return redemptionDoc
         ? jsonResponse({ fields: {
-            status:    { stringValue: existingRedemption.status },
-            code:      { stringValue: existingRedemption.code || 'IPEAR-RXXXXXXXXX' },
-            expiresAt: { stringValue: '2099-01-01' },
+            status: { stringValue: redemptionDoc.status }, code: { stringValue: redemptionDoc.code || 'IPEAR-RXXXXXXXXX' },
+            discountAmount: { doubleValue: redemptionDoc.discountAmount ?? 5 }, pointsSpent: { integerValue: String(redemptionDoc.pointsSpent ?? 500) },
+            expiresAt: { stringValue: redemptionDoc.expiresAt || '2099-01-01' },
           } })
         : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404);
     }
     return jsonResponse({ name: 'patched' });
   });
+
   stub.on('ipear_customers/', () => jsonResponse({
-    fields: {
-      email: { stringValue: email }, points: { integerValue: String(points) },
-      blocked: { booleanValue: blocked }, name: { stringValue: 'Tester' }, card: { stringValue: 'IP-TEST' },
-    },
+    fields: { email: { stringValue: email }, points: { integerValue: String(points) }, blocked: { booleanValue: blocked }, name: { stringValue: 'Tester' }, card: { stringValue: 'IP-TEST' } },
     updateTime: custUpdateTime,
   }));
-  stub.on('ipear_transactions/', () => jsonResponse({ error: { status: 'NOT_FOUND' } }, 404)); // ledgers not pre-existing
+
+  stub.on('ipear_transactions/', ({ url }) => {
+    if (/rwdcpn_comp__/.test(url)) return compExists ? jsonResponse({ fields: {} }) : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404);
+    return ledgerExists ? jsonResponse({ fields: {} }) : jsonResponse({ error: { status: 'NOT_FOUND' } }, 404);
+  });
+
   stub.on('ipear_security_events', () => jsonResponse({ name: 'sec' }));
-  stub.on(':commit', () => commitOk
-    ? jsonResponse({ commitTime: '2026-01-01T00:00:01Z', writeResults: [] })
-    : jsonResponse({ error: { code: 400, message: 'failed precondition' } }, 400));
+
+  stub.on(':commit', ({ opts }) => {
+    let b = {}; try { b = JSON.parse(opts.body); } catch (_) {}
+    const names = (b.writes || []).map(w => w.update?.name || '').join(' ');
+    const touchesCustomer = /ipear_customers/.test(names);
+    if (/ipear_reward_redemption_active/.test(names) && !touchesCustomer) {
+      S.pointerCommits++;
+      if (pointerCasFail && S.pointerCommits === 1) return jsonResponse({ error: { code: 400, message: 'failed precondition' } }, 400);
+      return jsonResponse({ commitTime: 't', writeResults: [] });
+    }
+    if (/rwdcpn_comp__/.test(names)) { S.compCommits++; return jsonResponse({ commitTime: 't' }); }
+    S.chargeCommits++;
+    return jsonResponse({ commitTime: 't', writeResults: [] });
+  });
+
   stub.on(/wc\/v3\/coupons/, ({ url, opts }) => {
     const method = opts?.method || 'GET';
     if (method === 'GET') { const m = url.match(/[?&]code=([^&]+)/); return jsonResponse([{ id: wooCouponId, code: (m ? decodeURIComponent(m[1]) : 'x').toLowerCase() }]); }
     if (wooCreate === 'fail') return jsonResponse({ code: 'woo_error', message: 'boom' }, 500);
+    if (wooCreate === 'exists') return new Response(JSON.stringify({ code: 'woocommerce_rest_coupon_code_already_exists', message: 'already exists' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
     const posted = (opts?.body && JSON.parse(opts.body).code) || 'ipear-rxxx';
     return jsonResponse({ id: wooCouponId, code: String(posted).toLowerCase() }, 201);
   });
 }
 
-function rewardReq(body) {
-  return makeRequest('/woo-reward-coupon', { body: { idToken: 'id-token', idempotencyKey: 'key-abcdefgh', ...body } });
+// NOTE: no idempotencyKey — the server is authoritative. Tests prove recovery
+// without any client-held key.
+function rewardReq(body) { return makeRequest('/woo-reward-coupon', { body: { idToken: 'id-token', rewardId: 'rw-1', ...body } }); }
+function chargeCommit(stub) {
+  return stub.calls.filter(c => c.url.includes(':commit')).map(c => { try { return JSON.parse(c.body); } catch (_) { return {}; } })
+    .find(b => (b.writes || []).some(w => /ipear_customers/.test(w.update?.name || '')) && (b.writes || []).some(w => /ipear_transactions/.test(w.update?.name || '')));
 }
 
-describe('/woo-reward-coupon — points-based e-shop reward (flow B)', () => {
-  it('valid reward → deducts points exactly once (atomic) + creates fixed_cart coupon, email-bound, single-use', async () => {
+describe('/woo-reward-coupon — flow B, server-authoritative open-redemption model', () => {
+  it('fresh redemption → deducts points once (atomic, points-only) + fixed_cart coupon', async () => {
     const stub = makeFetchStub(); stubRewardBackend(stub, { points: 1000, reward: { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5€' } });
     globalThis.fetch = stub;
-    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
     expect(res.status).toBe(200);
     const j = await res.json();
-    expect(j.ok).toBe(true);
-    expect(j.pointsSpent).toBe(500);
-    expect(j.newBalance).toBe(500);
-    expect(j.discountAmount).toBe(5);
+    expect(j.ok).toBe(true); expect(j.pointsSpent).toBe(500); expect(j.newBalance).toBe(500); expect(j.discountAmount).toBe(5);
     expect(j.code).toMatch(/^ipear-r[0-9a-f]{10}$/i);
-    // ONE charge commit: points-=cost (updateMask points only) + immutable redeem tx (exists:false)
-    const commits = stub.calls.filter(c => c.url.includes(':commit'));
-    expect(commits.length).toBe(1);
-    const cb = JSON.parse(commits[0].body);
-    const custW = cb.writes.find(w => w.update.name.includes('ipear_customers'));
+    const cc = chargeCommit(stub);
+    const custW = cc.writes.find(w => /ipear_customers/.test(w.update.name));
     expect(custW.update.fields.points.integerValue).toBe('500');
-    expect(custW.updateMask.fieldPaths).toEqual(['points']);   // never touches totalPoints
-    expect(custW.currentDocument.updateTime).toBeTruthy();
-    const ledW = cb.writes.find(w => w.update.name.includes('ipear_transactions'));
+    expect(custW.updateMask.fieldPaths).toEqual(['points']);          // totalPoints untouched
+    const ledW = cc.writes.find(w => /ipear_transactions/.test(w.update.name));
     expect(ledW.currentDocument.exists).toBe(false);
     expect(ledW.update.fields.type.stringValue).toBe('redeem');
     expect(ledW.update.fields.points.integerValue).toBe('-500');
-    // Woo coupon payload
     const post = stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST');
     const p = JSON.parse(post.body);
-    expect(p.discount_type).toBe('fixed_cart');
-    expect(p.amount).toBe('5');
-    expect(p.usage_limit).toBe(1);
-    expect(p.usage_limit_per_user).toBe(1);
-    expect(p.email_restrictions).toEqual(['user@test.gr']);
+    expect(p.discount_type).toBe('fixed_cart'); expect(p.amount).toBe('5');
+    expect(p.usage_limit).toBe(1); expect(p.usage_limit_per_user).toBe(1); expect(p.email_restrictions).toEqual(['user@test.gr']);
+  });
+
+  it('idempotencyKey NOT required (server authoritative)', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub); globalThis.fetch = stub;
+    const res = await worker.fetch(makeRequest('/woo-reward-coupon', { body: { idToken: 'id-token', rewardId: 'rw-1' } }), couponEnv(), {});
+    expect(res.status).toBe(200);
+  });
+
+  it('OPEN redemption + ledger exists (first charge done, Woo lost) → key-less retry RESUMES: no 2nd charge', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { pointer: { gen: 1, status: 'open', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1' }, ledgerExists: true });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(200);
+    expect(stub._rw.chargeCommits).toBe(0);           // NO second charge
+    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeTruthy(); // coupon (re)created idempotently
+  });
+
+  it('OPEN redemption + charge not yet committed → resumes and charges exactly once', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { pointer: { gen: 1, status: 'open', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1' }, ledgerExists: false });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(200);
+    expect(stub._rw.chargeCommits).toBe(1);
+  });
+
+  it('COMPLETED within recovery window → key-less retry REPLAYS same coupon, no charge, no new coupon', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, {
+      pointer: { gen: 1, status: 'completed', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1', completedAt: new Date().toISOString() },
+      redemptionDoc: { status: 'created', code: 'IPEAR-RDEADBEEF0', discountAmount: 5, pointsSpent: 500 },
+    });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    const j = await res.json();
+    expect(j.replay).toBe(true); expect(j.code).toBe('IPEAR-RDEADBEEF0');
+    expect(stub._rw.chargeCommits).toBe(0);
+    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+  });
+
+  it('COMPLETED past the recovery window → a deliberate NEW redemption (gen+1) charges again', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, {
+      pointer: { gen: 1, status: 'completed', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1', completedAt: '2020-01-01T00:00:00Z' },
+      ledgerExists: false,
+    });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(200);
+    expect(stub._rw.chargeCommits).toBe(1);
+    const cc = chargeCommit(stub);
+    expect(cc.writes.find(w => /ipear_transactions/.test(w.update.name)).update.fields.generation.integerValue).toBe('2');
+  });
+
+  it('COMPENSATED prior → a new redemption is allowed (gen+1), charges again', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { pointer: { gen: 1, status: 'compensated', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1' }, ledgerExists: false });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(200);
+    expect(stub._rw.chargeCommits).toBe(1);
+  });
+
+  it('concurrency — pointer CAS lost → RESUMES the winner (no 2nd charge)', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, {
+      pointerSeq: [null, { gen: 1, status: 'open', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1' }],
+      pointerCasFail: true, ledgerExists: true,
+    });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(200);
+    expect(stub._rw.chargeCommits).toBe(0); // winner already charged; we resume
+  });
+
+  it('Woo "code exists" (first response lost) → recovers the same coupon', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { wooCreate: 'exists' }); globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(200);
+    expect(stub.calls.find(c => /wc\/v3\/coupons\?code=/.test(c.url))).toBeTruthy();
+  });
+
+  it('Woo hard failure → COMPENSATES (refund +cost, immutable reversal) then 502', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { wooCreate: 'fail' }); globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(502);
+    expect(stub._rw.compCommits).toBe(1);
+    const comp = stub.calls.filter(c => c.url.includes(':commit')).map(c => JSON.parse(c.body)).find(b => (b.writes || []).some(w => /rwdcpn_comp__/.test(w.update?.name || '')));
+    const compLed = comp.writes.find(w => /ipear_transactions/.test(w.update.name));
+    expect(compLed.currentDocument.exists).toBe(false);
+    expect(compLed.update.fields.type.stringValue).toBe('add');
+    expect(compLed.update.fields.points.integerValue).toBe('500');
+  });
+
+  it('compensation idempotent — comp ledger already exists → no duplicate refund', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, { wooCreate: 'fail', compExists: true }); globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect(res.status).toBe(502);
+    expect(stub._rw.compCommits).toBe(0); // already refunded → no second compensation commit
   });
 
   it('insufficient points → 409, NO charge, NO coupon', async () => {
     const stub = makeFetchStub(); stubRewardBackend(stub, { points: 100, reward: { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5€' } });
     globalThis.fetch = stub;
-    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
+    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
     expect(res.status).toBe(409);
-    expect(stub.calls.find(c => c.url.includes(':commit'))).toBeUndefined();
+    expect(stub._rw.chargeCommits).toBe(0);
     expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
   });
 
-  it('reward not active → 403', async () => {
-    const stub = makeFetchStub(); stubRewardBackend(stub, { reward: { isActive: false, eshopEligible: true, cost: 500, discount: 5, title: 'x' } });
-    globalThis.fetch = stub;
-    expect((await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).status).toBe(403);
-  });
-
-  it('reward not flagged e-shop eligible → 403 (in-store rewards stay in-store)', async () => {
-    const stub = makeFetchStub(); stubRewardBackend(stub, { reward: { isActive: true, eshopEligible: false, cost: 500, discount: 5, title: 'x' } });
-    globalThis.fetch = stub;
-    expect((await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).status).toBe(403);
-  });
-
-  it('reward not found → 404', async () => {
-    const stub = makeFetchStub(); stubRewardBackend(stub, { rewardExists: false }); globalThis.fetch = stub;
+  it('reward not active → 403; not e-shop eligible → 403; not found → 404', async () => {
+    let stub = makeFetchStub(); stubRewardBackend(stub, { reward: { isActive: false, eshopEligible: true, cost: 500, discount: 5, title: 'x' } }); globalThis.fetch = stub;
+    expect((await worker.fetch(rewardReq({}), couponEnv(), {})).status).toBe(403);
+    stub = makeFetchStub(); stubRewardBackend(stub, { reward: { isActive: true, eshopEligible: false, cost: 500, discount: 5, title: 'x' } }); globalThis.fetch = stub;
+    expect((await worker.fetch(rewardReq({}), couponEnv(), {})).status).toBe(403);
+    stub = makeFetchStub(); stubRewardBackend(stub, { rewardExists: false }); globalThis.fetch = stub;
     expect((await worker.fetch(rewardReq({ rewardId: 'ghost' }), couponEnv(), {})).status).toBe(404);
   });
 
-  it('missing rewardId → 400; bad idempotencyKey → 400', async () => {
+  it('missing rewardId → 400', async () => {
     const stub = makeFetchStub(); defaultAuthStubs(stub); globalThis.fetch = stub;
-    expect((await worker.fetch(rewardReq({ idempotencyKey: 'key-abcdefgh' }), couponEnv(), {})).status).toBe(400);
-    const stub2 = makeFetchStub(); defaultAuthStubs(stub2); globalThis.fetch = stub2;
-    expect((await worker.fetch(makeRequest('/woo-reward-coupon', { body: { idToken: 'id-token', rewardId: 'rw-1', idempotencyKey: 'short' } }), couponEnv(), {})).status).toBe(400);
+    expect((await worker.fetch(makeRequest('/woo-reward-coupon', { body: { idToken: 'id-token' } }), couponEnv(), {})).status).toBe(400);
   });
 
-  it('idempotent replay — already-created redemption returns same code, NO 2nd charge, NO 2nd coupon', async () => {
-    const stub = makeFetchStub(); stubRewardBackend(stub, { existingRedemption: { status: 'created', code: 'IPEAR-RDEADBEEF0' } });
-    globalThis.fetch = stub;
-    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
-    expect(res.status).toBe(200);
-    const j = await res.json();
-    expect(j.replay).toBe(true);
-    expect(j.code).toBe('IPEAR-RDEADBEEF0');
-    expect(stub.calls.find(c => c.url.includes(':commit'))).toBeUndefined();
-    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
-  });
-
-  it('a prior compensated redemption (same key) is rejected → 409 (needs a new key)', async () => {
-    const stub = makeFetchStub(); stubRewardBackend(stub, { existingRedemption: { status: 'compensated', code: 'IPEAR-RX' } });
-    globalThis.fetch = stub;
-    expect((await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).status).toBe(409);
-  });
-
-  it('Woo hard failure → COMPENSATES (immutable reversal +cost) and returns 502', async () => {
-    const stub = makeFetchStub(); stubRewardBackend(stub, { points: 1000, reward: { isActive: true, eshopEligible: true, cost: 500, discount: 5, title: '5€' }, wooCreate: 'fail' });
-    globalThis.fetch = stub;
-    const res = await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {});
-    expect(res.status).toBe(502);
-    const commits = stub.calls.filter(c => c.url.includes(':commit'));
-    expect(commits.length).toBe(2); // charge + compensation
-    const comp = JSON.parse(commits[1].body);
-    const compLed = comp.writes.find(w => w.update.name.includes('ipear_transactions'));
-    expect(compLed.currentDocument.exists).toBe(false);
-    expect(compLed.update.fields.type.stringValue).toBe('add');
-    expect(compLed.update.fields.points.integerValue).toBe('500'); // points returned
-    const redW = comp.writes.find(w => w.update.name.includes('ipear_offer_redemptions'));
-    expect(redW.update.fields.status.stringValue).toBe('compensated');
-  });
-
-  it('reward coupon code deterministic for (reward, uid, idempotencyKey)', async () => {
+  it('coupon code deterministic per generation', async () => {
     const run = async () => {
       const stub = makeFetchStub(); stubRewardBackend(stub); globalThis.fetch = stub;
-      return (await (await worker.fetch(rewardReq({ rewardId: 'rw-1' }), couponEnv(), {})).json()).code;
+      return (await (await worker.fetch(rewardReq({}), couponEnv(), {})).json()).code;
     };
     expect(await run()).toBe(await run());
-  });
-
-  it('different idempotencyKey → different code (allows legit repeat redemptions)', async () => {
-    const codeFor = async (key) => {
-      const stub = makeFetchStub(); stubRewardBackend(stub); globalThis.fetch = stub;
-      return (await (await worker.fetch(rewardReq({ rewardId: 'rw-1', idempotencyKey: key }), couponEnv(), {})).json()).code;
-    };
-    expect(await codeFor('key-aaaaaaaa')).not.toBe(await codeFor('key-bbbbbbbb'));
   });
 });

@@ -1062,41 +1062,25 @@ async function _redeemRewardEshop(spec) {
   const authUser = window._auth?.currentUser;
   if (!authUser) { showToast('⚠️ Συνδέσου ξανά', 'red'); return; }
 
-  // PERSISTED idempotency key per reward: survives double-click, network retry,
-  // lost response, page refresh and browser restart, so a retried/in-flight
-  // redemption resumes the SAME server redemption (replay — no second charge or
-  // coupon). Cleared only on a successful (or replayed) response, so a later
-  // DELIBERATE re-redemption of the same reward starts a fresh one.
-  const lsKey = 'ipear_rwdcpn_' + String(spec.rewardId);
-  let key = '';
-  try { key = localStorage.getItem(lsKey) || ''; } catch (_) {}
-  if (!/^[A-Za-z0-9_-]{8,64}$/.test(key)) {
-    key = (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('k' + Date.now() + Math.random().toString(36).slice(2, 12));
-    try { localStorage.setItem(lsKey, key); } catch (_) {}
-  }
-
+  // Idempotency is SERVER-authoritative (per-(customer,reward) open-redemption
+  // pointer). No client key is needed or sent: a retry / refresh / new browser
+  // is recovered server-side (resume in-flight, or replay a just-completed one),
+  // so it can never become a second charge.
   showToast('⏳ Δημιουργία κουπονιού…');
   try {
     const idToken = await authUser.getIdToken(true);
     const res = await fetch(_WORKER_URL + '/woo-reward-coupon', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken, rewardId: spec.rewardId, idempotencyKey: key }),
+      body: JSON.stringify({ idToken, rewardId: spec.rewardId }),
     });
     const data = await res.json();
     if (!data.ok) {
-      // Terminal rejection → free the key so a clean fresh attempt can start.
-      // Transient (5xx / contention / thrown) → KEEP the key so a retry replays.
-      if (data.error === 'redemption-failed' || data.error === 'insufficient-points') {
-        try { localStorage.removeItem(lsKey); } catch (_) {}
-      }
       const m = data.reason || data.error || 'Σφάλμα δημιουργίας κουπονιού';
       showToast('❌ ' + (data.error === 'insufficient-points' ? 'Δεν φτάνουν οι πόντοι' : m), 'red');
       return;
     }
-    try { localStorage.removeItem(lsKey); } catch (_) {} // success/replay → allow a future NEW redemption
     _showRewardCouponResult(data.code, (Number(data.discountAmount) || spec.discount) + '€', data.expiresAt);
   } catch (e) {
-    // Network/thrown → KEEP the key; a retry resumes the same redemption.
     logger.warn('[reward-eshop]', e);
     showToast('❌ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
   }
