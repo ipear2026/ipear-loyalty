@@ -1358,7 +1358,7 @@ async function handleErpLookup(request, env, CORS) {
 //  (offer, customer) via a deterministic, secret-keyed coupon code + a
 //  deterministic redemption doc; WooCommerce's unique-code constraint anchors
 //  concurrency / retry / lost-response safety.
-//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*.
+//  Requires env: WOO_SITE_URL (or WOO_URL alias), WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*.
 // ══════════════════════════════════════════════════════════════════════════
 // Convert a plain object to Firestore REST typed `fields`. Integers →
 // integerValue, other numbers → doubleValue, booleans → booleanValue, strings →
@@ -1388,6 +1388,14 @@ async function _couponCode(prefix, parts, env) {
   const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
   return prefix + hex.slice(0, 10).toUpperCase();
 }
+
+// ── Woo store base URL (canonical: WOO_SITE_URL — the SAME value woo-integrity.js
+//    uses for siteHash; WOO_URL kept as a backward-compatible alias/override).
+//    Config-drift normalization: the outbound coupon/customer handlers no longer
+//    need a separate WOO_URL secret when WOO_SITE_URL is already set. The Woo
+//    REST consumer key/secret (WOO_KEY/WOO_SECRET) are the only true secrets.
+function _wooBaseUrl(env) { return (env.WOO_URL || env.WOO_SITE_URL || '').replace(/\/+$/, ''); }
+function _wooConfigured(env) { return !!(_wooBaseUrl(env) && env.WOO_KEY && env.WOO_SECRET); }
 
 // Best-effort structured security event (awaited on deny paths so it lands;
 // never throws, never blocks the financial result). No secrets, no raw PII.
@@ -1426,8 +1434,8 @@ async function handleWooCreateCoupon(request, env, CORS) {
 
   if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
-  if (!env.WOO_URL || !env.WOO_KEY || !env.WOO_SECRET)
-    return resp({ error: 'WooCommerce API not configured (WOO_URL, WOO_KEY, WOO_SECRET)' }, 503, CORS);
+  if (!_wooConfigured(env))
+    return resp({ error: 'WooCommerce API not configured (needs WOO_KEY + WOO_SECRET; base from WOO_SITE_URL or WOO_URL)' }, 503, CORS);
 
   try {
     // 1. Verify Firebase ID token → caller UID
@@ -1526,7 +1534,7 @@ async function handleWooCreateCoupon(request, env, CORS) {
 
     // 5. Create the Woo coupon with the DETERMINISTIC code. Unique-code
     //    constraint makes concurrent/retry/lost-response creation safe.
-    const wooBase = env.WOO_URL.replace(/\/+$/, '');
+    const wooBase = _wooBaseUrl(env);
     const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
     const couponPayload = {
       code,
@@ -1608,7 +1616,7 @@ async function handleWooCreateCoupon(request, env, CORS) {
 //    → on definitive Woo failure: COMPENSATE (atomic: points+=cost + immutable
 //      reversal tx + redemption 'compensated'). Never points-lost+no-coupon;
 //      never coupon+no-charge. All ledger rows immutable (deterministic ids).
-//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*,
+//  Requires env: WOO_SITE_URL (or WOO_URL alias), WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*,
 //  COUPON_HMAC_KEY (falls back to WOO_SECRET until provisioned).
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooRewardCoupon(request, env, CORS) {
@@ -1629,8 +1637,8 @@ async function handleWooRewardCoupon(request, env, CORS) {
 
   if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
-  if (!env.WOO_URL || !env.WOO_KEY || !env.WOO_SECRET)
-    return resp({ error: 'WooCommerce API not configured (WOO_URL, WOO_KEY, WOO_SECRET)' }, 503, CORS);
+  if (!_wooConfigured(env))
+    return resp({ error: 'WooCommerce API not configured (needs WOO_KEY + WOO_SECRET; base from WOO_SITE_URL or WOO_URL)' }, 503, CORS);
 
   try {
     // 1. Verify Firebase ID token → caller UID
@@ -1818,7 +1826,7 @@ async function handleWooRewardCoupon(request, env, CORS) {
     // 5. CREATE the Woo coupon (deterministic code → retry/concurrency safe).
     const cust2 = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
     const email2 = ((await cust2.json()).fields?.email?.stringValue || '').trim().toLowerCase();
-    const wooBase = env.WOO_URL.replace(/\/+$/, '');
+    const wooBase = _wooBaseUrl(env);
     const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
     const couponPayload = {
       code: curCode, discount_type: 'fixed_cart', amount: String(discount),
@@ -1889,7 +1897,7 @@ async function handleWooRewardCoupon(request, env, CORS) {
 //  POST /woo-sync-tier  { idToken, tier, totalPoints }
 //  Public endpoint — authenticated via Firebase ID token.
 //  Updates WooCommerce user meta with VIP tier.
-//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY
+//  Requires env: WOO_SITE_URL (or WOO_URL alias), WOO_KEY, WOO_SECRET, FIREBASE_API_KEY
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooSyncTier(request, env, CORS) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -1906,7 +1914,7 @@ async function handleWooSyncTier(request, env, CORS) {
 
   if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
-  if (!env.WOO_URL || !env.WOO_KEY || !env.WOO_SECRET)
+  if (!_wooConfigured(env))
     return resp({ error: 'WooCommerce API not configured' }, 503, CORS);
 
   try {
@@ -1940,7 +1948,7 @@ async function handleWooSyncTier(request, env, CORS) {
                : 'bronze';
 
     // 3. Find WooCommerce customer by email
-    const wooBase = env.WOO_URL.replace(/\/+$/, '');
+    const wooBase = _wooBaseUrl(env);
     const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
 
     const wooCustRes = await fetch(wooBase + '/wp-json/wc/v3/customers?email=' + encodeURIComponent(email) + '&per_page=1', {

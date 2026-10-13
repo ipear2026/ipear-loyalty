@@ -769,6 +769,26 @@ function couponReq(body) {
 }
 
 describe('/woo-create-coupon — hardened server-authoritative e-shop coupon', () => {
+  // Config-drift normalization: WOO_SITE_URL (already provisioned, shared with
+  // woo-integrity siteHash) satisfies the store base — no separate WOO_URL needed.
+  it('WOO_SITE_URL alone (no WOO_URL) satisfies config and hits the store base', async () => {
+    const stub = makeFetchStub(); stubCouponBackend(stub); globalThis.fetch = stub;
+    const env = envWoo({ WOO_SITE_URL: 'https://ipear.gr', WOO_KEY: 'ck_test', WOO_SECRET: 'cs_test' }); // no WOO_URL
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), env, {});
+    expect(res.status).toBe(200);
+    const post = stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST');
+    expect(post.url.startsWith('https://ipear.gr/wp-json/wc/v3/coupons')).toBe(true);
+  });
+
+  it('neither WOO_SITE_URL nor WOO_URL → 503 not-configured (fail-closed, no write)', async () => {
+    const stub = makeFetchStub(); stubCouponBackend(stub); globalThis.fetch = stub;
+    const env = envWoo({ WOO_KEY: 'ck_test', WOO_SECRET: 'cs_test' }); // no base url at all
+    delete env.WOO_SITE_URL; delete env.WOO_URL;
+    const res = await worker.fetch(couponReq({ offerId: 'offer-1' }), env, {});
+    expect(res.status).toBe(503);
+    expect(stub.calls.some(c => /wc\/v3\/coupons/.test(c.url))).toBe(false);
+  });
+
   it('valid active offer → coupon with discount FROM THE OFFER + usage limits + email restriction', async () => {
     const stub = makeFetchStub(); stubCouponBackend(stub); globalThis.fetch = stub;
     const res = await worker.fetch(couponReq({ offerId: 'offer-1', discountType: 'fixed_cart', discountAmount: 999 }), couponEnv(), {});
