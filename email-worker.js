@@ -1872,6 +1872,18 @@ async function handleWooRewardCoupon(request, env, CORS) {
         }
         await setPointer({ gen, redemptionId, status: 'compensated', rewardId, customerUid: callerUid, compensatedAt: new Date().toISOString() });
         await _logWorkerSecurityEvent(fsBase, fsHeaders, 'reward_woo_failed_compensated', { route: 'woo-reward-coupon', rewardId, customerId: callerUid, cost, result: 'compensated' });
+        // Phase 6 — owner alert on a FINANCIAL anomaly: the points charge was
+        // auto-refunded because the Woo coupon could not be created (likely a
+        // WooCommerce/API outage). Best-effort, non-blocking (matches the
+        // referral-abuse alert pattern); failures never affect the response.
+        sendSecurityAlert(env,
+          `\u{1F3AB} Reward redemption auto-refunded (Woo coupon creation failed)\n\n`
+          + `Reward: ${rewardId}\n`
+          + `Customer UID: ${callerUid}\n`
+          + `Points charged then refunded: ${cost}\n`
+          + `Generation: ${gen}\n\n`
+          + `The customer's points were restored automatically. Repeated alerts indicate a WooCommerce REST API outage affecting e-shop redemptions.`
+        ).catch(() => {});
         return resp({ error: 'coupon-unavailable', reason: 'points refunded; please try again' }, 502, CORS);
       }
     }
