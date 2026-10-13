@@ -1,4 +1,11 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
+// v75 (2026-10-13): redemption UX fix — remove the 2s _REDEEM_COOLDOWN that
+// falsely blocked the channel-choice step ("Περίμενε λίγο") on BOTH in-store and
+// e-shop reward paths (same startRedemption() re-entered within 2s). Also forces
+// stale clients still holding a pre-retirement bundle (source of "endpoint-retired"
+// during redemption) to drop the cached index.html + old JS and fetch the clean
+// current build. Financial safety stays server-authoritative; client keeps only
+// the in-flight double-submit lock. No fetch-strategy change.
 // v74 (2026-10-08): customer UI deploy — natural-Greek transaction labels,
 // leaderboard infinite-spinner fix, and self-hosted canvas-confetti (public/
 // vendor/, replacing the CDN+SRI script). Bumping CACHE_VER forces returning
@@ -13,7 +20,7 @@
 // served via 302 redirect (opaque cache.addAll failure on install), and
 // manifest-customer.json never existed in the vite build. Replaced with the
 // actual dist filenames (index.html, manifest.json). See tests/sw-precache.test.js.
-const CACHE_VER = 'ipear-loyalty-20261008-v74';
+const CACHE_VER = 'ipear-loyalty-20261013-v75';
 
 const SHELL = [
   'index.html',

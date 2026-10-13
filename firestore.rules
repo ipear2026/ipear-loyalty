@@ -226,7 +226,12 @@ service cloud.firestore {
       );
 
       // UPDATE ── three controlled paths:
-      //   (1) Admin: anything goes (single source of truth for points/tier).
+      //   (1) Admin client: may update permitted NON-financial fields only
+      //       (tier, blocked, suspicious, name, …). Balances and lifetime
+      //       (points / totalPoints / referralCount / referralProcessed) are
+      //       server-only — the rule enforces `isAdmin() && !touchesBalance()`,
+      //       so the admin BROWSER cannot write them; they flow exclusively
+      //       through the server callables / Admin SDK (Admin Fortress Stage 2).
       //   (2) Customer self-update: any field EXCEPT financial/identity, AND
       //       all writable string fields must respect strict size caps.
       //       Customer-facing flows (FCM token, opt-in toggles, deletion

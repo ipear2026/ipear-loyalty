@@ -1014,8 +1014,6 @@ export function _refreshPointsUI() {
 //  REDEMPTION
 // ════════════════════════════════════════
 let _redeemInProgress = false;
-let _redeemLastAt = 0;
-const _REDEEM_COOLDOWN = 2000;
 
 // startRedemption(rewardIdOrPoints, label)
 //   - new path: first arg is a string reward id, label optional (server doc wins)
@@ -1023,10 +1021,16 @@ const _REDEEM_COOLDOWN = 2000;
 //               so cached HTML or in-flight overlays don't break mid-deploy
 export async function startRedemption(rewardIdOrPoints, label, channel) {
   if (state._maintenanceMode) { showToast('🔧 Αναβάθμιση σε εξέλιξη. Δοκίμασε σε λίγο', 'warn'); return; }
+  // Double-SUBMIT guard ONLY — an in-flight lock held for the duration of the
+  // actual redemption action. The channel-choice overlay opens instantly and
+  // releases it, so picking "Στο κατάστημα" / "Κουπόνι e-shop" right after
+  // tapping the reward is never blocked. The previous 2s time cooldown fired a
+  // SECOND time at the channel step (same function, re-entered within 2s),
+  // falsely showing "Περίμενε λίγο" and stalling both redemption paths. Removed:
+  // financial safety is server-authoritative (idempotent open-redemption pointer
+  // + immutable ledger + Worker rate limits); the client only needs to stop a
+  // concurrent duplicate submit of the SAME action.
   if (_redeemInProgress) return;
-  const now = Date.now();
-  if (now - _redeemLastAt < _REDEEM_COOLDOWN) { showToast('⏳ Περίμενε λίγο…'); return; }
-  _redeemLastAt = now;
   _redeemInProgress = true;
   _haptic('pop');
   try { await _startRedemptionInner(rewardIdOrPoints, label, channel); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
