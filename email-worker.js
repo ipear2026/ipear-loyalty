@@ -1632,11 +1632,6 @@ async function handleWooRewardCoupon(request, env, CORS) {
   if (!env.WOO_URL || !env.WOO_KEY || !env.WOO_SECRET)
     return resp({ error: 'WooCommerce API not configured (WOO_URL, WOO_KEY, WOO_SECRET)' }, 503, CORS);
 
-  // How long after a COMPLETED redemption a key-less retry (new browser / cleared
-  // storage / lost final response) still returns the SAME coupon instead of
-  // starting a new charge. A genuine repeat redemption is allowed after this.
-  const RECOVERY_WINDOW_MS = 15 * 60 * 1000;
-
   try {
     // 1. Verify Firebase ID token → caller UID
     const verifyRes = await fetch(
@@ -1665,7 +1660,6 @@ async function handleWooRewardCoupon(request, env, CORS) {
     if (!(cost > 0) || !(discount > 0)) return resp({ error: 'Reward misconfigured' }, 400, CORS);
 
     const nowIso = new Date().toISOString();
-    const now    = Date.now();
     const plus30 = new Date(); plus30.setDate(plus30.getDate() + 30);
     const expiryStr = plus30.toISOString().split('T')[0];
 
@@ -1680,34 +1674,50 @@ async function handleWooRewardCoupon(request, env, CORS) {
     const redIdForGen = (g) => `rwdcpn__${rewardId}__${callerUid}__g${g}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 1400);
 
     const pSnap = await fetch(pointerUrl, { headers: fsHeaders });
-    let pExists = false, pUpdateTime = null, pGen = 0, pStatus = '', pRedId = '', pCompletedAt = 0;
+    let pExists = false, pUpdateTime = null, pGen = 0, pStatus = '', pRedId = '';
     if (pSnap.ok) {
       const pj = await pSnap.json(); const pfx = pj.fields || {};
       pExists = true; pUpdateTime = pj.updateTime;
       pGen = Math.floor(Number(pfx.gen?.integerValue ?? pfx.gen?.doubleValue ?? 0));
       pStatus = pfx.status?.stringValue || '';
       pRedId = pfx.redemptionId?.stringValue || '';
-      pCompletedAt = Date.parse(pfx.completedAt?.stringValue || '') || 0;
     }
 
+    // Explicit "redeem again" intent — the ONLY thing that authorizes a new
+    // charge when a COMPLETED redemption already exists. Validated against server
+    // state below (never a bare client boolean). Elapsed time never authorizes a
+    // new deduction.
+    const newGen = body.newGeneration === true;
     let gen, redemptionId, mode;
-    if (pExists && pStatus === 'open') {
+    if (!pExists) {
+      // First-ever redemption of this reward by this customer = implicit first intent.
+      gen = 1; redemptionId = redIdForGen(gen); mode = 'new';
+    } else if (pStatus === 'open') {
+      // In-flight → resume (recover), regardless of any client flag.
       gen = pGen; redemptionId = pRedId || redIdForGen(gen); mode = 'resume';
-    } else if (pExists && pStatus === 'completed' && (now - pCompletedAt) < RECOVERY_WINDOW_MS) {
-      // Recovery window: a key-less retry of a just-completed redemption returns
-      // the same coupon — never a second charge.
-      const rr = await fetch(`${fsBase}/ipear_offer_redemptions/${pRedId}`, { headers: fsHeaders });
-      if (rr.ok) {
-        const rx = (await rr.json()).fields || {};
-        return resp({ ok: true, replay: true, code: rx.code?.stringValue || '', discountType: 'fixed_cart',
-          discountAmount: Number(rx.discountAmount?.doubleValue ?? rx.discountAmount?.integerValue ?? discount),
-          pointsSpent: Math.floor(Number(rx.pointsSpent?.integerValue ?? rx.pointsSpent?.doubleValue ?? cost)),
-          expiresAt: rx.expiresAt?.stringValue || expiryStr }, 200, CORS);
+    } else if (pStatus === 'completed') {
+      if (newGen) {
+        // Explicit new generation: previous is terminal-completed + no in-flight
+        // (status==='completed' proves both). Atomic CAS below guards concurrency.
+        gen = pGen + 1; redemptionId = redIdForGen(gen); mode = 'new';
+      } else {
+        // DEFAULT → ALWAYS replay the existing coupon. No time window, ever.
+        const rr = await fetch(`${fsBase}/ipear_offer_redemptions/${pRedId}`, { headers: fsHeaders });
+        if (rr.ok) {
+          const rx = (await rr.json()).fields || {};
+          return resp({ ok: true, replay: true, code: rx.code?.stringValue || '', discountType: 'fixed_cart',
+            discountAmount: Number(rx.discountAmount?.doubleValue ?? rx.discountAmount?.integerValue ?? discount),
+            pointsSpent: Math.floor(Number(rx.pointsSpent?.integerValue ?? rx.pointsSpent?.doubleValue ?? cost)),
+            expiresAt: rx.expiresAt?.stringValue || expiryStr, canRedeemAgain: true }, 200, CORS);
+        }
+        // Completed pointer but redemption doc missing (shouldn't happen) → next gen.
+        gen = pGen + 1; redemptionId = redIdForGen(gen); mode = 'new';
       }
-      gen = pGen + 1; redemptionId = redIdForGen(gen); mode = 'new';
     } else {
-      // no pointer, or terminal (completed-past-window / compensated / aborted) → new generation
-      gen = (pExists ? pGen : 0) + 1; redemptionId = redIdForGen(gen); mode = 'new';
+      // Terminal with NO coupon delivered (compensated → already refunded, or
+      // aborted → never charged). A retry here cannot double-charge, so charging
+      // a fresh generation is correct.
+      gen = pGen + 1; redemptionId = redIdForGen(gen); mode = 'new';
     }
 
     const ledgerId     = `rwdcpn_sub__${redemptionId}`.slice(0, 1400);
@@ -1867,7 +1877,7 @@ async function handleWooRewardCoupon(request, env, CORS) {
     }) }) });
     await setPointer({ gen, redemptionId, status: 'completed', rewardId, customerUid: callerUid, completedAt: new Date().toISOString() });
 
-    return resp({ ok: true, code: wooCoupon.code || curCode, discountType: 'fixed_cart', discountAmount: discount, pointsSpent: cost, newBalance, expiresAt: expiryStr }, 200, CORS);
+    return resp({ ok: true, code: wooCoupon.code || curCode, discountType: 'fixed_cart', discountAmount: discount, pointsSpent: cost, newBalance, expiresAt: expiryStr, canRedeemAgain: true }, 200, CORS);
 
   } catch (e) {
     console.error('[woo-reward-coupon]', e.message, e.stack);

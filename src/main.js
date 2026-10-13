@@ -1058,20 +1058,23 @@ function _showRewardChannelChoice(spec) {
 
 // Flow B — call the server-authoritative points-based reward coupon endpoint.
 // The server deducts points exactly once + creates the Woo coupon (idempotent).
-async function _redeemRewardEshop(spec) {
+async function _redeemRewardEshop(spec, opts) {
   const authUser = window._auth?.currentUser;
   if (!authUser) { showToast('⚠️ Συνδέσου ξανά', 'red'); return; }
 
   // Idempotency is SERVER-authoritative (per-(customer,reward) open-redemption
   // pointer). No client key is needed or sent: a retry / refresh / new browser
-  // is recovered server-side (resume in-flight, or replay a just-completed one),
-  // so it can never become a second charge.
-  showToast('⏳ Δημιουργία κουπονιού…');
+  // is recovered server-side (resume in-flight, or REPLAY a completed one — never
+  // a second charge, regardless of elapsed time). A genuinely new coupon for a
+  // repeatable reward requires an EXPLICIT newGeneration intent (the "Ξανά"
+  // button), which the server validates against its own state.
+  const newGeneration = !!(opts && opts.newGeneration);
+  showToast(newGeneration ? '⏳ Νέα εξαργύρωση…' : '⏳ Δημιουργία κουπονιού…');
   try {
     const idToken = await authUser.getIdToken(true);
     const res = await fetch(_WORKER_URL + '/woo-reward-coupon', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken, rewardId: spec.rewardId }),
+      body: JSON.stringify(newGeneration ? { idToken, rewardId: spec.rewardId, newGeneration: true } : { idToken, rewardId: spec.rewardId }),
     });
     const data = await res.json();
     if (!data.ok) {
@@ -1079,17 +1082,35 @@ async function _redeemRewardEshop(spec) {
       showToast('❌ ' + (data.error === 'insufficient-points' ? 'Δεν φτάνουν οι πόντοι' : m), 'red');
       return;
     }
-    _showRewardCouponResult(data.code, (Number(data.discountAmount) || spec.discount) + '€', data.expiresAt);
+    _showRewardCouponResult(data.code, (Number(data.discountAmount) || spec.discount) + '€', data.expiresAt, spec, data.canRedeemAgain === true);
   } catch (e) {
     logger.warn('[reward-eshop]', e);
     showToast('❌ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
   }
 }
 
-function _showRewardCouponResult(code, discountLabel, expiresAt) {
+// Explicit "redeem again" — the only client path that requests a NEW charge for
+// an already-completed repeatable reward. The server re-validates (previous
+// terminal + no in-flight + atomic generation bump).
+export async function rewardRedeemAgain(rewardId, label) {
+  if (_redeemInProgress) return;
+  const spec = _resolveRewardSpec(rewardId, label);
+  if (!spec || !spec.rewardId) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
+  const pts = state.foundCustomer?.points || 0;
+  if (pts < (Number(spec.cost) || 0)) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
+  _redeemInProgress = true;
+  try { await _redeemRewardEshop(spec, { newGeneration: true }); }
+  catch (e) { showToast('❌ ' + e.message); }
+  finally { _redeemInProgress = false; }
+}
+
+function _showRewardCouponResult(code, discountLabel, expiresAt, spec, canRedeemAgain) {
   document.getElementById('reward-channel-overlay')?.remove();
   document.getElementById('reward-coupon-overlay')?.remove();
   const expDate = expiresAt ? new Date(expiresAt).toLocaleDateString('el-GR') : '';
+  const againBtn = (canRedeemAgain && spec && spec.rewardId)
+    ? '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove();window.rewardRedeemAgain(\'' + String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '') + '\',\'' + String(spec.label || '').replace(/[\\\'"]/g, '') + '\')" style="display:block;width:100%;margin-top:10px;padding:11px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.86rem;cursor:pointer;min-height:44px">🔁 Ξανά εξαργύρωση (' + _escRw(spec.cost) + ' πόντοι)</button>'
+    : '';
   const ov = document.createElement('div');
   ov.id = 'reward-coupon-overlay';
   ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true');
@@ -1104,6 +1125,7 @@ function _showRewardCouponResult(code, discountLabel, expiresAt) {
         '<div id="reward-coupon-code" style="font-size:1.5rem;font-weight:900;letter-spacing:2px;color:var(--gd,#2a7);font-family:monospace">' + _escRw(String(code).toUpperCase()) + '</div>' +
       '</div>' +
       '<button onclick="(function(){var t=document.getElementById(\'reward-coupon-code\').textContent;if(navigator.clipboard)navigator.clipboard.writeText(t);})()" style="padding:12px 24px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">📋 Αντιγραφή κωδικού</button>' +
+      againBtn +
       '<div style="font-size:.76rem;color:var(--grl,#888);margin-top:10px">' + (expDate ? 'Ισχύει έως ' + _escRw(expDate) : '') + ' · Μόνο για το email σου</div>' +
     '</div>';
   document.body.appendChild(ov);
@@ -1735,6 +1757,7 @@ setupReferralAutoFill();
 // ════════════════════════════════════════
 window.switchTab = switchTab;
 window.startRedemption = startRedemption;
+window.rewardRedeemAgain = rewardRedeemAgain;
 window.cancelRedemption = cancelRedemption;
 window.showScreen = showScreen;
 window.logout = logout;

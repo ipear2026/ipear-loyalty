@@ -1041,30 +1041,57 @@ describe('/woo-reward-coupon — flow B, server-authoritative open-redemption mo
     expect(stub._rw.chargeCommits).toBe(1);
   });
 
-  it('COMPLETED within recovery window → key-less retry REPLAYS same coupon, no charge, no new coupon', async () => {
-    const stub = makeFetchStub(); stubRewardBackend(stub, {
-      pointer: { gen: 1, status: 'completed', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1', completedAt: new Date().toISOString() },
-      redemptionDoc: { status: 'created', code: 'IPEAR-RDEADBEEF0', discountAmount: 5, pointsSpent: 500 },
-    });
-    globalThis.fetch = stub;
-    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
-    const j = await res.json();
-    expect(j.replay).toBe(true); expect(j.code).toBe('IPEAR-RDEADBEEF0');
-    expect(stub._rw.chargeCommits).toBe(0);
-    expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+  it('COMPLETED + default retry REPLAYS same coupon, NO charge — regardless of elapsed time (1h/next-day/cleared-storage/different-browser all identical)', async () => {
+    for (const completedAt of [new Date().toISOString(), '2020-01-01T00:00:00Z', new Date(Date.now() - 3600e3).toISOString()]) {
+      const stub = makeFetchStub(); stubRewardBackend(stub, {
+        pointer: { gen: 1, status: 'completed', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1', completedAt },
+        redemptionDoc: { status: 'created', code: 'IPEAR-RDEADBEEF0', discountAmount: 5, pointsSpent: 500 },
+      });
+      globalThis.fetch = stub;
+      const res = await worker.fetch(rewardReq({}), couponEnv(), {});  // no client key, no newGeneration
+      const j = await res.json();
+      expect(j.replay).toBe(true); expect(j.code).toBe('IPEAR-RDEADBEEF0'); expect(j.canRedeemAgain).toBe(true);
+      expect(stub._rw.chargeCommits).toBe(0);                          // elapsed time NEVER charges
+      expect(stub.calls.find(c => /wc\/v3\/coupons/.test(c.url) && c.method === 'POST')).toBeUndefined();
+    }
   });
 
-  it('COMPLETED past the recovery window → a deliberate NEW redemption (gen+1) charges again', async () => {
+  it('COMPLETED + EXPLICIT newGeneration → exactly one NEW charge (gen 2)', async () => {
     const stub = makeFetchStub(); stubRewardBackend(stub, {
       pointer: { gen: 1, status: 'completed', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1', completedAt: '2020-01-01T00:00:00Z' },
       ledgerExists: false,
     });
     globalThis.fetch = stub;
-    const res = await worker.fetch(rewardReq({}), couponEnv(), {});
+    const res = await worker.fetch(rewardReq({ newGeneration: true }), couponEnv(), {});
     expect(res.status).toBe(200);
     expect(stub._rw.chargeCommits).toBe(1);
     const cc = chargeCommit(stub);
     expect(cc.writes.find(w => /ipear_transactions/.test(w.update.name)).update.fields.generation.integerValue).toBe('2');
+  });
+
+  it('two simultaneous REDEEM-AGAIN → only ONE new generation (CAS); the loser resumes it, no 2nd charge', async () => {
+    const stub = makeFetchStub(); stubRewardBackend(stub, {
+      // 1st GET: completed g1; after CAS loss, 2nd GET: winner's open g2.
+      pointerSeq: [
+        { gen: 1, status: 'completed', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1', completedAt: '2020-01-01T00:00:00Z' },
+        { gen: 2, status: 'open', redemptionId: 'rwdcpn__rw-1__uid-user-1__g2' },
+      ],
+      pointerCasFail: true, ledgerExists: true,  // winner already charged g2
+    });
+    globalThis.fetch = stub;
+    const res = await worker.fetch(rewardReq({ newGeneration: true }), couponEnv(), {});
+    expect(res.status).toBe(200);
+    expect(stub._rw.chargeCommits).toBe(0);  // loser resumes the winner's gen2; never a 2nd charge
+  });
+
+  it('two simultaneous ORDINARY retries on a completed redemption → both REPLAY, zero charges', async () => {
+    const mk = () => { const s = makeFetchStub(); stubRewardBackend(s, { pointer: { gen: 1, status: 'completed', redemptionId: 'rwdcpn__rw-1__uid-user-1__g1' }, redemptionDoc: { status: 'created', code: 'IPEAR-RSAME00000', discountAmount: 5, pointsSpent: 500 } }); return s; };
+    const s1 = mk(), s2 = mk(); globalThis.fetch = s1;
+    const r1 = await worker.fetch(rewardReq({}), couponEnv(), {}); globalThis.fetch = s2;
+    const r2 = await worker.fetch(rewardReq({}), couponEnv(), {});
+    expect((await r1.json()).code).toBe('IPEAR-RSAME00000');
+    expect((await r2.json()).code).toBe('IPEAR-RSAME00000');
+    expect(s1._rw.chargeCommits + s2._rw.chargeCommits).toBe(0);
   });
 
   it('COMPENSATED prior → a new redemption is allowed (gen+1), charges again', async () => {
