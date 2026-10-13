@@ -50,6 +50,10 @@ describe('§6b — customer balance (points/totalPoints/referralCount) writes', 
     await seedCustomer();
     await assertFails(updateDoc(doc(custCtx().firestore(), 'ipear_customers', CUST), { points: 99999 }));
   });
+  it('customer direct totalPoints write → DENIED', async () => {
+    await seedCustomer();
+    await assertFails(updateDoc(doc(custCtx().firestore(), 'ipear_customers', CUST), { totalPoints: 99999 }));
+  });
   it('tablet direct points write → DENIED', async () => {
     await seedCustomer();
     await assertFails(updateDoc(doc(tabletCtx().firestore(), 'ipear_customers', CUST), { points: 99999 }));
