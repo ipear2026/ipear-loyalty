@@ -16,6 +16,11 @@ functions/node_modules/
 *.key
 credentials*.json
 service-account*.json
+# Downloadable Firebase Admin SDK / GCP service-account private keys — never commit.
+*firebase-adminsdk*.json
+*-adminsdk-*.json
+*.serviceaccount.json
+gcp-*-key.json
 
 # Firebase
 .firebase/

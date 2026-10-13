@@ -2,15 +2,21 @@
 //  ADMIN FORTRESS · Stage 1 — admin UI adapter for server-authoritative
 //  financial mutations.
 //
-//  Feature flag: ADMIN_SERVER_FINANCIAL_MUTATIONS. DEFAULT OFF → the admin UI
-//  keeps using the legacy direct-Firestore path (rollback-safe). When ON, the
-//  UI submits an INTENT to the `adminAdjustPoints` callable and the server
-//  computes + commits the result. The two paths are MUTUALLY EXCLUSIVE — the
-//  caller runs exactly one for a given action (see customer-points.js).
+//  The admin UI submits an INTENT to the `adminAdjustPoints` callable and the
+//  server computes + commits the result. The legacy direct-Firestore path is a
+//  MUTUALLY EXCLUSIVE emergency rollback only (see customer-points.js).
 //
-//  Enable (any one):
-//    • build:   VITE_ADMIN_SERVER_FINANCIAL=1
-//    • runtime: window.__ADMIN_SERVER_FINANCIAL_MUTATIONS = true   (DevTools/testing)
+//  HARDENED (regression fix 2026-10-13): the server-authoritative path is now
+//  the DEFAULT-ON, fail-safe behaviour. Previously this defaulted OFF, so any
+//  Pages build that shipped without VITE_ADMIN_SERVER_FINANCIAL=1 silently
+//  reverted every admin financial write to the legacy direct-Firestore path —
+//  which the locked firestore.rules DENY, surfacing as "Δεν έχετε δικαίωμα".
+//  That footgun is removed: a missing/absent flag can NEVER disable the server
+//  path. The legacy path is reachable ONLY via an EXPLICIT, deliberate
+//  kill-switch, kept solely as an emergency rollback lever:
+//    • build:   VITE_ADMIN_SERVER_FINANCIAL=0            (explicit opt-out)
+//    • runtime: window.__ADMIN_SERVER_FINANCIAL_MUTATIONS = false  (DevTools)
+//  Any other value (including unset) keeps the server-authoritative path ON.
 // ═══════════════════════════════════════════════════════════════════════════
 import { getFunctions, httpsCallable } from 'firebase/functions';
 
@@ -22,14 +28,18 @@ function _fns() {
 }
 
 export function isServerFinancialEnabled() {
+  // DEFAULT-ON. Only an EXPLICIT kill-switch returns false; a missing/absent
+  // flag can no longer silently disable the server-authoritative path.
   try {
+    // Explicit emergency opt-out (build): VITE_ADMIN_SERVER_FINANCIAL=0
     if (typeof import.meta !== 'undefined' && import.meta.env &&
-        String(import.meta.env.VITE_ADMIN_SERVER_FINANCIAL) === '1') return true;
+        String(import.meta.env.VITE_ADMIN_SERVER_FINANCIAL) === '0') return false;
   } catch (_) { /* no import.meta in some contexts */ }
   try {
-    if (typeof window !== 'undefined' && window.__ADMIN_SERVER_FINANCIAL_MUTATIONS === true) return true;
+    // Explicit emergency opt-out (runtime): window.__ADMIN_SERVER_FINANCIAL_MUTATIONS === false
+    if (typeof window !== 'undefined' && window.__ADMIN_SERVER_FINANCIAL_MUTATIONS === false) return false;
   } catch (_) {}
-  return false; // default OFF → legacy direct-write path
+  return true; // default ON → server-authoritative callable path
 }
 
 // Server-side idempotency key. Collisions are astronomically unlikely; the
