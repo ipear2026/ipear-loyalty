@@ -571,6 +571,7 @@ function _tabletCustomerProjection(cust, tierFn) {
         ? cardStr.slice(0, 3) + "•••" + cardStr.slice(-2)
         : cardStr,
     points,
+    totalPoints, // lifetime total — drives the truthful tablet tier-progress bar
     tier: tierFn(totalPoints),
     blocked: cust.blocked === true,
   };

@@ -105,10 +105,13 @@ describe('_tabletCustomerProjection — masks the sensitive fields', () => {
     fcmToken: 'push-token-xyz',
   };
 
-  it('returns EXACTLY the six allowed keys — no leakage', () => {
+  it('returns EXACTLY the seven allowed keys — no leakage', () => {
+    // totalPoints is a non-PII loyalty metric, intentionally exposed so the
+    // tablet can render a truthful tier-progress bar (it already shows points +
+    // the tier that totalPoints determines). All PII stays masked/omitted below.
     const p = internals._tabletCustomerProjection(FULL_CUSTOMER, internals._serverTier);
     expect(Object.keys(p).sort()).toEqual(
-      ['blocked', 'cardMasked', 'displayName', 'phoneMasked', 'points', 'tier'].sort()
+      ['blocked', 'cardMasked', 'displayName', 'phoneMasked', 'points', 'tier', 'totalPoints'].sort()
     );
     // Belt-and-braces: no serialization path leaks a forbidden key.
     const asJson = JSON.stringify(p);

@@ -19,7 +19,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from './logger.js';
 import './firebase-init.js';
-import { tier as _unusedTier, _trapFocus, _releaseFocus, escHtml } from './utils.js';
+import { tier, _trapFocus, _releaseFocus, escHtml } from './utils.js';
 import {
   createRedemptionRequest,
   lookupCustomerForTablet,
@@ -285,9 +285,38 @@ function _renderCustomerProjection(p) {
   setText('r-pts', (p.points || 0).toLocaleString('el-GR'));
   setText('r-ticon', _tierIcon(p.tier));
   setText('r-tname', _tierName(p.tier));
-  setText('r-tsub', '');
-  const prog = document.getElementById('r-prog'); if (prog) prog.style.width = '100%';
+  _renderTierProgress(p);
   const rw = document.getElementById('r-rewards'); if (rw) rw.innerHTML = '';
+}
+
+// Truthful tier-progress bar. Progress-to-next-tier is a function of lifetime
+// totalPoints (NOT spendable points), so it needs totalPoints from the masked
+// projection. When present we fill the bar proportionally on the canonical
+// ladder (tier() → {floor, next}); at Platinum the bar is legitimately full.
+// When totalPoints is absent (older server projection) we HIDE the bar rather
+// than show a misleading permanently-full one.
+function _renderTierProgress(p) {
+  const prog = document.getElementById('r-prog');
+  const sub = document.getElementById('r-tsub');
+  const tp = Number(p && p.totalPoints);
+  if (!prog) return;
+  if (!Number.isFinite(tp)) {
+    prog.style.width = '0%';
+    const bar = prog.parentElement; if (bar) bar.style.display = 'none';
+    if (sub) sub.textContent = '';
+    return;
+  }
+  const bar = prog.parentElement; if (bar) bar.style.display = '';
+  const t = tier(tp);
+  if (t.next == null) {
+    prog.style.width = '100%';
+    if (sub) sub.textContent = 'Ανώτατο επίπεδο';
+    return;
+  }
+  const span = t.next - t.floor;
+  const pct = span > 0 ? Math.max(0, Math.min(100, ((tp - t.floor) / span) * 100)) : 0;
+  prog.style.width = pct.toFixed(1) + '%';
+  if (sub) sub.textContent = (t.next - tp).toLocaleString('el-GR') + ' πόντοι για ' + tier(t.next).name;
 }
 
 function _tierIcon(tier) {

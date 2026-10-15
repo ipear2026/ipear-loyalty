@@ -17,14 +17,12 @@
 //       attributes with a small action vocabulary.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// 1. Service Worker registration
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', function () {
-    navigator.serviceWorker.register('sw.js').catch(function (e) {
-      console.warn('[sw] registration failed:', e.message);
-    });
-  });
-}
+// 1. Service Worker — intentionally NOT registered.
+//    The Admin is an internal owner tool with no offline/PWA need, and no
+//    `sw.js` is served for the /admin route, so the old registration always
+//    failed with a console warning ("registration failed: ... "). Removed to
+//    stop the dead loader. (No SW was ever successfully registered, so there is
+//    nothing to unregister on existing admin browsers.)
 
 // 2. Client-side error telemetry (fires once per page load)
 (function () {
