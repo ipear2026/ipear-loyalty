@@ -30,8 +30,6 @@ import {
 
 const _CARD_QR_RE = /^IP-[A-Z0-9]{6}$/;
 
-void _unusedTier;
-
 const TABLET_BUILD_TAG = 'tablet-l23a-20260831';
 window.TABLET_BUILD_TAG = TABLET_BUILD_TAG;
 logger.log('tablet.html loaded', TABLET_BUILD_TAG);
