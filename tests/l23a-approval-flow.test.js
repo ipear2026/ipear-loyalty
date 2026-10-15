@@ -47,24 +47,28 @@ beforeAll(() => {
 // Instead, assert on error.code which is set by the constructor.
 
 describe('_serverTier — boundary values', () => {
-  it('bronze for 0 and 499', () => {
+  // Canonical ladder (lib/tier.js): Bronze 0 · Silver 1000 · Gold 3000 ·
+  // Diamond 6000 · Platinum 10000. (Updated from the old inline ladder that
+  // mislabelled e.g. 2310 pts as GOLD on the tablet; _serverTier now delegates
+  // to tierCls so it can never drift from the customer/financial ladder.)
+  it('bronze below 1000', () => {
     expect(internals._serverTier(0)).toBe('bronze');
-    expect(internals._serverTier(499)).toBe('bronze');
+    expect(internals._serverTier(999)).toBe('bronze');
   });
-  it('silver at 500 and 999', () => {
-    expect(internals._serverTier(500)).toBe('silver');
-    expect(internals._serverTier(999)).toBe('silver');
+  it('silver at 1000 and 2999', () => {
+    expect(internals._serverTier(1000)).toBe('silver');
+    expect(internals._serverTier(2999)).toBe('silver');
   });
-  it('gold at 1000 and 2999', () => {
-    expect(internals._serverTier(1000)).toBe('gold');
-    expect(internals._serverTier(2999)).toBe('gold');
+  it('gold at 3000 and 5999', () => {
+    expect(internals._serverTier(3000)).toBe('gold');
+    expect(internals._serverTier(5999)).toBe('gold');
   });
-  it('diamond at 3000 and 5999', () => {
-    expect(internals._serverTier(3000)).toBe('diamond');
-    expect(internals._serverTier(5999)).toBe('diamond');
+  it('diamond at 6000 and 9999', () => {
+    expect(internals._serverTier(6000)).toBe('diamond');
+    expect(internals._serverTier(9999)).toBe('diamond');
   });
-  it('platinum at 6000 and above', () => {
-    expect(internals._serverTier(6000)).toBe('platinum');
+  it('platinum at 10000 and above', () => {
+    expect(internals._serverTier(10000)).toBe('platinum');
     expect(internals._serverTier(999_999)).toBe('platinum');
   });
   it('coerces null/undefined/string safely', () => {
@@ -130,9 +134,9 @@ describe('_tabletCustomerProjection — masks the sensitive fields', () => {
   });
 
   it('derives tier from totalPoints (not points)', () => {
-    // totalPoints=3200 → diamond; points=1250 alone would be gold.
+    // Canonical ladder: totalPoints=3200 → gold; points=1250 alone → silver.
     const p = internals._tabletCustomerProjection(FULL_CUSTOMER, internals._serverTier);
-    expect(p.tier).toBe('diamond');
+    expect(p.tier).toBe('gold');
   });
 
   it('handles very short phone/card gracefully', () => {

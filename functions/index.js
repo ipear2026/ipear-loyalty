@@ -1,5 +1,6 @@
 const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
@@ -12,9 +13,14 @@ const {
   planMaintenance, maintLedgerId, MAINT_OPS, MAX_BATCH,
 } = require("./lib/admin-financial");
 const { planRewardRedeem, planOfferRedeem } = require("./lib/redemption");
+// Canonical tier ladder — single source of truth shared with lib/tier.js so the
+// tablet projection can never drift from the financial/customer ladder again.
+const { tierCls } = require("./lib/tier");
 const {
   tombstoneId, lifecycleId, planLedgerAnonymization, LIFECYCLE_POLICY,
 } = require("./lib/lifecycle");
+// Deterministic, idempotent, NON-financial cleanup of stale pending requests.
+const { planRequestExpiry, expiryUpdate } = require("./lib/request-expiry");
 
 initializeApp();
 const db = getFirestore();
@@ -71,6 +77,53 @@ exports.enforceRedemptionLimit = onDocumentCreated(
 
     console.log(
       `[enforceRedemptionLimit] Customer ${customerUid}: cancelled ${toCancel.length} excess code(s)`
+    );
+  }
+);
+
+// ──────────────────────────────────────────────────────────────────────────
+//  EXPIRY REMEDIATION — expireStaleRedemptionRequests (scheduled cleanup).
+//  Marks past-deadline PENDING ipear_redemption_requests as "expired" so they
+//  don't linger as normal pending items (fixes the ~16h stale request bug) and
+//  so Admin/Tablet see a truthful terminal state. NON-FINANCIAL by
+//  construction: it reads ONLY the pending set and writes ONLY status/markers
+//  via lib/request-expiry (no customer/ledger reads or writes). Deterministic +
+//  idempotent — a missed run self-heals on the next tick (retryCount 0).
+//  Additive: touches none of the existing callable/financial functions.
+// ──────────────────────────────────────────────────────────────────────────
+exports.expireStaleRedemptionRequests = onSchedule(
+  {
+    schedule: "every 5 minutes",
+    region: "europe-west1",
+    timeoutSeconds: 120,
+    memory: "256MiB",
+    retryCount: 0,
+  },
+  async () => {
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const snap = await db
+      .collection("ipear_redemption_requests")
+      .where("status", "==", "pending")
+      .get();
+
+    let expired = 0;
+    let batch = db.batch();
+    let n = 0;
+    for (const doc of snap.docs) {
+      if (!planRequestExpiry(doc.data(), nowMs).expire) continue;
+      batch.update(doc.ref, expiryUpdate(nowIso));
+      expired++;
+      n++;
+      if (n === 400) {
+        await batch.commit();
+        batch = db.batch();
+        n = 0;
+      }
+    }
+    if (n > 0) await batch.commit();
+    console.log(
+      `[expireStaleRedemptionRequests] scanned ${snap.size} pending, expired ${expired}`
     );
   }
 );
@@ -526,12 +579,11 @@ function _tabletCustomerProjection(cust, tierFn) {
 // Server tier helper — mirrors src/utils.js tier() but kept inline so the
 // CF has no dependency on the front-end bundle.
 function _serverTier(totalPoints) {
-  const t = Number(totalPoints || 0);
-  if (t >= 6000) return "platinum";
-  if (t >= 3000) return "diamond";
-  if (t >= 1000) return "gold";
-  if (t >= 500) return "silver";
-  return "bronze";
+  // Delegates to the canonical ladder (lib/tier.js): Bronze 0 · Silver 1000 ·
+  // Gold 3000 · Diamond 6000 · Platinum 10000. Reconciles the live Oct-2026
+  // tablet tier hotfix (deployed to lookupCustomer* but never committed); the
+  // old inline ladder mislabelled e.g. 2310 pts as GOLD instead of SILVER.
+  return tierCls(totalPoints);
 }
 
 // Auth-gate helpers — throw HttpsError so the client sees a clean code.
