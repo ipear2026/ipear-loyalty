@@ -32,11 +32,22 @@ function _couponStatus(d, nowMs) {
   return 'active';
 }
 
+// Authoritative discount value from the coupon doc. The €/% unit is driven by
+// the server-written discountType ('percent' → %, otherwise fixed-cart €). We
+// deliberately NEVER fall back to bonusPoints or pointsSpent — those are the
+// offer's point reward / the reward's point COST, not the coupon's discount
+// value, and must not be shown as a € amount.
 function _couponValue(d) {
-  if (d.discountAmount != null && Number(d.discountAmount) > 0) return Number(d.discountAmount) + '€';
-  if (d.discount != null && Number(d.discount) > 0) return Number(d.discount) + '€';
-  if (d.bonusPoints != null && Number(d.bonusPoints) > 0) return '+' + Number(d.bonusPoints) + ' πόντοι';
-  return '';
+  const amt = Number(d.discountAmount);
+  if (!Number.isFinite(amt) || amt <= 0) return '';
+  return d.discountType === 'percent' ? amt + '%' : amt + '€';
+}
+
+// An e-shop coupon is one minted against WooCommerce (reward-eshop or promo
+// eshop channel). In-store offer QR codes (no channel / no wooCouponId, point-
+// based) are a different artifact and are intentionally excluded here.
+function _isEshopCoupon(d) {
+  return d.channel === 'eshop' || d.channel === 'reward-eshop' || (!!d.wooCouponId && !!d.discountType);
 }
 function _couponTitle(d) { return d.rewardTitle || d.offerTitle || d.label || 'Κουπόνι e-shop'; }
 function _fmtDate(iso) { try { return iso ? new Date(iso).toLocaleDateString('el-GR') : ''; } catch (_) { return ''; } }
@@ -109,6 +120,7 @@ export async function openMyCoupons() {
     snap.forEach(doc => {
       const d = doc.data() || {};
       if (!d.code) return;                 // no minted code yet → nothing to show
+      if (!_isEshopCoupon(d)) return;      // exclude in-store offer QR codes
       const st = _couponStatus(d, nowMs);
       if (st === 'pending') return;
       (st === 'active' ? active : history).push({ d, st, _ts: Date.parse(d.createdAt || '') || 0 });
