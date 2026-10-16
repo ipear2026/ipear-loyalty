@@ -244,7 +244,11 @@ async function doSearch() {
   // L2.3A hotfix: manually-typed card (IP-XXXXXX) opens the same reward
   // picker as a QR card scan. Everything else is a name/phone lookup.
   if (_CARD_QR_RE.test(stripped.toUpperCase())) { _handleCardScan(stripped.toUpperCase()); return; }
-  await _doLookup(q);
+  // Phone-only lookup (matches the live production fix): the backend resolves a
+  // customer by exact phone, never by name. A non-phone input (e.g. a name) is
+  // rejected here with a clear message and NEVER reaches the server.
+  if (!/^\d{7,}$/.test(stripped)) { _showToast('⚠️ Εισάγετε έγκυρο αριθμό τηλεφώνου.'); return; }
+  await _doLookup(stripped);
 }
 
 async function _doLookup(query) {
