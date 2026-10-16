@@ -53,12 +53,21 @@ function _couponTitle(d) { return d.rewardTitle || d.offerTitle || d.label || '�
 function _fmtDate(iso) { try { return iso ? new Date(iso).toLocaleDateString('el-GR') : ''; } catch (_) { return ''; } }
 
 // Copy helper for inline onclick (string is escaped at render time).
-window._copyMyCoupon = function (code) {
+// Confirmation is shown INLINE on the button — the global toast (z-index 400)
+// would render behind this full-screen overlay (z-index 99998) and be invisible.
+window._copyMyCoupon = function (code, btn) {
   const c = String(code || '');
   if (!c) return;
+  const confirm = () => {
+    if (!btn) { showToast('Κωδικός: ' + c); return; }
+    if (btn._prevHtml == null) btn._prevHtml = btn.innerHTML;
+    btn.innerHTML = '✅ Αντιγράφηκε!';
+    clearTimeout(btn._revT);
+    btn._revT = setTimeout(() => { btn.innerHTML = btn._prevHtml; btn._prevHtml = null; }, 1600);
+  };
   if (navigator.clipboard) {
-    navigator.clipboard.writeText(c).then(() => showToast('✅ Αντιγράφηκε: ' + c)).catch(() => showToast('Κωδικός: ' + c));
-  } else { showToast('Κωδικός: ' + c); }
+    navigator.clipboard.writeText(c).then(confirm).catch(() => showToast('Κωδικός: ' + c));
+  } else { confirm(); }
 };
 
 function _couponCard(d, status) {
@@ -76,7 +85,7 @@ function _couponCard(d, status) {
          <div style="font-size:1.25rem;font-weight:900;letter-spacing:1.5px;color:var(--gd,#2a7);font-family:monospace">${code}</div>
        </div>
        <div style="display:flex;gap:8px">
-         <button type="button" onclick="window._copyMyCoupon('${code}')" style="flex:1;padding:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:10px;font-weight:800;font-size:.84rem;cursor:pointer;min-height:44px">📋 Αντιγραφή</button>
+         <button type="button" onclick="window._copyMyCoupon('${code}', this)" style="flex:1;padding:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:10px;font-weight:800;font-size:.84rem;cursor:pointer;min-height:44px">📋 Αντιγραφή</button>
          <a href="${ESHOP_URL}" target="_blank" rel="noopener" style="flex:1;padding:10px;background:#111;color:#fff;border-radius:10px;font-weight:800;font-size:.84rem;text-align:center;text-decoration:none;min-height:44px;display:flex;align-items:center;justify-content:center">Χρήση στο ipear.gr →</a>
        </div>`
     : `<div style="font-family:monospace;font-size:.95rem;color:#999;letter-spacing:1px;margin:6px 0;text-decoration:${status === 'used' ? 'line-through' : 'none'}">${code}</div>`;
