@@ -15,6 +15,7 @@ import { _t } from './i18n.js';
 import { registerServiceWorker } from './sw-registration.js';
 import { pendingBonuses } from './customer/bonus-retry.js';
 import './firebase-init.js';
+import { openMyCoupons } from './customer/ui/coupons-ui.js';
 import {
   renderHomeRewards, renderRewardsList,
   startRewardsListener, stopRewardsListener, getActiveRewards,
@@ -1760,6 +1761,7 @@ setupReferralAutoFill();
 //  WINDOW GLOBALS (for HTML onclick handlers)
 // ════════════════════════════════════════
 window.switchTab = switchTab;
+window.openMyCoupons = openMyCoupons;
 window.startRedemption = startRedemption;
 window.rewardRedeemAgain = rewardRedeemAgain;
 window.cancelRedemption = cancelRedemption;
