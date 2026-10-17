@@ -35,7 +35,7 @@ import { test, expect } from '@playwright/test';
 import { initializeApp, cert, applicationDefault, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
-const REQUIRED_ENV = ['TEST_EMAIL', 'TEST_PASS', 'FIREBASE_SERVICE_ACCOUNT_JSON'];
+const REQUIRED_ENV = ['TEST_EMAIL', 'TEST_PASS'];
 const REWARD_COST = 1000; // 5€ tier — smallest, fastest to reset
 // Stable id for the dummy reward we upsert so the customer app has at least
 // one active reward to render even on a project where the admin hasn't
