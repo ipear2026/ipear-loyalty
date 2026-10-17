@@ -1166,7 +1166,7 @@ describe('8 · Secret never leaked in errors', () => {
 // Firestore Write.update.name pattern.
 // Ref: https://cloud.google.com/firestore/docs/reference/rest/v1/Write
 //      https://cloud.google.com/firestore/docs/reference/rest/v1/projects.databases.documents/commit
-const FS_DOC_NAME_RE = /^projects\/[^\/?#]+\/databases\/[^\/?#]+\/documents\/[^?#]+$/;
+const FS_DOC_NAME_RE = /^projects\/[^/?#]+\/databases\/[^/?#]+\/documents\/[^?#]+$/;
 
 function makeStrictFirestoreFake(seed = {}) {
   const state = {

@@ -8,7 +8,7 @@
     "prebuild": "node scripts/validate-env.js",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint src email-worker.js public/sw-customer.js public/sw.js public/firebase-messaging-sw.js tests vitest.config.js",
+    "lint": "eslint src email-worker.js public/sw-customer.js public/sw.js tests vitest.config.js",
     "lint:fix": "eslint --fix src",
     "test": "vitest run --exclude tests/firestore-rules.test.js --exclude tests/l23a-tablet-rules.test.js --exclude tests/l23a-integration.test.js --exclude tests/lifecycle-integration.test.js --exclude tests/firestore-rules-locked.test.js",
     "test:watch": "vitest",

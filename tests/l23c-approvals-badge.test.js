@@ -8,7 +8,7 @@
 //  the real code path or reads the produced DOM.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import {
   setOfferCount,

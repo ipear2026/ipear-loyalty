@@ -6,7 +6,7 @@
 //  unaffected; reads / signup / non-balance admin edits remain intact.
 //  NOT a production deploy — emulator only.
 // ═══════════════════════════════════════════════════════════════════════════
-import { describe, it, beforeAll, afterAll, beforeEach, expect } from 'vitest';
+import { describe, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initializeTestEnvironment, assertSucceeds, assertFails } from '@firebase/rules-unit-testing';
 import { doc, setDoc, getDoc, getDocs, deleteDoc, updateDoc, collection, query, where } from 'firebase/firestore';
 import { readFileSync } from 'node:fs';
@@ -34,7 +34,7 @@ const CUST = 'cust-uid', ADMIN = 'admin-uid', TAB = 'tab-uid';
 const custCtx = () => testEnv.authenticatedContext(CUST, { email: 'c@ipear.gr', email_verified: true });
 const adminCtx = () => testEnv.authenticatedContext(ADMIN, { email: 'a@ipear.gr', email_verified: true, admin: true });
 const tabletCtx = () => testEnv.authenticatedContext(TAB, { email: 't@ipear.gr', email_verified: true, role: 'tablet', storeId: 'store_1' });
-const anonCtx = () => testEnv.unauthenticatedContext();
+const _anonCtx = () => testEnv.unauthenticatedContext();
 
 async function seedCustomer(uid = CUST, email = 'c@ipear.gr', points = 500) {
   await seed(`ipear_customers/${uid}`, { uid, email, name: 'C', card: 'IP-ABC123', points, totalPoints: points, blocked: false, referralProcessed: false, referralCount: 0, createdAt: new Date().toISOString() });

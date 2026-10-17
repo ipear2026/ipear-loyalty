@@ -1114,7 +1114,7 @@ function _showRewardCouponResult(code, discountLabel, expiresAt, spec, canRedeem
   document.getElementById('reward-coupon-overlay')?.remove();
   const expDate = expiresAt ? new Date(expiresAt).toLocaleDateString('el-GR') : '';
   const againBtn = (canRedeemAgain && spec && spec.rewardId)
-    ? '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove();window.rewardRedeemAgain(\'' + String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '') + '\',\'' + String(spec.label || '').replace(/[\\\'"]/g, '') + '\')" style="display:block;width:100%;margin-top:10px;padding:11px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.86rem;cursor:pointer;min-height:44px">🔁 Ξανά εξαργύρωση (' + _escRw(spec.cost) + ' πόντοι)</button>'
+    ? '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove();window.rewardRedeemAgain(\'' + String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '') + '\',\'' + String(spec.label || '').replace(/[\\'"]/g, '') + '\')" style="display:block;width:100%;margin-top:10px;padding:11px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.86rem;cursor:pointer;min-height:44px">🔁 Ξανά εξαργύρωση (' + _escRw(spec.cost) + ' πόντοι)</button>'
     : '';
   const ov = document.createElement('div');
   ov.id = 'reward-coupon-overlay';
