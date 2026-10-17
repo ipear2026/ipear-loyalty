@@ -135,6 +135,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # Keyless GCP auth via Workload Identity Federation (no JSON key). The
+    # protected `ci-e2e` environment emits the OIDC `environment` claim that the
+    # WIF provider condition requires (repo + environment); only THIS job gets
+    # id-token:write + the environment, so customer/rules/functions stay
+    # credential-free.
+    environment: ci-e2e
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -145,6 +154,17 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      # Authenticate to Google Cloud without a long-lived key. Pinned to the
+      # exact immutable commit SHA of google-github-actions/auth v2.1.13.
+      - name: Authenticate to Google Cloud (keyless WIF)
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          project_id: loyalty-ipear
+          workload_identity_provider: projects/927652567960/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: ipear-loyalty-ci@loyalty-ipear.iam.gserviceaccount.com
+          create_credentials_file: true
+          export_environment_variables: true
 
       - name: Write real .env from secrets
         # The `customer` job builds in DEMO mode (cp .env.example .env). E2E
@@ -176,7 +196,7 @@ jobs:
         # spec exercises. Idempotent.
         env:
           TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
-          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # Credentials now come from WIF ADC (the auth step above) — no JSON key.
         run: npm run e2e:seed
 
       - name: Install Playwright browsers (chromium only)
@@ -191,7 +211,7 @@ jobs:
           # Golden-path customer flow
           TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
           TEST_PASS: ${{ secrets.E2E_TEST_PASS }}
-          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # Credentials now come from WIF ADC (the auth step above) — no JSON key.
           # Kiosk-survival admin/tablet flow — separate account from the
           # customer above. MUST be admin via custom claim, ipear_admins doc,
           # OR email allow-list rescue (see firestore.rules → isAdmin()).

@@ -27,7 +27,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import 'dotenv/config';
-import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { initializeApp, cert, applicationDefault, getApps } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 
@@ -37,11 +37,20 @@ const SEED_POINTS = parseInt(process.env.E2E_SEED_POINTS || '1500', 10);
 
 function die(msg) { console.error(`✗ ${msg}`); process.exit(1); }
 if (!TEST_EMAIL) die('TEST_EMAIL is required');
-if (!SA_RAW) die('FIREBASE_SERVICE_ACCOUNT_JSON is required (base64 of service account JSON)');
 
 if (!getApps().length) {
-  const sa = JSON.parse(Buffer.from(SA_RAW, 'base64').toString('utf8'));
-  initializeApp({ credential: cert(sa), projectId: sa.project_id });
+  if (SA_RAW) {
+    // Local/dev: explicit service-account JSON (base64 in FIREBASE_SERVICE_ACCOUNT_JSON).
+    const sa = JSON.parse(Buffer.from(SA_RAW, 'base64').toString('utf8'));
+    initializeApp({ credential: cert(sa), projectId: sa.project_id });
+  } else {
+    // CI: keyless Workload Identity Federation → Application Default Credentials
+    // (GOOGLE_APPLICATION_CREDENTIALS is written by google-github-actions/auth).
+    initializeApp({
+      credential: applicationDefault(),
+      projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'loyalty-ipear',
+    });
+  }
 }
 
 async function main() {
@@ -57,13 +66,14 @@ async function main() {
         `Create one first in Firebase Console → Authentication → Add user.`);
   }
 
-  // 2. Flip emailVerified if it isn't already.
+  // 2. Require emailVerified — do NOT self-heal. The CI identity holds
+  //    firebaseauth.users.get only (no update), by design, so Auth is never
+  //    mutated from CI. Pre-verify the test account once in Firebase Console.
   if (!user.emailVerified) {
-    await auth.updateUser(user.uid, { emailVerified: true });
-    console.log(`✓ emailVerified set on ${TEST_EMAIL}`);
-  } else {
-    console.log(`✓ emailVerified already true on ${TEST_EMAIL}`);
+    die(`${TEST_EMAIL} is not emailVerified. Pre-verify it once in Firebase Console → ` +
+        `Authentication. The CI identity is Auth read-only (firebaseauth.users.get).`);
   }
+  console.log(`✓ emailVerified on ${TEST_EMAIL}`);
 
   // 3. Upsert the customer doc keyed by the auth uid.
   const custRef = db.collection('ipear_customers').doc(user.uid);
