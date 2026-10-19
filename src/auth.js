@@ -1140,9 +1140,9 @@ function _renderErr(el, { icon = '', title = '', body = '', cta = null, kind = '
   const safeBody  = String(body ).replace(/[<>&]/g, ch => ({ '<':'&lt;','>':'&gt;','&':'&amp;' }[ch]));
   let html = `<span class="err-title">${icon ? icon + ' ' : ''}${safeTitle}</span>`;
   if (body) html += `<span class="err-body">${safeBody}</span>`;
-  if (cta && cta.label && cta.onClickAttr) {
+  if (cta && cta.label && cta.actionAttr) {
     const safeLbl = String(cta.label).replace(/[<>&]/g, ch => ({ '<':'&lt;','>':'&gt;','&':'&amp;' }[ch]));
-    html += `<button type="button" class="err-cta" ${cta.onClickAttr}>${safeLbl}</button>`;
+    html += `<button type="button" class="err-cta" ${cta.actionAttr}>${safeLbl}</button>`;
   }
   el.innerHTML = html;
 }
@@ -1243,14 +1243,14 @@ export async function submitPhone() {
           icon: '❌',
           title: 'Δεν βρέθηκε λογαριασμός',
           body: 'Δεν υπάρχει loyalty account για αυτό το email. Δημιούργησε νέο ή επικοινώνησε με το κατάστημα.',
-          cta: { label: 'Δημιουργία λογαριασμού →', onClickAttr: 'onclick="openRegister()"' }
+          cta: { label: 'Δημιουργία λογαριασμού →', actionAttr: 'data-action="openRegister"' }
         });
       } else {
         _renderErr(err, {
           icon: '⚠️', kind: 'warn',
           title: 'Ο λογαριασμός χρειάζεται ενημέρωση',
           body: 'Έχει υπάρχει αλλά απαιτείται επαλήθευση. Δοκίμασε επαλήθευση email ή ξέχασα τον κωδικό μου.',
-          cta: { label: 'Ξέχασα τον κωδικό →', onClickAttr: 'onclick="openForgotPass()"' }
+          cta: { label: 'Ξέχασα τον κωδικό →', actionAttr: 'data-action="openForgotPass"' }
         });
       }
       btn.disabled = false; btn.innerHTML = 'Είσοδος →'; return;

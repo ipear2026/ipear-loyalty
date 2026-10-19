@@ -231,11 +231,11 @@ export async function searchEmailOne(q) {
   resEl.innerHTML = matches
     .map((c) => {
       const hasEmail = c.email && c.email.includes('@');
-      return `<div data-action="selectEmailOne" data-arg="${escJs(c.id)}" style="
+      return `<div class="email-pick-row" data-action="selectEmailOne" data-arg="${escJs(c.id)}" style="
       padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);
       display:flex;justify-content:space-between;align-items:center;
       ${!hasEmail ? 'opacity:.5;pointer-events:none;' : ''}
-    " onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background=''">
+    ">
       <div>
         <div style="font-weight:700;font-size:.86rem">${escHtml(c.name || '—')} <span style="color:var(--gray);font-weight:400;font-size:.78rem">${escHtml(c.card || '')}</span></div>
         <div style="font-size:.76rem;color:var(--gray)">${escHtml(c.phone || '')} ${hasEmail ? '· ' + escHtml(c.email) : '· <span style="color:#dc3545">χωρίς email</span>'}</div>

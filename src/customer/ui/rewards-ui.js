@@ -163,7 +163,7 @@ export function renderHomeRewards(pts) {
     const rwImgHtml = rwSafeImg
       ? _safeImgTag('rw-img', rwSafeImg, r.icon || '🎟️')
       : `<div class="rw-emoji-only">${esc(r.icon || '🎟️')}</div>`;
-    return `<div class="rw-card ${ok ? 'unlocked' : 'locked'}" ${ok ? `role="button" tabindex="0" onclick="startRedemption('${safeId}','${safeLabel}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();startRedemption('${safeId}','${safeLabel}')}" aria-label="${esc(label)} — ${cost} ${_t('points')}"` : ' aria-disabled="true"'}>
+    return `<div class="rw-card ${ok ? 'unlocked' : 'locked'}" ${ok ? `role="button" tabindex="0" data-action="startRedemption" data-arg="${safeId}" data-arg2="${safeLabel}" data-key-action="startRedemption" data-karg="${safeId}" data-karg2="${safeLabel}" data-key-space="1" aria-label="${esc(label)} — ${cost} ${_t('points')}"` : ' aria-disabled="true"'}>
       <div class="rw-emoji-area">${rwImgHtml}</div>
       <div class="rw-body">
         <div class="rw-pts-badge">${cost} ${_t('points')}</div>
@@ -196,7 +196,7 @@ export function renderRewardsList(pts) {
     const rwfIconHtml = rwfSafeImg
       ? _safeImgTag('rw-full-img', rwfSafeImg, r.icon || '🎟️')
       : esc(r.icon || '🎟️');
-    return `<div class="rw-full-card ${ok ? 'ok' : ''}" ${ok ? `role="button" tabindex="0" onclick="startRedemption('${safeId}','${safeLabel}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();startRedemption('${safeId}','${safeLabel}')}" aria-label="${esc(label)} — ${cost} ${_t('points')}"` : ' aria-disabled="true"'}>
+    return `<div class="rw-full-card ${ok ? 'ok' : ''}" ${ok ? `role="button" tabindex="0" data-action="startRedemption" data-arg="${safeId}" data-arg2="${safeLabel}" data-key-action="startRedemption" data-karg="${safeId}" data-karg2="${safeLabel}" data-key-space="1" aria-label="${esc(label)} — ${cost} ${_t('points')}"` : ' aria-disabled="true"'}>
       <div class="rw-full-icon">${rwfIconHtml}</div>
       <div class="rw-full-body">
         <div class="rw-full-label">${esc(label)}</div>

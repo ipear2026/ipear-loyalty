@@ -13,33 +13,9 @@
 <title>iPear Loyalty — Κατάστημα</title>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx" crossorigin="anonymous"></script>
 <!-- ═══ TELEMETRY: Client-side error reporting to Worker /client-error ═══ -->
-<script>
-(function(){
-  var _W = 'https://email-worker.ipear2026.workers.dev';
-  var _F = false;
-  function _send(payload) {
-    if (_F) return;
-    _F = true;
-    try {
-      var body = JSON.stringify(Object.assign({
-        page: location.pathname,
-        ua: navigator.userAgent,
-        ts: new Date().toISOString(),
-        build: (window.TABLET_BUILD_TAG || window.CUSTOMER_BUILD_TAG || 'unknown')
-      }, payload));
-      if (navigator.sendBeacon) { navigator.sendBeacon(_W + '/client-error', body); }
-      else { fetch(_W + '/client-error', { method:'POST', body:body, headers:{'Content-Type':'application/json'}, keepalive:true }).catch(function(){}); }
-    } catch(_){}
-  }
-  window.onerror = function(msg, src, line, col, err) {
-    _send({ type:'onerror', message:String(msg).slice(0,500), source:(src||'').slice(-120), line:line, col:col, stack:(err&&err.stack||'').slice(0,800) });
-  };
-  window.addEventListener('unhandledrejection', function(ev) {
-    var r = ev.reason;
-    _send({ type:'rejection', message:String(r&&r.message||r||'').slice(0,500), stack:(r&&r.stack||'').slice(0,800) });
-  });
-})();
-</script>
+<!-- Error-telemetry bootstrap — extracted to /tablet-bootstrap.js so the CSP
+     can drop script-src 'unsafe-inline'. Classic script in <head> runs early. -->
+<script src="/tablet-bootstrap.js"></script>
 
 <style>
 @font-face {
@@ -740,12 +716,12 @@ html[data-theme="dark"]{
     </div>
     <input type="email" id="tl-email" class="tl-field" placeholder="Email λογαριασμού tablet"
       autocomplete="email" inputmode="email" aria-label="Email λογαριασμού tablet"
-      onkeydown="if(event.key==='Enter')document.getElementById('tl-pass').focus()">
+      data-enter-focus="tl-pass">
     <input type="password" id="tl-pass" class="tl-field" placeholder="Κωδικός"
       autocomplete="current-password" aria-label="Κωδικός πρόσβασης"
-      onkeydown="if(event.key==='Enter')tabletLogin()">
+      data-key-action="tabletLogin">
     <div id="tl-err" class="tl-err"></div>
-    <button id="tl-btn" class="tl-btn" onclick="tabletLogin()">Είσοδος →</button>
+    <button id="tl-btn" class="tl-btn" data-action="tabletLogin">Είσοδος →</button>
   </div>
 </div>
 
@@ -757,7 +733,7 @@ html[data-theme="dark"]{
   <div class="idle-options">
 
     <!-- ① QR Scan — dark parallelogram, fully clickable -->
-    <div class="idle-opt-wrap clickable" onclick="openQRScanner()" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' ')openQRScanner()">
+    <div class="idle-opt-wrap clickable" data-action="openQRScanner" role="button" tabindex="0" data-key-action="openQRScanner" data-key-space="1">
       <div class="idle-opt idle-opt-dark">
         <div class="idle-opt-icon">
           <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="#0a0a0a">
@@ -786,8 +762,8 @@ html[data-theme="dark"]{
             <span class="idle-opt-pfx">IP-</span>
             <input id="card-input" type="text" class="idle-opt-inp" placeholder="π.χ. 00001" maxlength="10"
               style="text-transform:uppercase" aria-label="Αριθμός κάρτας πελάτη"
-              onkeydown="if(event.key==='Enter')searchByCard()">
-            <button class="idle-opt-sbtn" onclick="searchByCard()">Αναζήτηση →</button>
+              data-key-action="searchByCard">
+            <button class="idle-opt-sbtn" data-action="searchByCard">Αναζήτηση →</button>
           </div>
         </div>
       </div>
@@ -807,8 +783,8 @@ html[data-theme="dark"]{
           <div class="idle-opt-row">
             <input id="sinput" type="text" inputmode="numeric" class="idle-opt-inp" placeholder="π.χ. 6912345678"
               aria-label="Αριθμός Τηλεφώνου"
-              onkeydown="if(event.key==='Enter')doSearch()">
-            <button id="sbtn" class="idle-opt-sbtn" onclick="doSearch()">Αναζήτηση →</button>
+              data-key-action="doSearch">
+            <button id="sbtn" class="idle-opt-sbtn" data-action="doSearch">Αναζήτηση →</button>
           </div>
         </div>
       </div>
@@ -838,8 +814,8 @@ html[data-theme="dark"]{
       <div class="qr-scan-sub">κάρτας πελάτη ή εξαργύρωσης</div>
     </div>
     <div class="qr-action-row">
-      <button class="qr-manual-btn" onclick="switchToManualSearch()">⌨️ Εξαργύρωση με κωδικό</button>
-      <button class="qr-cancel-btn" onclick="closeQRScanner()">✕ Ακύρωση</button>
+      <button class="qr-manual-btn" data-action="switchToManualSearch">⌨️ Εξαργύρωση με κωδικό</button>
+      <button class="qr-cancel-btn" data-action="closeQRScanner">✕ Ακύρωση</button>
     </div>
   </div>
 </div>
@@ -848,7 +824,7 @@ html[data-theme="dark"]{
 <div id="result-screen">
   <div class="result-topbar">
     <div class="brand"><img src="logo.png" alt="iPear" class="logo-img logo-sm"> <span style="color:var(--gray);font-weight:500;font-size:0.9rem;margin-left:6px">Loyalty</span></div>
-    <button class="result-back" onclick="goBack()">← Νέα Αναζήτηση</button>
+    <button class="result-back" data-action="goBack">← Νέα Αναζήτηση</button>
   </div>
 
   <div class="result-content">
@@ -884,7 +860,7 @@ html[data-theme="dark"]{
 
         <!-- Actions -->
         <div style="margin-top:20px">
-          <button class="redeem-btn" onclick="openRedeemPanel()">
+          <button class="redeem-btn" data-action="openRedeemPanel">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             ΕΞΑΡΓΥΡΩΣΗ ΠΟΝΤΩΝ
           </button>
@@ -912,8 +888,8 @@ html[data-theme="dark"]{
     <p id="qrc-pts" style="font-size:.85rem;color:#888;margin-bottom:24px"></p>
     <div id="qrc-error" style="display:none;background:#fff3f3;border:1.5px solid #e53935;border-radius:12px;padding:12px;margin-bottom:8px;font-size:.88rem;color:#c62828;font-weight:600"></div>
     <div style="display:flex;gap:10px">
-      <button onclick="closeQRRedeemConfirm()" style="flex:1;padding:16px;background:#f5f5f5;border:none;border-radius:14px;font-weight:700;font-size:1rem;cursor:pointer;font-family:inherit">Ακύρωση</button>
-      <button id="qrc-confirm-btn" onclick="confirmQRRedeem()" style="flex:2;padding:16px;background:#0a0a0a;color:#8ae900;border:none;border-radius:14px;font-weight:900;font-size:1rem;cursor:pointer;font-family:inherit">✅ Επιβεβαίωση</button>
+      <button data-action="closeQRRedeemConfirm" style="flex:1;padding:16px;background:#f5f5f5;border:none;border-radius:14px;font-weight:700;font-size:1rem;cursor:pointer;font-family:inherit">Ακύρωση</button>
+      <button id="qrc-confirm-btn" data-action="confirmQRRedeem" style="flex:2;padding:16px;background:#0a0a0a;color:#8ae900;border:none;border-radius:14px;font-weight:900;font-size:1rem;cursor:pointer;font-family:inherit">✅ Επιβεβαίωση</button>
     </div>
   </div>
 </div>
@@ -924,7 +900,7 @@ html[data-theme="dark"]{
     <h3 style="font-size:1.2rem;font-weight:800;margin-bottom:6px">💶 Εξαργύρωση</h3>
     <p style="color:#666;font-size:.85rem;margin-bottom:18px">Πελάτης: <strong id="rp-name"></strong> &nbsp;|&nbsp; Διαθέσιμοι: <strong id="rp-pts" style="color:#8ae900"></strong> πόντοι</p>
     <div id="rp-options" style="display:grid;gap:10px;margin-bottom:18px"></div>
-    <button onclick="closeRedeemPanel()" style="width:100%;padding:13px;background:#f5f5f5;border:none;border-radius:12px;font-weight:700;font-size:.95rem;cursor:pointer">Ακύρωση</button>
+    <button data-action="closeRedeemPanel" style="width:100%;padding:13px;background:#f5f5f5;border:none;border-radius:12px;font-weight:700;font-size:.95rem;cursor:pointer">Ακύρωση</button>
   </div>
 </div>
 
@@ -935,23 +911,9 @@ html[data-theme="dark"]{
 </div>
 
 
-<script>
-(function(){
-  var btn=document.getElementById('tl-btn');
-  if(btn){btn.disabled=true;btn.textContent='⏳ Φόρτωση...';}
-  window.addEventListener('vite:preloadError',function(e){e.preventDefault();location.reload();});
-  window.addEventListener('tablet-ready',function(){
-    if(btn){btn.disabled=false;btn.textContent='Είσοδος →';}
-  });
-  setTimeout(function(){
-    if(typeof window.tabletLogin!=='function'){
-      var err=document.getElementById('tl-err');
-      if(err)err.textContent='⚠️ Αργή σύνδεση — επαναφόρτωση...';
-      setTimeout(function(){location.reload();},2000);
-    }
-  },15000);
-})();
-</script>
+<!-- Login boot guard — extracted to /tablet-login-boot.js so the CSP can drop
+     script-src 'unsafe-inline'. Classic script at end of <body> (DOM ready). -->
+<script src="/tablet-login-boot.js"></script>
 <script type="module" src="/src/tablet-main.js"></script>
 </body>
 </html>

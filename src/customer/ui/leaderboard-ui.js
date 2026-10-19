@@ -28,7 +28,7 @@ const LB_WATCHDOG_MS = 10000;
 const _lbEl = () => document.getElementById('lb-container');
 const LB_LOADING_HTML = '<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">⏳</div><div class="empty-state__title">Φόρτωση…</div></div>';
 function _lbRetryHtml(title) {
-  return `<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">${title || 'Δεν φορτώθηκε η κατάταξη'}</div><button type="button" onclick="_retryLeaderboard()" style="margin-top:10px;padding:8px 18px;background:var(--gd,#6bb800);color:#fff;border:none;border-radius:10px;font-family:var(--font);font-size:.8rem;font-weight:800;cursor:pointer">Δοκίμασε ξανά</button></div>`;
+  return `<div class="empty-state empty-state--compact"><div class="empty-state__icon" aria-hidden="true">🏆</div><div class="empty-state__title">${title || 'Δεν φορτώθηκε η κατάταξη'}</div><button type="button" data-action="_retryLeaderboard" style="margin-top:10px;padding:8px 18px;background:var(--gd,#6bb800);color:#fff;border:none;border-radius:10px;font-family:var(--font);font-size:.8rem;font-weight:800;cursor:pointer">Δοκίμασε ξανά</button></div>`;
 }
 function _lbClearWatchdog() { if (_lbWatchdog) { clearTimeout(_lbWatchdog); _lbWatchdog = null; } }
 function _lbArmWatchdog() {
@@ -127,9 +127,9 @@ function _renderLeaderboardData(lb) {
 
   if (top10.length > LB_INIT) {
     if (_lbExpanded) {
-      html += `<button id="lb-more-btn" onclick="_collapseLb()" style="display:block;width:100%;margin-top:8px;padding:10px;background:transparent;border:1.5px solid var(--bd);border-radius:10px;font-family:var(--font);font-size:.78rem;font-weight:700;color:var(--grl);cursor:pointer;transition:border-color .15s,color .15s">Λιγότερα</button>`;
+      html += `<button id="lb-more-btn" data-action="_collapseLb" style="display:block;width:100%;margin-top:8px;padding:10px;background:transparent;border:1.5px solid var(--bd);border-radius:10px;font-family:var(--font);font-size:.78rem;font-weight:700;color:var(--grl);cursor:pointer;transition:border-color .15s,color .15s">Λιγότερα</button>`;
     } else {
-      html += `<button id="lb-more-btn" onclick="_expandLeaderboard()" style="display:block;width:100%;margin-top:8px;padding:10px;background:transparent;border:1.5px solid var(--bd);border-radius:10px;font-family:var(--font);font-size:.78rem;font-weight:700;color:var(--grl);cursor:pointer;transition:border-color .15s,color .15s">Περισσότερα...</button>`;
+      html += `<button id="lb-more-btn" data-action="_expandLeaderboard" style="display:block;width:100%;margin-top:8px;padding:10px;background:transparent;border:1.5px solid var(--bd);border-radius:10px;font-family:var(--font);font-size:.78rem;font-weight:700;color:var(--grl);cursor:pointer;transition:border-color .15s,color .15s">Περισσότερα...</button>`;
     }
   }
 

@@ -13,6 +13,7 @@ import {
 } from './utils.js';
 import { _t } from './i18n.js';
 import { registerServiceWorker } from './sw-registration.js';
+import { installDelegation } from './dom-delegate.js';
 import { pendingBonuses } from './customer/bonus-retry.js';
 import './firebase-init.js';
 import { openMyCoupons } from './customer/ui/coupons-ui.js';
@@ -945,7 +946,7 @@ function _showBirthdayToast() {
         </div>
         <div style="font-size:.78rem;color:#767676;margin-top:3px">bonus πόντοι στον λογαριασμό σου 🍐</div>
       </div>
-      <button onclick="document.getElementById('bday-overlay').remove()" style="
+      <button data-action="_closeOverlay" data-arg="bday-overlay" style="
         width:100%;padding:14px;background:linear-gradient(135deg,#6bb800,#8ae900);
         color:#111111;font-weight:700;font-size:1rem;border:none;border-radius:8px;
         cursor:pointer;letter-spacing:.3px;box-shadow:0 2px 8px rgba(107,184,0,.2);
@@ -1051,12 +1052,12 @@ function _showRewardChannelChoice(spec) {
   ov.style.cssText = 'display:flex;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:16px';
   ov.innerHTML =
     '<div style="background:var(--card,#fff);border-radius:18px;max-width:360px;width:100%;padding:22px;text-align:center;position:relative">' +
-      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove()" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
+      '<button data-action="_closeOverlay" data-arg="reward-channel-overlay" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
       '<div style="font-size:2.4rem;margin-bottom:8px">🎟️</div>' +
       '<div style="font-weight:800;margin-bottom:4px;color:var(--bk,#111)">' + _escRw(spec.label) + '</div>' +
       '<div style="font-size:.82rem;color:var(--grl,#888);margin-bottom:18px">' + _escRw(spec.cost) + ' πόντοι · ' + _escRw(spec.discount) + '€ έκπτωση</div>' +
-      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'instore\')" style="display:block;width:100%;padding:13px;margin-bottom:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">📱 Εξαργύρωση στο κατάστημα</button>' +
-      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'eshop\')" style="display:block;width:100%;padding:13px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">🛒 Κουπόνι e-shop</button>' +
+      '<button data-action="_redeemChannel" data-arg="' + safeId + '" data-arg2="' + jsLabel + '" data-arg3="instore" style="display:block;width:100%;padding:13px;margin-bottom:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">📱 Εξαργύρωση στο κατάστημα</button>' +
+      '<button data-action="_redeemChannel" data-arg="' + safeId + '" data-arg2="' + jsLabel + '" data-arg3="eshop" style="display:block;width:100%;padding:13px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">🛒 Κουπόνι e-shop</button>' +
     '</div>';
   document.body.appendChild(ov);
 }
@@ -1119,7 +1120,7 @@ function _showRewardCouponResult(code, discountLabel, expiresAt, spec, canRedeem
   document.getElementById('reward-coupon-overlay')?.remove();
   const expDate = expiresAt ? new Date(expiresAt).toLocaleDateString('el-GR') : '';
   const againBtn = (canRedeemAgain && spec && spec.rewardId)
-    ? '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove();window.rewardRedeemAgain(\'' + String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '') + '\',\'' + String(spec.label || '').replace(/[\\'"]/g, '') + '\')" style="display:block;width:100%;margin-top:10px;padding:11px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.86rem;cursor:pointer;min-height:44px">🔁 Ξανά εξαργύρωση (' + _escRw(spec.cost) + ' πόντοι)</button>'
+    ? '<button data-action="_redeemAgainClose" data-arg="' + String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '') + '" data-arg2="' + String(spec.label || '').replace(/[\\'"]/g, '') + '" style="display:block;width:100%;margin-top:10px;padding:11px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.86rem;cursor:pointer;min-height:44px">🔁 Ξανά εξαργύρωση (' + _escRw(spec.cost) + ' πόντοι)</button>'
     : '';
   const ov = document.createElement('div');
   ov.id = 'reward-coupon-overlay';
@@ -1127,14 +1128,14 @@ function _showRewardCouponResult(code, discountLabel, expiresAt, spec, canRedeem
   ov.style.cssText = 'display:flex;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:16px';
   ov.innerHTML =
     '<div style="background:var(--card,#fff);border-radius:18px;max-width:360px;width:100%;padding:24px 16px;text-align:center;position:relative">' +
-      '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove()" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
+      '<button data-action="_closeOverlay" data-arg="reward-coupon-overlay" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
       '<div style="font-size:3rem;margin-bottom:12px">🛒</div>' +
       '<div style="font-size:1.1rem;font-weight:800;color:var(--bk,#111);margin-bottom:4px">Το κουπόνι σου είναι έτοιμο!</div>' +
       '<div style="font-size:.82rem;color:var(--grl,#888);margin-bottom:20px">Έκπτωση ' + _escRw(discountLabel) + ' στο e-shop</div>' +
       '<div style="background:linear-gradient(135deg,#f0fff0,#e8ffe8);border:2.5px dashed var(--g,#b7e33b);border-radius:14px;padding:18px;margin-bottom:16px">' +
         '<div id="reward-coupon-code" style="font-size:1.5rem;font-weight:900;letter-spacing:2px;color:var(--gd,#2a7);font-family:monospace">' + _escRw(String(code).toUpperCase()) + '</div>' +
       '</div>' +
-      '<button onclick="(function(){var t=document.getElementById(\'reward-coupon-code\').textContent;if(navigator.clipboard)navigator.clipboard.writeText(t);})()" style="padding:12px 24px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">📋 Αντιγραφή κωδικού</button>' +
+      '<button data-action="_copyRewardCouponCode" style="padding:12px 24px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">📋 Αντιγραφή κωδικού</button>' +
       againBtn +
       '<div style="font-size:.76rem;color:var(--grl,#888);margin-top:10px">' + (expDate ? 'Ισχύει έως ' + _escRw(expDate) : '') + ' · Μόνο για το email σου</div>' +
     '</div>';
@@ -1811,3 +1812,31 @@ window._retryLeaderboard = _retryLeaderboard;
 window._toggleHistory = _toggleHistory;
 window.loadHistoryMore = loadHistoryMore;
 window.generateQR = generateQR;
+
+// Compound handler (was inline `showScreen('s-phone');backToLogin()`).
+window._showPhoneBack = () => { showScreen('s-phone'); backToLogin(); };
+
+// ── CSP-safe wrappers for handlers formerly injected as inline on* strings
+//    inside innerHTML (overlays built in JS). Behavior is unchanged; only the
+//    dispatch path moved from inline attribute → data-action delegation.
+window._closeOverlay = (id) => { document.getElementById(id)?.remove(); };
+window._hideOverlay  = (id) => { const el = document.getElementById(id); if (el) el.style.display = 'none'; };
+window._redeemChannel = (rewardId, label, channel) => {
+  document.getElementById('reward-channel-overlay')?.remove();
+  window.startRedemption(rewardId, label, channel);
+};
+window._redeemAgainClose = (rewardId, label) => {
+  document.getElementById('reward-coupon-overlay')?.remove();
+  window.rewardRedeemAgain(rewardId, label);
+};
+window._copyRewardCouponCode = () => {
+  const t = document.getElementById('reward-coupon-code')?.textContent;
+  if (t && navigator.clipboard) navigator.clipboard.writeText(t);
+};
+
+// ════════════════════════════════════════
+//  CSP-SAFE EVENT DELEGATION
+//  Replaces inline on* handlers (script-src 'unsafe-inline' removal).
+//  Must run after the window.* handlers above are assigned.
+// ════════════════════════════════════════
+installDelegation();

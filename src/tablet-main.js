@@ -19,6 +19,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger } from './logger.js';
 import './firebase-init.js';
+import { installDelegation } from './dom-delegate.js';
 import { tier, _trapFocus, _releaseFocus, escHtml } from './utils.js';
 import {
   createRedemptionRequest,
@@ -668,5 +669,9 @@ window.togglePassVis = (id) => {
   const el = document.getElementById(id); if (!el) return;
   el.type = el.type === 'password' ? 'text' : 'password';
 };
+
+// CSP-safe event delegation — replaces inline on* handlers. Runs after the
+// window.* handlers above are assigned.
+installDelegation();
 
 window.dispatchEvent(new Event('tablet-ready'));

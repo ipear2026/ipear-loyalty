@@ -294,9 +294,9 @@ function _renderHistory(el) {
   const hasMorePages = _historyHasMoreUid || _historyHasMoreEmail;
 
   if (!_histExpanded && hiddenCount > 0) {
-    html += `<button id="hist-more-btn" onclick="_toggleHistory()" class="hist-more-btn">Προβολή ακόμη ${hiddenCount}</button>`;
+    html += `<button id="hist-more-btn" data-action="_toggleHistory" class="hist-more-btn">Προβολή ακόμη ${hiddenCount}</button>`;
   } else if (_histExpanded && hasMorePages) {
-    html += `<button id="hist-more-btn" onclick="loadHistoryMore()" class="hist-more-btn hist-more-btn--paginate">Φόρτωση παλαιότερων ↓</button>`;
+    html += `<button id="hist-more-btn" data-action="loadHistoryMore" class="hist-more-btn hist-more-btn--paginate">Φόρτωση παλαιότερων ↓</button>`;
   }
 
   el.innerHTML = html;

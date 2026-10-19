@@ -58,6 +58,9 @@ function _fmtDate(iso) { try { return iso ? new Date(iso).toLocaleDateString('el
 window._copyMyCoupon = function (code, btn) {
   const c = String(code || '');
   if (!c) return;
+  // Via data-action delegation `this` is the clicked button (no inline `this`
+  // arg). Keep the explicit `btn` param for any direct callers.
+  if (!btn && this && this.nodeType === 1) btn = this;
   const confirm = () => {
     if (!btn) { showToast('Κωδικός: ' + c); return; }
     if (btn._prevHtml == null) btn._prevHtml = btn.innerHTML;
@@ -85,7 +88,7 @@ function _couponCard(d, status) {
          <div style="font-size:1.25rem;font-weight:900;letter-spacing:1.5px;color:var(--gd,#2a7);font-family:monospace">${code}</div>
        </div>
        <div style="display:flex;gap:8px">
-         <button type="button" onclick="window._copyMyCoupon('${code}', this)" style="flex:1;padding:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:10px;font-weight:800;font-size:.84rem;cursor:pointer;min-height:44px">📋 Αντιγραφή</button>
+         <button type="button" data-action="_copyMyCoupon" data-arg="${code}" style="flex:1;padding:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:10px;font-weight:800;font-size:.84rem;cursor:pointer;min-height:44px">📋 Αντιγραφή</button>
          <a href="${ESHOP_URL}" target="_blank" rel="noopener" style="flex:1;padding:10px;background:#111;color:#fff;border-radius:10px;font-weight:800;font-size:.84rem;text-align:center;text-decoration:none;min-height:44px;display:flex;align-items:center;justify-content:center">Χρήση στο ipear.gr →</a>
        </div>`
     : `<div style="font-family:monospace;font-size:.95rem;color:#999;letter-spacing:1px;margin:6px 0;text-decoration:${status === 'used' ? 'line-through' : 'none'}">${code}</div>`;
@@ -112,7 +115,7 @@ export async function openMyCoupons() {
   ov.innerHTML = `
     <div style="max-width:520px;margin:0 auto;padding:18px 16px 48px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-        <button type="button" onclick="document.getElementById('mycoupons-overlay').remove()" aria-label="Κλείσιμο" style="background:none;border:none;font-size:1.6rem;cursor:pointer;color:var(--bk,#111);min-height:44px;min-width:44px">←</button>
+        <button type="button" data-action="_closeOverlay" data-arg="mycoupons-overlay" aria-label="Κλείσιμο" style="background:none;border:none;font-size:1.6rem;cursor:pointer;color:var(--bk,#111);min-height:44px;min-width:44px">←</button>
         <div style="font-size:1.2rem;font-weight:900;color:var(--bk,#111)">🎟️ Τα Κουπόνια Μου</div>
       </div>
       <div id="mycoupons-body"><div style="text-align:center;padding:40px;color:var(--grl,#888)">Φόρτωση…</div></div>

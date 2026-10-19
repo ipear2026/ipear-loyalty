@@ -222,10 +222,8 @@ export function renderAnalytics() {
       .map((r) => {
         const alert = r.pct > threshold && r.revenue > 0;
         const pctColor = alert ? '#e53935' : r.pct > 10 ? '#f57c00' : '#4caf50';
-        return `<tr style="border-bottom:1px solid var(--border);cursor:pointer"
-                  data-action="openDrillDown" data-arg="${escJs(r.id)}"
-                  onmouseover="this.style.background='var(--light)'"
-                  onmouseout="this.style.background=''">
+        return `<tr class="drill-row" style="border-bottom:1px solid var(--border)"
+                  data-action="openDrillDown" data-arg="${escJs(r.id)}">
         <td style="padding:10px 10px">
           <strong>${escHtml(r.name)}</strong>
           <div style="font-size:.74rem;color:var(--gray)">${escHtml(r.card)}</div>

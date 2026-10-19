@@ -35,35 +35,9 @@
 <script src="/vendor/confetti-1.9.3.min.js" defer></script>
 
 <!-- ═══ TELEMETRY: Client-side error reporting to Worker /client-error ═══ -->
-<script>
-(function(){
-  var _W = 'https://email-worker.ipear2026.workers.dev';
-  var _Q = []; var _F = false;
-  function _send(payload) {
-    if (_F) return;
-    _F = true;
-    try {
-      var body = JSON.stringify(Object.assign({
-        page: location.pathname,
-        ua: navigator.userAgent,
-        ts: new Date().toISOString(),
-        build: (window.CUSTOMER_BUILD_TAG || window.TABLET_BUILD_TAG || 'unknown')
-      }, payload));
-      if (navigator.sendBeacon) { navigator.sendBeacon(_W + '/client-error', body); }
-      else { fetch(_W + '/client-error', { method:'POST', body:body, headers:{'Content-Type':'application/json'}, keepalive:true }).catch(function(){}); }
-    } catch(_){}
-  }
-  window.onerror = function(msg, src, line, col, err) {
-    _send({ type:'onerror', message:String(msg).slice(0,500), source:(src||'').slice(-120), line:line, col:col, stack:(err&&err.stack||'').slice(0,800) });
-  };
-  window.addEventListener('unhandledrejection', function(ev) {
-    var r = ev.reason;
-    var m = String(r&&r.message||r||'');
-    if (m.indexOf('messaging/unsupported-browser') !== -1) return;
-    _send({ type:'rejection', message:m.slice(0,500), stack:(r&&r.stack||'').slice(0,800) });
-  });
-})();
-</script>
+<!-- Error-telemetry bootstrap — extracted to /customer-bootstrap.js so the CSP
+     can drop script-src 'unsafe-inline'. Classic script in <head> runs early. -->
+<script src="/customer-bootstrap.js"></script>
 
 <link rel="stylesheet" href="./src/styles/customer.css">
 </head>
@@ -124,7 +98,7 @@
 <!-- REDEMPTION OVERLAY -->
 <div id="redeem-overlay" role="dialog" aria-modal="true" aria-label="Εξαργύρωση πόντων">
   <div class="ro-wrap">
-    <button class="ro-close" onclick="cancelRedemption()" aria-label="Κλείσιμο">×</button>
+    <button class="ro-close" data-action="cancelRedemption" aria-label="Κλείσιμο">×</button>
     <div class="ro-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
     <div class="ro-sub">Loyalty Reward</div>
     <div class="ro-reward" id="ro-reward">5€ Έκπτωση</div>
@@ -151,24 +125,24 @@
     </div>
     <div class="ro-instruction">📲 Δείξε το QR ή τον κωδικό στον υπάλληλο<br>του καταστήματος iPear</div>
 
-    <button class="ro-cancel" onclick="cancelRedemption()">Ακύρωση</button>
+    <button class="ro-cancel" data-action="cancelRedemption">Ακύρωση</button>
   </div>
 </div>
 
 <!-- ── OFFER BOTTOM SHEET ── -->
 <div id="offer-sheet" role="dialog" aria-modal="true" aria-label="Λεπτομέρειες προσφοράς">
-  <div class="os-backdrop" onclick="closeOfferSheet()"></div>
+  <div class="os-backdrop" data-action="closeOfferSheet"></div>
   <div class="os-panel">
     <div class="os-handle"></div>
     <div id="os-img-wrap"></div>
-    <button class="os-close" onclick="closeOfferSheet()" aria-label="Κλείσιμο προσφοράς">✕</button>
+    <button class="os-close" data-action="closeOfferSheet" aria-label="Κλείσιμο προσφοράς">✕</button>
     <div class="os-content">
       <div class="ocf-badge-row" id="os-badges"></div>
       <div class="os-title" id="os-title"></div>
       <div class="os-desc" id="os-desc"></div>
       <div class="os-rules" id="os-rules"></div>
       <div class="os-date" id="os-date"></div>
-      <button class="os-cta" id="os-cta" onclick="offerRedeemStep1()">🎁 Εξαργύρωση</button>
+      <button class="os-cta" id="os-cta" data-action="offerRedeemStep1">🎁 Εξαργύρωση</button>
     </div>
   </div>
 </div>
@@ -180,25 +154,25 @@
     <div class="oc-title">Πώς θέλεις να εξαργυρώσεις;</div>
     <div class="oc-sub">Επίλεξε αν βρίσκεσαι στο κατάστημα ή θέλεις κουπόνι για το e-shop.</div>
     <div class="oc-options">
-      <button class="oc-option" onclick="offerGenerateQR()">
+      <button class="oc-option" data-action="offerGenerateQR">
         <span class="oc-opt-icon">🏪</span>
         <span class="oc-opt-title">Στο κατάστημα</span>
         <span class="oc-opt-desc">QR κωδικός · 10 λεπτά</span>
       </button>
-      <button class="oc-option oc-option-eshop" onclick="offerGenerateEshopCoupon()">
+      <button class="oc-option oc-option-eshop" data-action="offerGenerateEshopCoupon">
         <span class="oc-opt-icon">🛒</span>
         <span class="oc-opt-title">Στο e-shop</span>
         <span class="oc-opt-desc">Κουπόνι έκπτωσης</span>
       </button>
     </div>
-    <button class="oc-btn-cancel-full" onclick="closeOfferConfirm()">Ακύρωση</button>
+    <button class="oc-btn-cancel-full" data-action="closeOfferConfirm">Ακύρωση</button>
   </div>
 </div>
 
 <!-- ── OFFER QR OVERLAY ── -->
 <div id="offer-qr-overlay" role="dialog" aria-modal="true" aria-label="QR κωδικός προσφοράς">
   <div class="ro-wrap">
-    <button class="ro-close" onclick="minimizeOfferQR()" aria-label="Ελαχιστοποίηση">×</button>
+    <button class="ro-close" data-action="minimizeOfferQR" aria-label="Ελαχιστοποίηση">×</button>
     <div class="ro-brand"><img src="logo.png" alt="iPear" class="logo-img logo-lg"></div>
     <div class="oq-title" id="oq-title">Προσφορά</div>
     <div class="oq-sub" id="oq-sub">Δείξε το QR στον υπάλληλο</div>
@@ -219,12 +193,12 @@
     <div class="ro-instruction">📲 Δείξε το QR ή τον κωδικό στον υπάλληλο<br>του καταστήματος iPear</div>
 
     <div class="oq-pagination" id="oq-pagination" style="display:none">
-      <button class="oq-pag-btn" onclick="navigateOfferQR(-1)" aria-label="Προηγούμενη προσφορά">‹</button>
+      <button class="oq-pag-btn" data-action="navigateOfferQR" data-arg="-1" aria-label="Προηγούμενη προσφορά">‹</button>
       <span class="oq-pag-label" id="oq-pag-label">1 / 2</span>
-      <button class="oq-pag-btn" onclick="navigateOfferQR(1)" aria-label="Επόμενη προσφορά">›</button>
+      <button class="oq-pag-btn" data-action="navigateOfferQR" data-arg="1" aria-label="Επόμενη προσφορά">›</button>
     </div>
 
-    <button class="ro-cancel" onclick="cancelOfferQR()">Ακύρωση</button>
+    <button class="ro-cancel" data-action="cancelOfferQR">Ακύρωση</button>
   </div>
 </div>
 
@@ -242,10 +216,10 @@
     <div id="auth-step1">
       <h2>Είσοδος</h2>
       <p>Εισάγετε το email και τον κωδικό σας.</p>
-      <input class="field" type="email" id="phone-in" placeholder="Email" inputmode="email" autocomplete="email" aria-label="Email" onkeydown="if(event.key==='Enter')document.getElementById('auth-pass').focus()">
+      <input class="field" type="email" id="phone-in" placeholder="Email" inputmode="email" autocomplete="email" aria-label="Email" data-enter-focus="auth-pass">
       <div class="field-wrap">
-        <input class="field" type="password" id="auth-pass" placeholder="Κωδικός" autocomplete="current-password" aria-label="Κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" onkeydown="if(event.key==='Enter')submitPhone()">
-        <button type="button" id="pass-eye" onclick="togglePassVis()" aria-label="Εμφάνιση/Απόκρυψη κωδικού" class="field-eye-btn">
+        <input class="field" type="password" id="auth-pass" placeholder="Κωδικός" autocomplete="current-password" aria-label="Κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" data-key-action="submitPhone">
+        <button type="button" id="pass-eye" data-action="togglePassVis" aria-label="Εμφάνιση/Απόκρυψη κωδικού" class="field-eye-btn">
           <svg id="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
       </div>
@@ -258,13 +232,13 @@
         </span>
         <span style="font-size:.85rem;font-weight:600;color:#555">Να με θυμάσαι σε αυτή τη συσκευή</span>
       </label>
-      <button class="btn-main" id="phone-btn" onclick="submitPhone()">Είσοδος →</button>
+      <button class="btn-main" id="phone-btn" data-action="submitPhone">Είσοδος →</button>
       <div class="err-msg" id="phone-err"></div>
-      <button type="button" onclick="openForgotPass()" class="link-btn-secondary">Ξέχασα τον κωδικό μου</button>
+      <button type="button" data-action="openForgotPass" class="link-btn-secondary">Ξέχασα τον κωδικό μου</button>
 
       <div style="border-top:1px solid var(--bd);margin-top:14px;padding-top:14px;text-align:center">
         <span style="font-size:.82rem;color:var(--grl);font-weight:600">Νέος χρήστης;</span>
-        <button type="button" onclick="openRegister()" style="background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;padding:4px 8px;text-decoration:underline">Δημιουργία λογαριασμού →</button>
+        <button type="button" data-action="openRegister" style="background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;padding:4px 8px;text-decoration:underline">Δημιουργία λογαριασμού →</button>
       </div>
     </div>
 
@@ -273,14 +247,14 @@
       <h2>Δημιούργησε Κωδικό</h2>
       <p id="auth-step2-sub">Πρώτη σύνδεση; Ορίσε τον κωδικό σου.</p>
       <div class="field-wrap">
-        <input class="field" type="password" id="auth-newpass1" placeholder="Νέος κωδικός (min 6 χαρακτήρες)" aria-label="Νέος κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" onkeydown="if(event.key==='Enter')document.getElementById('auth-newpass2').focus()">
+        <input class="field" type="password" id="auth-newpass1" placeholder="Νέος κωδικός (min 6 χαρακτήρες)" aria-label="Νέος κωδικός πρόσβασης" style="margin-bottom:0;padding-right:48px;width:100%" data-enter-focus="auth-newpass2">
       </div>
       <div class="field-wrap">
-        <input class="field field--flush" type="password" id="auth-newpass2" placeholder="Επιβεβαίωση κωδικού" aria-label="Επιβεβαίωση νέου κωδικού" onkeydown="if(event.key==='Enter')submitCreatePass()">
+        <input class="field field--flush" type="password" id="auth-newpass2" placeholder="Επιβεβαίωση κωδικού" aria-label="Επιβεβαίωση νέου κωδικού" data-key-action="submitCreatePass">
       </div>
       <div class="err-msg" id="auth-step2-err"></div>
-      <button class="btn-main" onclick="submitCreatePass()">Δημιουργία →</button>
-      <button type="button" onclick="backToLogin()" class="link-btn-secondary">← Πίσω</button>
+      <button class="btn-main" data-action="submitCreatePass">Δημιουργία →</button>
+      <button type="button" data-action="backToLogin" class="link-btn-secondary">← Πίσω</button>
     </div>
   </div>
 </div>
@@ -292,8 +266,8 @@
   <div class="login-box">
     <h2>Ξέχασα τον κωδικό</h2>
     <p>Εισάγετε το email σας και θα σας στείλουμε σύνδεσμο επαναφοράς.</p>
-    <input class="field" type="email" id="forgot-email" placeholder="Email" inputmode="email" autocomplete="email" aria-label="Email λογαριασμού" onkeydown="if(event.key==='Enter')submitForgotPass()">
-    <button class="btn-main" id="forgot-btn" onclick="submitForgotPass()">Αποστολή →</button>
+    <input class="field" type="email" id="forgot-email" placeholder="Email" inputmode="email" autocomplete="email" aria-label="Email λογαριασμού" data-key-action="submitForgotPass">
+    <button class="btn-main" id="forgot-btn" data-action="submitForgotPass">Αποστολή →</button>
     <div class="err-msg" id="forgot-err"></div>
     <div id="forgot-ok" style="display:none;background:var(--gp);border:1px solid var(--g);border-radius:12px;padding:14px;font-size:.85rem;font-weight:600;color:#3a6000;text-align:center;margin-top:8px;line-height:1.7">
       ✅ Το email εστάλη!<br>
@@ -305,7 +279,7 @@
       επέστρεψε στη σύνδεση και απλά πάτα <strong>Είσοδος →</strong><br>
       — το σύστημα θα σε καθοδηγήσει να δημιουργήσεις κωδικό.
     </div>
-    <button type="button" onclick="showScreen('s-phone');backToLogin()" class="link-btn-secondary" style="margin-top:12px">← Επιστροφή στη σύνδεση</button>
+    <button type="button" data-action="_showPhoneBack" class="link-btn-secondary" style="margin-top:12px">← Επιστροφή στη σύνδεση</button>
   </div>
 </div>
 
@@ -316,14 +290,14 @@
   <div class="login-box">
     <h2>Δημιουργία Λογαριασμού</h2>
     <p style="margin-bottom:14px;color:var(--gr)">Εγγράψου δωρεάν και κέρδισε πόντους σε κάθε αγορά!</p>
-    <input class="field" type="text" id="reg-name" placeholder="Ονοματεπώνυμο *" autocomplete="name" aria-label="Ονοματεπώνυμο" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-phone').focus()">
-    <input class="field" type="tel" id="reg-phone" placeholder="Κινητό (π.χ. 6912345678) *" inputmode="numeric" pattern="[0-9]*" maxlength="10" autocomplete="tel" aria-label="Αριθμός κινητού" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-email').focus()">
-    <input class="field" type="email" id="reg-email" placeholder="Email *" inputmode="email" autocomplete="email" aria-label="Διεύθυνση email" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-pass1').focus()">
+    <input class="field" type="text" id="reg-name" placeholder="Ονοματεπώνυμο *" autocomplete="name" aria-label="Ονοματεπώνυμο" aria-required="true" data-enter-focus="reg-phone">
+    <input class="field" type="tel" id="reg-phone" placeholder="Κινητό (π.χ. 6912345678) *" inputmode="numeric" pattern="[0-9]*" maxlength="10" autocomplete="tel" aria-label="Αριθμός κινητού" aria-required="true" data-enter-focus="reg-email">
+    <input class="field" type="email" id="reg-email" placeholder="Email *" inputmode="email" autocomplete="email" aria-label="Διεύθυνση email" aria-required="true" data-enter-focus="reg-pass1">
     <div class="field-wrap">
-      <input class="field field--flush" type="password" id="reg-pass1" placeholder="Κωδικός (min 6 χαρακτήρες) *" autocomplete="new-password" aria-label="Κωδικός πρόσβασης" aria-required="true" onkeydown="if(event.key==='Enter')document.getElementById('reg-pass2').focus()">
+      <input class="field field--flush" type="password" id="reg-pass1" placeholder="Κωδικός (min 6 χαρακτήρες) *" autocomplete="new-password" aria-label="Κωδικός πρόσβασης" aria-required="true" data-enter-focus="reg-pass2">
     </div>
     <div class="field-wrap">
-      <input class="field field--flush" type="password" id="reg-pass2" placeholder="Επιβεβαίωση κωδικού *" autocomplete="new-password" aria-label="Επιβεβαίωση κωδικού" aria-required="true" onkeydown="if(event.key==='Enter')submitRegister()">
+      <input class="field field--flush" type="password" id="reg-pass2" placeholder="Επιβεβαίωση κωδικού *" autocomplete="new-password" aria-label="Επιβεβαίωση κωδικού" aria-required="true" data-key-action="submitRegister">
     </div>
     <div style="margin-bottom:12px">
       <div style="font-size:.78rem;font-weight:700;color:var(--grl);margin-bottom:6px;padding-left:2px">Ημερομηνία Γέννησης (προαιρετικό)</div>
@@ -359,8 +333,8 @@
       </label>
     </div>
     <div class="err-msg" id="reg-err"></div>
-    <button class="btn-main" id="reg-btn" onclick="submitRegister()">Εγγραφή →</button>
-    <button type="button" onclick="showScreen('s-phone')" class="link-btn-secondary">← Πίσω στη σύνδεση</button>
+    <button class="btn-main" id="reg-btn" data-action="submitRegister">Εγγραφή →</button>
+    <button type="button" data-action="showScreen" data-arg="s-phone" class="link-btn-secondary">← Πίσω στη σύνδεση</button>
   </div>
 </div>
 
@@ -374,14 +348,14 @@
       <h2 style="margin:0 0 6px">Επαλήθευση Κινητού</h2>
       <p style="color:var(--grl);font-size:.85rem;margin:0;line-height:1.6">Στείλαμε κωδικό 6 ψηφίων στο<br><strong id="otp-phone-display" style="color:var(--bk);font-size:.95rem"></strong></p>
     </div>
-    <input class="field" type="text" id="otp-input" placeholder="• • • • • •" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" aria-label="Κωδικός επαλήθευσης 6 ψηφίων" style="text-align:center;font-size:1.9rem;letter-spacing:10px;font-weight:900;padding:16px 10px" onkeydown="if(event.key==='Enter')submitOTP()">
+    <input class="field" type="text" id="otp-input" placeholder="• • • • • •" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" aria-label="Κωδικός επαλήθευσης 6 ψηφίων" style="text-align:center;font-size:1.9rem;letter-spacing:10px;font-weight:900;padding:16px 10px" data-key-action="submitOTP">
     <div class="err-msg" id="otp-err"></div>
-    <button class="btn-main" id="otp-btn" onclick="submitOTP()">Επαλήθευση →</button>
+    <button class="btn-main" id="otp-btn" data-action="submitOTP">Επαλήθευση →</button>
     <div style="text-align:center;margin-top:14px;min-height:28px">
       <span id="otp-resend-timer" style="font-size:.82rem;color:var(--grl);font-weight:600"></span>
-      <button id="otp-resend-btn" onclick="resendOTP()" style="display:none;background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;text-decoration:underline;padding:0">🔄 Επανάληψη SMS</button>
+      <button id="otp-resend-btn" data-action="resendOTP" style="display:none;background:none;border:none;color:var(--g);font-family:var(--font);font-size:.82rem;font-weight:800;cursor:pointer;text-decoration:underline;padding:0">🔄 Επανάληψη SMS</button>
     </div>
-    <button type="button" onclick="cancelOTP()" class="link-btn-secondary">← Πίσω στην εγγραφή / Αλλαγή αριθμού</button>
+    <button type="button" data-action="cancelOTP" class="link-btn-secondary">← Πίσω στην εγγραφή / Αλλαγή αριθμού</button>
   </div>
 </div>
 
@@ -391,7 +365,7 @@
 
   <!-- APP HEADER -->
   <header class="app-header">
-    <button class="ah-qr" onclick="switchTab('card')" aria-label="Η κάρτα μου / QR">
+    <button class="ah-qr" data-action="switchTab" data-arg="card" aria-label="Η κάρτα μου / QR">
       <svg viewBox="0 0 24 24" fill="currentColor">
         <path d="M3 3h8v8H3zm2 2v4h4V5z"/>
         <path d="M13 3h8v8h-8zm2 2v4h4V5z"/>
@@ -403,10 +377,10 @@
         <rect x="15.5" y="15.5" width="3" height="3"/>
       </svg>
     </button>
-    <div class="ah-brand" onclick="switchTab('home')" title="Αρχική" role="button" tabindex="0" onkeydown="if(event.key==='Enter')switchTab('home')">
+    <div class="ah-brand" data-action="switchTab" data-arg="home" title="Αρχική" role="button" tabindex="0" data-key-action="switchTab" data-karg="home">
       <img src="logo.png" alt="iPear" class="logo-img logo-sm">
     </div>
-    <div class="ah-pts" onclick="switchTab('home')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')switchTab('home')">
+    <div class="ah-pts" data-action="switchTab" data-arg="home" role="button" tabindex="0" data-key-action="switchTab" data-karg="home">
       <span class="ah-pts-n" id="hdr-pts">—</span>
       <span>πόντοι</span>
     </div>
@@ -440,13 +414,13 @@
 
         <div class="sec-hdr">
           <div class="sec-title">Ανταμοιβές</div>
-          <a class="sec-link" role="button" tabindex="0" onclick="switchTab('rewards')" onkeydown="if(event.key==='Enter')switchTab('rewards')">Όλα →</a>
+          <a class="sec-link" role="button" tabindex="0" data-action="switchTab" data-arg="rewards" data-key-action="switchTab" data-karg="rewards">Όλα →</a>
         </div>
         <div class="rewards-scroll" id="h-rewards-scroll"></div>
 
         <div class="sec-hdr" style="margin-top:20px">
           <div class="sec-title">Ενεργές Προσφορές</div>
-          <a class="sec-link" role="button" tabindex="0" onclick="switchTab('offers')" onkeydown="if(event.key==='Enter')switchTab('offers')">Όλες →</a>
+          <a class="sec-link" role="button" tabindex="0" data-action="switchTab" data-arg="offers" data-key-action="switchTab" data-karg="offers">Όλες →</a>
         </div>
         <div id="h-offers-preview"></div>
 
@@ -515,7 +489,7 @@
           </div>
           <div style="font-size:2rem" id="rw-tier-icon">🥉</div>
         </div>
-        <button type="button" onclick="openMyCoupons()" aria-label="Τα κουπόνια μου" style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;margin-bottom:14px;background:#fff;border:1.5px solid var(--g,#b7e33b);color:var(--bk,#111);border-radius:12px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">🎟️ Τα Κουπόνια Μου</button>
+        <button type="button" data-action="openMyCoupons" aria-label="Τα κουπόνια μου" style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;margin-bottom:14px;background:#fff;border:1.5px solid var(--g,#b7e33b);color:var(--bk,#111);border-radius:12px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">🎟️ Τα Κουπόνια Μου</button>
         <div id="rw-list"></div>
         <div style="background:#f8f8f8;border-radius:8px;padding:14px 16px;font-size:.78rem;color:var(--grl);line-height:1.6;text-align:center;margin-top:4px">
           💡 Η εξαργύρωση γίνεται αποκλειστικά στο κατάστημα iPear.<br>
@@ -559,7 +533,7 @@
           <div class="ref-desc">Μοιράσου τον κωδικό σου και κερδίσετε και οι δύο <strong>100 πόντους</strong> όταν εγγραφεί στο iPear Loyalty!</div>
           <div class="ref-code-box">
             <div class="ref-code-val" id="ref-code">—</div>
-            <button class="ref-copy-btn" onclick="copyReferral()">📋 Αντιγραφή</button>
+            <button class="ref-copy-btn" data-action="copyReferral">📋 Αντιγραφή</button>
           </div>
           <div id="ref-counter" class="ref-counter">
             <div class="ref-counter__lbl">Επιτυχημένες Συστάσεις</div>
@@ -567,7 +541,7 @@
               <span id="ref-count-val" class="ref-counter__val">0</span><span class="ref-counter__cap">/5</span>
             </div>
           </div>
-          <button class="ref-share-btn" onclick="shareReferral()">
+          <button class="ref-share-btn" data-action="shareReferral">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
             Κοινοποίηση στους φίλους σου
           </button>
@@ -648,19 +622,19 @@
         <button class="logout-btn" id="resend-verify-btn"
                 style="color:#0a0a0a;border-color:#8ae900;margin-top:8px;background:#f0ffe0"
                 aria-label="Στείλε ξανά email επαλήθευσης"
-                onclick="resendEmailVerification()">✉️ Στείλε ξανά email επαλήθευσης</button>
+                data-action="resendEmailVerification">✉️ Στείλε ξανά email επαλήθευσης</button>
         <div id="resend-verify-status" role="status" aria-live="polite"
              style="font-size:.82rem;color:#666;text-align:center;margin-top:6px;min-height:1.2em"></div>
 
-        <button class="logout-btn" id="logout-btn" onclick="logout()">Αποσύνδεση</button>
-        <button class="logout-btn" style="color:#ff3b30;border-color:#ff3b30;margin-top:8px" onclick="requestAccountDeletion()">🗑 Διαγραφή Λογαριασμού</button>
+        <button class="logout-btn" id="logout-btn" data-action="logout">Αποσύνδεση</button>
+        <button class="logout-btn" style="color:#ff3b30;border-color:#ff3b30;margin-top:8px" data-action="requestAccountDeletion">🗑 Διαγραφή Λογαριασμού</button>
       </div>
     </div>
 
   </div><!-- /app-body -->
 
   <!-- ACTIVE OFFER FLOATING BAR -->
-  <div id="active-offer-bar" class="active-offer-bar" style="display:none" role="button" tabindex="0" onclick="restoreOfferQR()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();restoreOfferQR()}" aria-label="Δείτε ενεργές προσφορές">
+  <div id="active-offer-bar" class="active-offer-bar" style="display:none" role="button" tabindex="0" data-action="restoreOfferQR" data-key-action="restoreOfferQR" data-key-space="1" aria-label="Δείτε ενεργές προσφορές">
     <div class="aob-left">
       <span class="aob-dot"></span>
       <span class="aob-text">Δείτε ενεργές προσφορές</span>
@@ -674,23 +648,23 @@
 
   <!-- BOTTOM NAV -->
   <nav class="bottom-nav" aria-label="Κύρια πλοήγηση">
-    <button class="bn active" id="nav-home" onclick="switchTab('home')" aria-current="page">
+    <button class="bn active" id="nav-home" data-action="switchTab" data-arg="home" aria-current="page">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
       <span>Αρχική</span>
     </button>
-    <button class="bn" id="nav-card" onclick="switchTab('card')">
+    <button class="bn" id="nav-card" data-action="switchTab" data-arg="card">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z"/></svg>
       <span>Κάρτα</span>
     </button>
-    <button class="bn" id="nav-rewards" onclick="switchTab('rewards')">
+    <button class="bn" id="nav-rewards" data-action="switchTab" data-arg="rewards">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M20 6h-2.18c.07-.44.18-.88.18-1.36C18 2.55 16.45 1 14.55 1c-1.04 0-1.96.5-2.55 1.32L12 3.6l-.45-.28C10.96 2.5 10.04 2 9 2 7.09 2 5.5 3.6 5.5 5.5c0 .5.11.95.18 1.4H2v2h20V6zM4 19c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-9H4v9zm2-7h12v7H6v-7z"/></svg>
       <span>Ανταμοιβές</span>
     </button>
-    <button class="bn" id="nav-offers" onclick="switchTab('offers')">
+    <button class="bn" id="nav-offers" data-action="switchTab" data-arg="offers">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
       <span>Προσφορές</span>
     </button>
-    <button class="bn" id="nav-profile" onclick="switchTab('profile')">
+    <button class="bn" id="nav-profile" data-action="switchTab" data-arg="profile">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
       <span>Προφίλ</span>
     </button>

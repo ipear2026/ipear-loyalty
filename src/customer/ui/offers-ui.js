@@ -156,7 +156,7 @@ function _renderOffersSnap(snap) {
     const imgHtml = safeImg
       ? _safeImgTag('op-img', safeImg, o.emoji)
       : `<div class="op-img-placeholder">${esc(o.emoji)||'🎁'}</div>`;
-    return `<div class="offer-preview" role="button" tabindex="0" onclick="openOfferSheet(${idx})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openOfferSheet(${idx})}" aria-label="${esc(o.title)}">
+    return `<div class="offer-preview" role="button" tabindex="0" data-action="openOfferSheet" data-arg="${idx}" data-key-action="openOfferSheet" data-karg="${idx}" data-key-space="1" aria-label="${esc(o.title)}">
       ${imgHtml}
       <div class="op-bottom">
         <div class="op-title">${esc(o.title)}</div>
@@ -183,7 +183,7 @@ function _renderOffersSnap(snap) {
       : `<div class="ocf-img-placeholder">${esc(o.emoji)||'🎁'}</div>`;
     const _bp = o.bonusPoints || o.pointsCost || 0;
     const ptsBadge = _bp ? `<span class="ocf-badge-pts">+${_bp} πόντοι</span>` : '';
-    return `<div class="offer-card-full" role="button" tabindex="0" onclick="openOfferSheet(${idx})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openOfferSheet(${idx})}" aria-label="${esc(o.title)}">
+    return `<div class="offer-card-full" role="button" tabindex="0" data-action="openOfferSheet" data-arg="${idx}" data-key-action="openOfferSheet" data-karg="${idx}" data-key-space="1" aria-label="${esc(o.title)}">
       ${imgHtml}
       <div class="ocf-body">
         <div class="ocf-badge-row">
@@ -891,7 +891,7 @@ function _showEshopCouponResult(code, discountLabel, expiresAt) {
   const wrap = overlay.querySelector('.ro-wrap');
   const expDate = expiresAt ? new Date(expiresAt).toLocaleDateString('el-GR') : '';
   wrap.innerHTML = `
-    <button class="ro-close" onclick="document.getElementById('offer-qr-overlay').style.display='none'" aria-label="Κλείσιμο">×</button>
+    <button class="ro-close" data-action="_hideOverlay" data-arg="offer-qr-overlay" aria-label="Κλείσιμο">×</button>
     <div style="text-align:center;padding:24px 16px">
       <div style="font-size:3rem;margin-bottom:12px">🛒</div>
       <div style="font-size:1.1rem;font-weight:800;color:var(--bk);margin-bottom:4px">Το κουπόνι σου είναι έτοιμο!</div>
@@ -899,7 +899,7 @@ function _showEshopCouponResult(code, discountLabel, expiresAt) {
       <div style="background:linear-gradient(135deg,#f0fff0,#e8ffe8);border:2.5px dashed var(--g);border-radius:14px;padding:18px;margin-bottom:16px">
         <div style="font-size:1.6rem;font-weight:900;letter-spacing:2px;color:var(--gd);font-family:monospace" id="eshop-coupon-code">${code.toUpperCase()}</div>
       </div>
-      <button onclick="_copyEshopCoupon()" style="padding:12px 24px;background:var(--g);color:#111;border:none;border-radius:12px;font-family:var(--font);font-weight:800;font-size:.9rem;cursor:pointer;margin-bottom:12px;min-height:44px">📋 Αντιγραφή κωδικού</button>
+      <button data-action="_copyEshopCoupon" style="padding:12px 24px;background:var(--g);color:#111;border:none;border-radius:12px;font-family:var(--font);font-weight:800;font-size:.9rem;cursor:pointer;margin-bottom:12px;min-height:44px">📋 Αντιγραφή κωδικού</button>
       <div style="font-size:.76rem;color:var(--grl);margin-top:8px">${expDate ? 'Ισχύει έως ' + expDate : ''} · Μόνο για το email σου</div>
     </div>`;
   overlay.style.display = 'flex';
