@@ -67,3 +67,9 @@ dist/
 
 # Ad-hoc probe / debug scripts (security-probe, legacy-probe, etc.)
 /tmp/
+
+# Temporary App Check test fixtures (contain throwaway .env files)
+.tmp-appcheck-fixture/
+
+# Environment-specific staging config (account/KV ids) — not for the repo
+wrangler.staging.toml

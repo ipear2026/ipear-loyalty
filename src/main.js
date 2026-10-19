@@ -1083,8 +1083,13 @@ async function _redeemRewardEshop(spec, opts) {
     });
     const data = await res.json();
     if (!data.ok) {
-      const m = data.reason || data.error || 'Σφάλμα δημιουργίας κουπονιού';
-      showToast('❌ ' + (data.error === 'insufficient-points' ? 'Δεν φτάνουν οι πόντοι' : m), 'red');
+      // Log the real backend error for debugging; NEVER surface internal
+      // identifiers (e.g. 'endpoint-retired') verbatim in the UI.
+      logger.warn('[reward-eshop] worker error:', data.error || data.reason || '(unknown)');
+      const friendly = data.error === 'insufficient-points'
+        ? 'Δεν φτάνουν οι πόντοι'
+        : 'Η εφαρμογή χρειάζεται ανανέωση. Δοκιμάστε ξανά σε λίγα δευτερόλεπτα.';
+      showToast('❌ ' + friendly, 'red');
       return;
     }
     _showRewardCouponResult(data.code, (Number(data.discountAmount) || spec.discount) + '€', data.expiresAt, spec, data.canRedeemAgain === true);

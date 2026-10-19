@@ -61,7 +61,7 @@ export async function loadDeletionRequests() {
     });
     html += '</div>';
     list.innerHTML = html;
-  } catch(e) { list.innerHTML = '<div style="color:#c62828;padding:14px">❌ Σφάλμα: ' + escHtml(e.message) + '</div>'; }
+  } catch(e) { console.error('[gdpr] load failed:', e); list.innerHTML = '<div style="color:#c62828;padding:14px">❌ Σφάλμα: ' + friendlyError(e) + '</div>'; }
 }
 
 export async function gdprDeleteCustomer(docId, _name) {

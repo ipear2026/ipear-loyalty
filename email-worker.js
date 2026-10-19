@@ -3196,7 +3196,11 @@ async function createJWT(clientEmail, privateKeyPem, scope) {
 // ── OAuth2 token with Identity Toolkit scope (for Auth Admin) ──────────────
 async function getAuthAccessToken(clientEmail, privateKeyPem) {
   const jwt = await createJWT(clientEmail, privateKeyPem,
-    'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/identitytoolkit https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/datastore');
+    // Phase 7 least-privilege: scopes match the EXACT Google APIs this Worker
+    // calls — Identity Toolkit (Auth Admin) + Firestore. Dropped cloud-platform
+    // and firebase.messaging (the Worker makes zero FCM calls; re-add the scope
+    // and the ipear_worker_fcm role binding if push notifications return).
+    'https://www.googleapis.com/auth/identitytoolkit https://www.googleapis.com/auth/datastore');
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method:  'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },

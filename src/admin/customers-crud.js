@@ -636,7 +636,7 @@ export async function loadAll() {
     // ── Auto-publish leaderboard for customer app ──
     _publishLeaderboard(snap);
 
-  } catch(e) { tb.innerHTML='<tr><td colspan="6">❌ '+escHtml(e.message)+'</td></tr>'; }
+  } catch(e) { logger.warn('[customers] load failed:', e); tb.innerHTML='<tr><td colspan="6">❌ '+friendlyError(e)+'</td></tr>'; }
 }
 
 function _renderCustRows(rows) {

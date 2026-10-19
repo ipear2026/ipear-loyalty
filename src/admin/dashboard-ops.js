@@ -216,7 +216,8 @@ export async function loadTx() {
     });
     el.innerHTML=html;
   } catch(e) {
-    el.innerHTML='<div class="empty">❌ '+escHtml(e.message)+'</div>';
+    logger.warn('[dashboard-ops] load failed:', e);
+    el.innerHTML='<div class="empty">❌ '+friendlyError(e)+'</div>';
   } finally {
     _historyBusy = false;
     if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.innerHTML = refreshBtn.dataset._origText || '🔄 Ανανέωση'; }

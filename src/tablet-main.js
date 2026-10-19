@@ -326,7 +326,7 @@ function _tierIcon(tier) {
 }
 function _tierName(tier) {
   const map = { platinum: 'Platinum', diamond: 'Diamond', gold: 'Gold', silver: 'Silver', bronze: 'Bronze' };
-  return map[tier] || 'Bronze';
+  return map[tier] || '—';
 }
 
 function _showResult() {

@@ -1,6 +1,6 @@
 import { getDb, collection, getDocs } from '../services/firebase.js';
 import { friendlyError } from '../utils.js';
-import { tier, escHtml } from '../utils.js';
+import { tier } from '../utils.js';
 import { toast } from './ui.js';
 import { getWorkerSecret } from './worker-secret.js';
 // ADMIN FORTRESS Stage 3B — owner-auth path (flag ON), no master secret.
@@ -30,7 +30,8 @@ export async function previewSmsBulk() {
     const cost = (count * SMS_COST_PER_MSG).toFixed(2);
     est.innerHTML = `<strong>📱 ${count} παραλήπτες</strong> — Εκτιμώμενο κόστος: <strong style="font-size:1.1rem">€${cost}</strong><br><span style="font-size:.76rem;color:#999">Τιμή: €${SMS_COST_PER_MSG}/SMS × ${count} = €${cost}</span>`;
   } catch (e) {
-    est.innerHTML = '❌ ' + escHtml(e.message);
+    console.error('[bulk-sms estimate] failed:', e);
+    est.innerHTML = '❌ ' + friendlyError(e);
   }
 }
 
@@ -69,7 +70,8 @@ export async function previewEmailBulk() {
       + `<br><span style="font-size:.76rem;color:#999">Free Plan: ${freeLimit}/ημέρα — ${overFree ? 'Χρειάζεσαι Starter Plan (€19/μο) για ' + count + ' emails' : count + '/' + freeLimit + ' διαθέσιμα σήμερα'}</span>`
       + consentNote;
   } catch (e) {
-    est.innerHTML = '❌ ' + escHtml(e.message);
+    console.error('[bulk-sms estimate] failed:', e);
+    est.innerHTML = '❌ ' + friendlyError(e);
   }
 }
 
@@ -178,7 +180,8 @@ export async function sendSMSBulk() {
     toast(`✅ SMS εστάλη σε ${data.sent} πελάτες!`, 'success');
   } catch (e) {
     prog.style.display = 'none';
-    res.innerHTML = `<div style="background:#fff3f3;border:1px solid #e53935;border-radius:10px;padding:14px;color:#c62828;font-size:.85rem">❌ Σφάλμα: ${escHtml(e.message)}</div>`;
+    console.error('[bulk-sms send] failed:', e);
+    res.innerHTML = `<div style="background:#fff3f3;border:1px solid #e53935;border-radius:10px;padding:14px;color:#c62828;font-size:.85rem">❌ Σφάλμα: ${friendlyError(e)}</div>`;
     toast('❌ ' + friendlyError(e), 'error');
   } finally {
     btn.disabled = false;

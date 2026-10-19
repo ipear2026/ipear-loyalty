@@ -15,7 +15,7 @@
 //   • getScope          — read admin-main's selected customer (cdata) + msgCh
 //   • getWorkerSecret   — read the session-scoped admin worker secret
 // ═══════════════════════════════════════════════════════════════════════════
-import { tier } from '../utils.js';
+import { tier, friendlyError } from '../utils.js';
 import { toast, closeM } from './ui.js';
 // ADMIN FORTRESS Stage 3B — owner-auth path (flag ON), no master secret.
 import { isOwnerAuthEnabled, ownerSendSms, ownerSendEmail } from './owner-api.js';
@@ -150,7 +150,8 @@ export async function sendSMSIndividual() {
     toast(`✅ SMS εστάλη στον/στην ${cdata.name}!`, 'success');
     closeM();
   } catch(e) {
-    err.textContent = '❌ ' + (e.message || 'Σφάλμα αποστολής');
+    console.error('[messaging] send failed:', e);
+    err.textContent = '❌ ' + friendlyError(e);
   } finally {
     btn.disabled = false; btn.textContent = '📤 Αποστολή SMS';
     _smsSendBusy = false;
@@ -216,7 +217,8 @@ export async function sendEmailIndividual() {
     toast(`✅ Email εστάλη στον/στην ${cdata.name}!`, 'success');
     closeM();
   } catch(e) {
-    err.textContent = '❌ ' + (e.message || 'Σφάλμα αποστολής');
+    console.error('[messaging] send failed:', e);
+    err.textContent = '❌ ' + friendlyError(e);
     btn.disabled = false; btn.textContent = '📤 Αποστολή';
   }
   finally { _sendEmailIndBusy = false; }

@@ -131,7 +131,8 @@ export async function loadRewards() {
     });
     el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = '<div class="empty">❌ ' + escHtml(e.message) + '</div>';
+    console.error('[rewards-admin] load failed:', e);
+    el.innerHTML = '<div class="empty">❌ ' + friendlyError(e) + '</div>';
   }
 }
 

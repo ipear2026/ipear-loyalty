@@ -136,7 +136,8 @@ export async function scanOrphans() {
     }
     el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = '<div style="color:#e53935;padding:10px">❌ ' + escHtml(e.message) + '</div>';
+    console.error('[system-health] render failed:', e);
+    el.innerHTML = '<div style="color:#e53935;padding:10px">❌ ' + friendlyError(e) + '</div>';
   }
 }
 

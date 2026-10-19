@@ -869,7 +869,13 @@ export async function offerGenerateEshopCoupon() {
     });
     const data = await res.json();
     if (!data.ok) {
-      showToast('❌ ' + (data.error || 'Σφάλμα δημιουργίας κουπονιού'), 'error');
+      // Log the real backend error for debugging; NEVER surface internal
+      // identifiers (e.g. 'endpoint-retired') verbatim in the UI.
+      logger.warn('[offer-eshop] worker error:', data.error || data.reason || '(unknown)');
+      const friendly = data.error === 'insufficient-points'
+        ? 'Δεν φτάνουν οι πόντοι'
+        : 'Η εφαρμογή χρειάζεται ανανέωση. Δοκιμάστε ξανά σε λίγα δευτερόλεπτα.';
+      showToast('❌ ' + friendly, 'error');
       return;
     }
     const label = discType === 'percent' ? (discAmt + '%') : (discAmt + '€');

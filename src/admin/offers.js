@@ -66,7 +66,8 @@ export async function loadOffers() {
     });
     el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = '<div class="empty">❌ ' + escHtml(e.message) + '</div>';
+    console.error('[offers] load failed:', e);
+    el.innerHTML = '<div class="empty">❌ ' + friendlyError(e) + '</div>';
   }
 }
 
