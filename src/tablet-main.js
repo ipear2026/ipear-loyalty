@@ -1,335 +1,174 @@
+// ═══════════════════════════════════════════════════════════════════════════
+//  iPear Loyalty — Tablet / Store POS  ·  L2.3A rewrite (2026-08-31)
+//
+//  What changed from the pre-L2.3A tablet:
+//    • NO direct customer/redemption/audit Firestore access. Every read of
+//      customer data goes through the `lookupCustomerForTablet` callable
+//      and returns ONLY the masked projection.
+//    • NO direct writes to customer.points, ipear_redemptions.used,
+//      ipear_offer_redemptions, ipear_transactions, or audit_logs.
+//    • Scan / manual lookup → `createRedemptionRequest(code)` callable.
+//    • Subscribes with `onSnapshot` to ONLY the returned requestId
+//      (rules deny reads of other tablets' or stores' requests).
+//    • Live status UI: pending / approved / rejected / expired.
+//    • Auth: only `role: 'tablet'` custom claim with a `storeId`. A stale
+//      admin/legacy-doc login is refused with a clear error.
+//    • Admin routes are refused — tablet role claim is not admin.
+//
+//  DOM ids are those already in tablet.html (2026-06 layout).
+// ═══════════════════════════════════════════════════════════════════════════
 import { logger } from './logger.js';
-// ═══════════════════════════════════════════════════════════════════════════
-//  iPear Loyalty — Tablet / Store POS (ES Module Entry Point)
-//  Shared core: firebase-init.js (Firebase refs), utils.js (tier, _parseExpiryMs, focus trap)
-// ═══════════════════════════════════════════════════════════════════════════
 import './firebase-init.js';
-import { tier, _parseExpiryMs, _trapFocus, _releaseFocus, escHtml, tierFloor } from './utils.js';
+import { tier, _trapFocus, _releaseFocus, escHtml } from './utils.js';
+import {
+  createRedemptionRequest,
+  lookupCustomerForTablet,
+  subscribeToRequest,
+  lookupCustomerByCardQr,
+  createRedemptionRequestFromCard,
+} from './tablet/approval-flow.js';
 
-const TABLET_BUILD_TAG = 'tablet-20260611-a11y2';
+const _CARD_QR_RE = /^IP-[A-Z0-9]{6}$/;
+
+const TABLET_BUILD_TAG = 'tablet-l23a-20260831';
 window.TABLET_BUILD_TAG = TABLET_BUILD_TAG;
 logger.log('tablet.html loaded', TABLET_BUILD_TAG);
 
-// ── Tablet auth wrappers (production — using Firebase refs from firebase-init.js) ──
-if (!window.DEMO) {
-  window._tabletSignIn = async (email, pass) => {
-    const cred = await window._signIn(window._auth, email, pass);
-    return cred.user;
-  };
-  window._tabletSignOut = window._signOut;
-}
+window._tabletSignIn = async (email, pass) => {
+  const cred = await window._signIn(window._auth, email, pass);
+  return cred.user;
+};
+window._tabletSignOut = window._signOut;
 
-// ── Tablet demo mode overrides ──
-if (window.DEMO) {
-  const _DC = [
-    {id:'dc1',name:'Νότης Μπουντούρης',phone:'6912345678',card:'IP-00001',points:750,totalPoints:1850,createdAt:new Date(Date.now()-90*864e5).toISOString()},
-    {id:'dc2',name:'Μαρία Κωνσταντίνου',phone:'6923456789',card:'IP-00002',points:2200,totalPoints:3800,createdAt:new Date(Date.now()-180*864e5).toISOString()},
-    {id:'dc3',name:'Νίκος Αντωνίου',phone:'6934567890',card:'IP-00003',points:4500,totalPoints:7200,createdAt:new Date(Date.now()-365*864e5).toISOString()},
-  ];
-  const snap=a=>({empty:!a.length,size:a.length,forEach:cb=>a.forEach(d=>cb({id:d.id,data:()=>({...d})}))});
-  window._db={};
-  window._col=(db,n)=>({_n:n});
-  window._getDocs=async(ref)=>{
-    const n=ref._n||(ref._ref&&ref._ref._n);
-    const args=ref._args||[];
-    let data=n==='ipear_customers'?[..._DC]:n==='ipear_redemptions'?JSON.parse(localStorage.getItem('_ipear_codes')||'[]'):[];
-    for(const a of args){
-      if(a._t==='w'&&a.op==='==') data=data.filter(d=>String(d[a.f])===String(a.v));
-    }
-    return snap(data);
-  };
-  window._query=(ref,...a)=>({_ref:ref,_args:a});
-  window._where=(f,op,v)=>({_t:'w',f,op,v});
-  window._addDoc=async(_ref,_data)=>{const id='d'+Date.now();return{id};};
-  window._updateDoc=async(ref,data)=>{if(!ref||!ref._col)return;const arr=ref._col==='ipear_customers'?_DC:ref._col==='ipear_redemptions'?JSON.parse(localStorage.getItem('_ipear_codes')||'[]'):[];const i=arr.findIndex(d=>d.id===ref._id);if(i>=0){Object.assign(arr[i],data);if(ref._col==='ipear_redemptions')localStorage.setItem('_ipear_codes',JSON.stringify(arr));}};
-  window._doc=(db,col,id)=>({_col:col,_id:id});
-  window._tabletSignIn = async(email,pass)=>{
-    if(email==='tablet@ipear.gr'&&pass==='tablet1234') return {uid:'demo-tablet'};
-    throw{code:'auth/wrong-password'};
-  };
-  window._tabletSignOut = async()=>{};
-  const _DEMO_STORES  = { 'store-demo': { name: 'iPear Demo', city: 'Demo' } };
-  const _DEMO_ADMINS  = { 'demo-tablet': { storeid: 'store-demo' } };
-  window._getDoc = async(ref)=>{
-    if(!ref||!ref._col)return{exists:()=>false,data:()=>({})};
-    if(ref._col==='ipear_admins'){ const d=_DEMO_ADMINS[ref._id]; return {exists:()=>!!d,data:()=>d?{...d}:undefined,id:ref._id}; }
-    if(ref._col==='ipear_stores'){ const d=_DEMO_STORES[ref._id]; return {exists:()=>!!d,data:()=>d?{...d}:undefined,id:ref._id}; }
-    const arr=ref._col==='ipear_customers'?_DC:JSON.parse(localStorage.getItem('_ipear_codes')||'[]');
-    const item=arr.find(d=>d.id===ref._id);
-    return item?{exists:()=>true,data:()=>({...item}),id:item.id}:{exists:()=>false};
-  };
-  window._runTransaction = async (db, fn) => {
-    const writes = [];
-    const txn = {
-      get: (ref) => window._getDoc(ref),
-      update: (ref, data) => { writes.push(() => window._updateDoc(ref, data)); },
-      set:    (ref, data) => { writes.push(() => window._setDoc  (ref, data)); },
-    };
-    const result = await fn(txn);
-    for (const w of writes) await w();
-    return result;
-  };
-  window._onSnapshot = (_ref, _cb) => { return ()=>{}; };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  TABLET APPLICATION CODE
-// ═══════════════════════════════════════════════════════════════════════════
-// ── Audio Feedback ──
+// ── Audio ──────────────────────────────────────────────────────────────────
 const _sndSuccess = new Audio('snd-success.mp3');
-const _sndError   = new Audio('snd-error.mp3');
-_sndSuccess.volume = 0.5; _sndSuccess.preload = 'auto';
-_sndError.volume   = 0.5; _sndError.preload   = 'auto';
+const _sndError = new Audio('snd-error.mp3');
+_sndSuccess.volume = 0.5; _sndError.volume = 0.5;
 let _sndUnlocked = false;
 function _unlockSndOnGesture() {
   if (_sndUnlocked) return;
   _sndUnlocked = true;
   _sndSuccess.muted = true; _sndError.muted = true;
-  const p1 = _sndSuccess.play().catch(()=>{});
-  const p2 = _sndError.play().catch(()=>{});
-  Promise.all([p1, p2]).then(() => {
+  Promise.all([
+    _sndSuccess.play().catch(() => {}),
+    _sndError.play().catch(() => {}),
+  ]).then(() => {
     _sndSuccess.pause(); _sndSuccess.currentTime = 0; _sndSuccess.muted = false;
-    _sndError.pause();   _sndError.currentTime = 0;   _sndError.muted = false;
-  }).catch(()=>{ _sndSuccess.muted = false; _sndError.muted = false; });
+    _sndError.pause(); _sndError.currentTime = 0; _sndError.muted = false;
+  }).catch(() => { _sndSuccess.muted = false; _sndError.muted = false; });
   document.removeEventListener('touchstart', _unlockSndOnGesture);
   document.removeEventListener('click', _unlockSndOnGesture);
 }
 document.addEventListener('touchstart', _unlockSndOnGesture, { passive: true });
 document.addEventListener('click', _unlockSndOnGesture);
+function _playSuccess() { try { _sndSuccess.currentTime = 0; _sndSuccess.play().catch(() => {}); } catch (_) {} }
+function _playError() { try { _sndError.currentTime = 0; _sndError.play().catch(() => {}); } catch (_) {} }
 
-function _playSuccess() {
-  try { _sndSuccess.currentTime = 0; _sndSuccess.play().catch(()=>{}); } catch(_) {}
+function _showToast(msg) {
+  const old = document.getElementById('tablet-toast'); if (old) old.remove();
+  const el = document.createElement('div');
+  el.id = 'tablet-toast';
+  el.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#111;color:#fff;padding:14px 22px;border-radius:8px;font-weight:700;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.2);max-width:80vw;text-align:center';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
 }
-function _playError() {
-  try { _sndError.currentTime = 0; _sndError.play().catch(()=>{}); } catch(_) {}
-}
 
-// ══════════════════════════════════════
-//  TABLET LOGIN
-// ══════════════════════════════════════
-// firebase-init.js already executed (imported above) — run directly
-if (window.DEMO) document.getElementById('tl-demo').style.display = 'block';
-let _maintenanceMode = false;
-let _maintenanceUnsub = null;
-_startMaintenanceListener();
-
-// ── Reward catalog (admin-managed via ipear_rewards) ────────────────────
-// The tablet reads the catalog once on bootstrap + on each customer
-// lookup refresh; full live snapshot isn't worth the listener cost for a
-// kiosk that's only used in-store. Fallback ladder mirrors the customer-app
-// fallback so a brand-new install (empty collection) still works.
-const _TABLET_REWARDS_FALLBACK = [
-  { id: 'fallback-1000', cost: 1000, discount: 5,  title: '5€ Έκπτωση'  },
-  { id: 'fallback-2500', cost: 2500, discount: 15, title: '15€ Έκπτωση' },
-  { id: 'fallback-4000', cost: 4000, discount: 30, title: '30€ Έκπτωση' },
-];
-let _tabletRewards = _TABLET_REWARDS_FALLBACK.slice();
-
-async function _loadTabletRewards() {
-  if (window.DEMO) { _tabletRewards = _TABLET_REWARDS_FALLBACK.slice(); return; }
-  // Bail out if not authenticated yet. The Firestore rule for ipear_rewards
-  // requires isAuth(), so an unauthenticated call at bootstrap throws
-  // permission-denied. The catch below swallows it, but the unhandled
-  // rejection flashes in the console + can confuse downstream listeners
-  // that watch onAuthStateChanged. Re-invoked from _completeTabletAuth().
-  if (!window._auth?.currentUser) return;
-  try {
-    const snap = await window._getDocs(
-      window._query(window._col(window._db, 'ipear_rewards'), window._where('isActive', '==', true))
-    );
-    const rows = [];
-    snap.forEach((d) => {
-      const data = d.data ? d.data() : d;
-      rows.push({ id: d.id || data.id, ...data });
-    });
-    rows.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
-    _tabletRewards = rows.length ? rows : _TABLET_REWARDS_FALLBACK.slice();
-  } catch (e) {
-    logger.warn('[tablet rewards] load failed:', e?.message || e);
-    _tabletRewards = _TABLET_REWARDS_FALLBACK.slice();
-  }
-}
-// Don't auto-fire on module load — defer until _completeTabletAuth runs so
-// the call has an authenticated session. Otherwise: permission-denied at
-// bootstrap.
-
-// ── Brute-force protection ─────────────────────────────────────────────────
-let _tlAttempts = 0, _tlLockedUntil = 0;
-const _TL_MAX = 5, _TL_LOCK = 60; // 5 tries → 60 s lockout
-let _tabletStoreId = null, _tabletStoreName = '—';
+// ── Tablet auth state (module-scoped, never in localStorage) ───────────────
 let _tabletActorUid = null;
-let _tabletActorEmail = null;
-let _redeemSessionId = sessionStorage.getItem('ipear_redeem_session_id') || '';
-if (!_redeemSessionId) {
-  const rnd = new Uint32Array(1); crypto.getRandomValues(rnd);
-  _redeemSessionId = 'tab-' + Date.now() + '-' + rnd[0].toString(16);
-  sessionStorage.setItem('ipear_redeem_session_id', _redeemSessionId);
-}
+let _tabletStoreId = null;
+let _tabletStoreName = '—';
 
-async function _workerRedeemGuard(action, extra = {}) {
-  const workerUrl = (localStorage.getItem('ipear_worker_url') || '').replace(/\/$/, '');
-  const workerSec = sessionStorage.getItem('ipear_worker_secret') || '';
-  if (!workerUrl || !workerSec) return { ok: true, skipped: true };
-  const res = await fetch(workerUrl + '/admin/redeem-attempt', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + workerSec
-    },
-    body: JSON.stringify({
-      source: 'tablet',
-      action,
-      sessionId: _redeemSessionId,
-      actorUid: _tabletActorUid || '',
-      ...extra
-    })
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 429) {
-    throw new Error(data?.error || 'Πάρα πολλές αποτυχημένες προσπάθειες. Περίμενε 1 λεπτό.');
-  }
-  if (!res.ok) {
-    throw new Error(data?.error || 'Worker guard error');
-  }
-  return data;
-}
-
-// Shared post-auth bootstrap. Used by manual tabletLogin() AND by silent
-// _tryTabletAutoRestore() when Firebase Auth carries a live session forward.
 async function _completeTabletAuth(user) {
-  _tabletActorUid = user?.uid || null;
-  _tabletActorEmail = user?.email || null;
-  _tabletStoreId = null; _tabletStoreName = '—';
-
-  // Tri-path admin gate — mirrors isAdmin() in firestore.rules:
-  //   (a) custom claim admin == true (set by syncAdminClaim cloud func)
-  //   (b) ipear_admins/{uid} doc exists (legacy whitelist, transitional)
-  //   (c) email allow-list rescue (admin@ipear.gr / tablet@ipear.gr /
-  //       ipear2026@gmail.com) — requires verified email.
-  // Without this, if the ipear_admins doc gets lost (as documented in
-  // firestore.rules:74) the tablet login throws "not-admin" even though
-  // the rules engine WOULD accept the user via path (a) or (c) for every
-  // subsequent read. That mismatch is exactly the 2026-06-22 outage class.
-  const TABLET_EMAIL_ALLOWLIST = ['admin@ipear.gr', 'tablet@ipear.gr', 'ipear2026@gmail.com'];
-  let isAdmin = false;
-  let adminDoc = null;
+  const tok = await user.getIdTokenResult(true);
+  const claims = tok?.claims || {};
+  if (claims.role !== 'tablet' || typeof claims.storeId !== 'string' || !claims.storeId) {
+    throw new Error('not-tablet');
+  }
+  _tabletActorUid = user.uid;
+  _tabletStoreId = claims.storeId;
   try {
-    const adminSnap = await window._getDoc(window._doc(window._db, 'ipear_admins', user.uid));
-    if (adminSnap.exists()) { isAdmin = true; adminDoc = adminSnap.data(); }
-  } catch (e) {
-    logger.warn('[tablet] ipear_admins read failed:', e?.code || e?.message);
-  }
-  if (!isAdmin) {
-    try {
-      const tok = await user.getIdTokenResult(true);
-      if (tok?.claims?.admin === true) isAdmin = true;
-    } catch (e) {
-      logger.warn('[tablet] getIdTokenResult failed:', e?.message);
-    }
-  }
-  if (!isAdmin && user.emailVerified === true && TABLET_EMAIL_ALLOWLIST.includes((user.email || '').toLowerCase())) {
-    logger.warn('[tablet] admin via email allow-list rescue path — recreate ipear_admins/' + user.uid + ' ASAP');
-    isAdmin = true;
-  }
-  if (!isAdmin) throw new Error('not-admin');
-
-  _tabletStoreId = adminDoc?.storeid || null;
-  if (_tabletStoreId) {
-    try {
-      const storeSnap = await window._getDoc(window._doc(window._db, 'ipear_stores', _tabletStoreId));
-      if (storeSnap.exists()) _tabletStoreName = storeSnap.data().name || '—';
-    } catch(_) {}
-  }
-
+    const snap = await window._getDoc(window._doc(window._db, 'ipear_stores', _tabletStoreId));
+    if (snap.exists()) _tabletStoreName = snap.data().name || '—';
+  } catch (_) {}
+  _paintStoreBadge();
   document.getElementById('tablet-login').style.display = 'none';
   const passEl = document.getElementById('tl-pass'); if (passEl) passEl.value = '';
-  _startMaintenanceListener();
-  _startPendingOfferListener();
-  // Now that we have an authenticated admin context, load the reward catalog.
-  // Was previously fired at module load and hit permission-denied because no
-  // session existed before login.
-  _loadTabletRewards().catch(() => {});
 }
 
-// Silent auto-restore: skip the tablet-login screen if Firebase Auth has a
-// live session in this tab. Falls back to the login screen on any error.
-let _tabletAutoRestoreAttempted = false;
-async function _tryTabletAutoRestore() {
-  if (_tabletAutoRestoreAttempted) return;
-  _tabletAutoRestoreAttempted = true;
-  const user = window._auth?.currentUser;
-  if (!user) return;
-  logger.log('%c[TABLET] 🔓 auto-restoring from Firebase session: ' + user.email, 'color:#00cc00;font-weight:bold;font-size:14px');
-  try { await _completeTabletAuth(user); }
-  catch(e) { logger.warn('[TABLET] auto-restore failed:', e.message); /* login screen stays visible */ }
+function _paintStoreBadge() {
+  const ids = ['store-badge', 'r-store', 'tablet-store-name'];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = 'Tablet — ' + _tabletStoreName; el.style.display = 'inline-block'; }
+  }
+  const hdr = document.querySelector('.tablet-hdr-store');
+  if (hdr) hdr.textContent = 'Tablet — ' + _tabletStoreName;
 }
 
-if (window._firebaseReady) _tryTabletAutoRestore();
-else window.addEventListener('firebase-ready', _tryTabletAutoRestore);
+let _tlAttempts = 0, _tlLockedUntil = 0;
+const _TL_MAX = 5, _TL_LOCK = 60;
 
 async function tabletLogin() {
   const err = document.getElementById('tl-err');
   const btn = document.getElementById('tl-btn');
-
   if (Date.now() < _tlLockedUntil) {
     const sec = Math.ceil((_tlLockedUntil - Date.now()) / 1000);
-    err.textContent = `🔒 Κλείδωμα — περίμενε ${sec} δευτερόλεπτα.`;
-    return;
+    err.textContent = `🔒 Κλείδωμα — περίμενε ${sec} δευτερόλεπτα.`; return;
   }
-
   const email = document.getElementById('tl-email').value.trim().toLowerCase();
-  const pass  = document.getElementById('tl-pass').value;
+  const pass = document.getElementById('tl-pass').value;
   err.textContent = '';
   if (!email || !pass) { err.textContent = '⚠️ Συμπληρώστε email και κωδικό.'; return; }
-
   btn.disabled = true; btn.textContent = '⏳ Σύνδεση...';
   try {
     const user = await window._tabletSignIn(email, pass);
     _tlAttempts = 0;
     await _completeTabletAuth(user);
-  } catch(e) {
-    if (e.message === 'not-admin') {
-      err.textContent = '❌ Αυτός ο λογαριασμός δεν είναι tablet admin. Βεβαιώσου ότι το uid είναι στο ipear_admins.';
-      btn.disabled = false; btn.textContent = 'Είσοδος →';
-      return;
-    }
-    _tlAttempts++;
-    if (_tlAttempts >= _TL_MAX) {
-      _tlLockedUntil = Date.now() + _TL_LOCK * 1000;
-      _tlAttempts    = 0;
-      err.textContent = `🔒 Κλείδωμα ${_TL_LOCK} δευτερολέπτων μετά από πολλές αποτυχίες.`;
+  } catch (e) {
+    if (e.message === 'not-tablet') {
+      err.textContent = '❌ Ο λογαριασμός δεν έχει tablet role/storeId claim. Επικοινώνησε με τον διαχειριστή.';
+      try { await window._tabletSignOut(window._auth); } catch (_) {}
     } else {
-      const msgs = {
-        'auth/wrong-password':     '❌ Λάθος κωδικός.',
-        'auth/user-not-found':     '❌ Δεν βρέθηκε λογαριασμός.',
-        'auth/invalid-credential': '❌ Λάθος email ή κωδικός.',
-        'auth/too-many-requests':  '⚠️ Πάρα πολλές προσπάθειες.',
-      };
-      const left = _TL_MAX - _tlAttempts;
-      const base = msgs[e.code] || ('❌ ' + (e.message || e.code));
-      err.textContent = base + (left < _TL_MAX ? `  (${left} απόπειρ${left === 1 ? 'α' : 'ες'} ακόμα)` : '');
+      _tlAttempts++;
+      if (_tlAttempts >= _TL_MAX) {
+        _tlLockedUntil = Date.now() + _TL_LOCK * 1000; _tlAttempts = 0;
+        err.textContent = `🔒 Κλείδωμα ${_TL_LOCK} δευτερολέπτων μετά από πολλές αποτυχίες.`;
+      } else {
+        const msgs = {
+          'auth/wrong-password': '❌ Λάθος κωδικός.',
+          'auth/user-not-found': '❌ Δεν βρέθηκε λογαριασμός.',
+          'auth/invalid-credential': '❌ Λάθος email ή κωδικός.',
+          'auth/too-many-requests': '⚠️ Πάρα πολλές προσπάθειες.',
+        };
+        const left = _TL_MAX - _tlAttempts;
+        err.textContent = (msgs[e.code] || ('❌ ' + (e.message || e.code))) +
+          (left < _TL_MAX ? `  (${left} απόπειρες ακόμα)` : '');
+      }
     }
   }
   btn.disabled = false; btn.textContent = 'Είσοδος →';
 }
 
-// ══════════════════════════════════════
-//  QR SCANNER
-// ══════════════════════════════════════
-let _qrStream = null;
-let _qrAnimFrame = null;
-let _qrScanning = false;
+async function _tryTabletAutoRestore() {
+  const user = window._auth?.currentUser;
+  if (!user) return;
+  try { await _completeTabletAuth(user); }
+  catch (e) { logger.warn('[TABLET] auto-restore failed:', e?.message); }
+}
+if (window._firebaseReady) _tryTabletAutoRestore();
+else window.addEventListener('firebase-ready', _tryTabletAutoRestore);
+
+// ── QR scanner ─────────────────────────────────────────────────────────────
+let _qrStream = null, _qrAnimFrame = null, _qrScanning = false;
 
 async function openQRScanner() {
   const overlay = document.getElementById('qr-overlay');
-  const video   = document.getElementById('qr-video');
-
+  const video = document.getElementById('qr-video');
   try {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('getUserMedia-not-supported');
-    }
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia-not-supported');
     _qrStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
     });
     video.srcObject = _qrStream;
     await video.play();
@@ -337,1129 +176,497 @@ async function openQRScanner() {
     if (typeof _trapFocus === 'function') _trapFocus(overlay);
     _qrScanning = true;
     requestAnimationFrame(_qrScanLoop);
-  } catch(e) {
+  } catch (e) {
     logger.error('QR camera failed', e);
-    let toastMessage = `⚠️ Κάμερα μη διαθέσιμη: ${e && (e.name || e.message || 'unknown error')}. Χρησιμοποιήστε τη χειροκίνητη αναζήτηση.`;
-    if (e && (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError')) {
-      toastMessage = '⚠️ Πρόσβαση κάμερας αρνήθηκε. Ενεργοποίησε την κάμερα στις ρυθμίσεις του browser για αυτή τη σελίδα και φόρτωσε ξανά, ή χρησιμοποίησε τη χειροκίνητη αναζήτηση.';
-    } else if (e && e.name === 'NotFoundError') {
-      toastMessage = '⚠️ Δεν βρέθηκε κάμερα στη συσκευή. Χρησιμοποίησε τη χειροκίνητη αναζήτηση.';
-    } else if (e && e.name === 'NotSupportedError') {
-      toastMessage = '⚠️ Ο browser δεν υποστηρίζει ζωντανή πρόσβαση κάμερας εδώ. Χρησιμοποίησε τη χειροκίνητη αναζήτηση.';
-    }
-    _showToast(toastMessage);
-    const card = document.getElementById('card-input');
-    const sinput = document.getElementById('sinput');
-    if (card) card.focus();
-    else if (sinput) sinput.focus();
+    const msg = (e?.name === 'NotAllowedError' || e?.name === 'PermissionDeniedError')
+      ? '⚠️ Πρόσβαση κάμερας αρνήθηκε. Χρησιμοποίησε τη χειροκίνητη αναζήτηση.'
+      : (e?.name === 'NotFoundError')
+        ? '⚠️ Δεν βρέθηκε κάμερα.'
+        : `⚠️ Κάμερα μη διαθέσιμη: ${e?.name || e?.message || 'unknown'}.`;
+    _showToast(msg);
+    document.getElementById('sinput')?.focus();
   }
 }
 
 function _qrScanLoop() {
   if (!_qrScanning) return;
-  const video  = document.getElementById('qr-video');
+  const video = document.getElementById('qr-video');
   const canvas = document.getElementById('qr-canvas');
   if (video.readyState !== video.HAVE_ENOUGH_DATA) {
     _qrAnimFrame = requestAnimationFrame(_qrScanLoop); return;
   }
-  canvas.width  = video.videoWidth;
-  canvas.height = video.videoHeight;
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const code = window.jsQR && jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
-  if (code && code.data) {
-    _onQRFound(code.data);
-  } else {
-    _qrAnimFrame = requestAnimationFrame(_qrScanLoop);
-  }
+  if (code?.data) _onQRFound(code.data);
+  else _qrAnimFrame = requestAnimationFrame(_qrScanLoop);
 }
 
 function _onQRFound(text) {
   _qrScanning = false;
-  // Flash effect (visual only — runs in parallel with the actual work)
-  const frame = document.querySelector('.qr-frame');
-  const flash = document.createElement('div');
-  flash.className = 'qr-found-flash';
-  frame.appendChild(flash);
-  setTimeout(() => flash.remove(), 500);
-
-  // Start processing IMMEDIATELY — the flash continues in parallel
   closeQRScanner();
   const t = text.trim();
-  if (t.startsWith('IPEAR-REDEEM:')) {
-    const code = t.replace('IPEAR-REDEEM:', '').trim();
-    _showQRRedeemLoading('Έλεγχος κωδικού…');
-    handleRedeemQR(code);
-  } else if (t.startsWith('IPEAR-OFFER:')) {
-    const code = t.replace('IPEAR-OFFER:', '').trim();
-    _showQRRedeemLoading('Έλεγχος προσφοράς…');
-    handleOfferQR(code);
-  } else {
-    document.getElementById('sinput').value = t;
-    doSearch();
-  }
-}
-
-// Instant loading overlay so the cashier sees feedback immediately
-function _showQRRedeemLoading(title) {
-  const overlay  = document.getElementById('qr-redeem-confirm');
-  const errBox   = document.getElementById('qrc-error');
-  const confirmBtn = document.getElementById('qrc-confirm-btn');
-  document.getElementById('qrc-title').textContent    = title || 'Έλεγχος κωδικού…';
-  document.getElementById('qrc-customer').textContent = '⏳ Αναμονή…';
-  document.getElementById('qrc-reward').textContent   = '';
-  document.getElementById('qrc-pts').textContent      = '';
-  if (errBox) { errBox.textContent = ''; errBox.style.display = 'none'; }
-  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.style.opacity = '.4'; confirmBtn.textContent = '⏳ Επεξεργασία…'; }
-  overlay.style.display = 'flex';
-  if (typeof _trapFocus === 'function') _trapFocus(overlay);
+  if (t.startsWith('IPEAR-REDEEM:')) _sendScanRequest(t.replace('IPEAR-REDEEM:', '').trim());
+  else if (t.startsWith('IPEAR-OFFER:')) _sendScanRequest(t.replace('IPEAR-OFFER:', '').trim());
+  else if (/^\d{6}$/.test(t)) _sendScanRequest(t);
+  else if (_CARD_QR_RE.test(t.toUpperCase())) _handleCardScan(t.toUpperCase());
+  else _showToast('⚠️ Μη έγκυρος QR κωδικός.');
 }
 
 function closeQRScanner() {
   _qrScanning = false;
   cancelAnimationFrame(_qrAnimFrame);
   if (_qrStream) { _qrStream.getTracks().forEach(t => t.stop()); _qrStream = null; }
-  document.getElementById('qr-video').srcObject = null;
-  document.getElementById('qr-overlay').classList.remove('show');
+  const video = document.getElementById('qr-video'); if (video) video.srcObject = null;
+  document.getElementById('qr-overlay')?.classList.remove('show');
   if (typeof _releaseFocus === 'function') _releaseFocus();
 }
 
-function switchToManualSearch() {
-  closeQRScanner();
-  const card = document.getElementById('card-input');
-  const sinput = document.getElementById('sinput');
-  setTimeout(() => {
-    if (card && card.offsetParent !== null) card.focus();
-    else if (sinput) sinput.focus();
-  }, 120);
-}
-
-// ══════════════════════════════════════
-//  HELPERS
-// ══════════════════════════════════════
-// ══════════════════════════════════════
-//  ONLINE STATUS
-// ══════════════════════════════════════
-function setOnline(on) {
-  document.getElementById('cdot').className = 'conn-dot '+(on?'ok':'err');
-  document.getElementById('ctxt').textContent = on?'Online':'Offline';
-}
-window.addEventListener('online',  ()=>{ setOnline(true); _tabletKeepAlive(); });
-window.addEventListener('offline', ()=>setOnline(false));
-setOnline(navigator.onLine);
-
-// ── KEEPALIVE: recover from sleep/lock/background ──────────────────────
-// Tablet stays open all day — must survive iOS/Android sleep cycles.
-let _tabletLastPing = 0;
-
-function _tabletKeepAlive() {
-  if (!_tabletActorUid || !navigator.onLine) return;
-  const now = Date.now();
-  if (now - _tabletLastPing < 15000) return; // debounce 15s
-  _tabletLastPing = now;
-  setOnline(true);
-  // keepalive tick
-}
-
-// Periodic ping every 3 min — keeps Firestore WebSocket alive
-setInterval(() => { if (_tabletActorUid) _tabletKeepAlive(); }, 3 * 60 * 1000);
-
-// Recover from lock/sleep/tab-switch
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && _tabletActorUid) {
-    setTimeout(_tabletKeepAlive, 300);
-    if (Date.now() - _tabletLastPing > 30 * 60 * 1000) {
-      logger.log('[keepalive] tablet was asleep >30min, reloading...');
-      location.reload();
-      return;
-    }
-    document.body.classList.remove('page-hidden');
-    _startMaintenanceListener();
-    _startPendingOfferListener();
-  } else if (document.visibilityState === 'hidden') {
-    document.body.classList.add('page-hidden');
-    if (_tabletActorUid) {
-      _stopPendingOfferListener();
-      if (_maintenanceUnsub) { try { _maintenanceUnsub(); } catch(_) {} _maintenanceUnsub = null; }
-    }
-  }
-});
-window.addEventListener('pageshow', (e) => {
-  if (e.persisted && _tabletActorUid) {
-    // bfcache restore — Firestore listeners are dead, must reload
-    logger.log('[keepalive] bfcache restore, reloading...');
-    location.reload();
-  }
-});
-window.addEventListener('focus', () => {
-  if (_tabletActorUid) setTimeout(_tabletKeepAlive, 200);
-});
-
-// ══════════════════════════════════════
-//  SEARCH
-// ══════════════════════════════════════
+// ── Manual search (via callable) ───────────────────────────────────────────
 async function searchByCard() {
-  const raw = document.getElementById('card-input').value.trim().toUpperCase();
+  const raw = document.getElementById('card-input')?.value.trim().toUpperCase();
   if (!raw) return;
-  // Support both "IP-12345" and just "12345"
   const card = raw.startsWith('IP-') ? raw : 'IP-' + raw;
-  // Reuse sinput + doSearch by setting the value
-  document.getElementById('sinput').value = card;
-  await doSearch();
-  document.getElementById('card-input').value = '';
+  await _doLookup(card);
+  const cardInput = document.getElementById('card-input');
+  if (cardInput) cardInput.value = '';
 }
 
 async function doSearch() {
-  const q = document.getElementById('sinput').value.trim();
+  const q = document.getElementById('sinput')?.value.trim();
   if (!q) return;
-
-  // Intercept coded inputs (6 digits, IPEAR-OFFER:, IPEAR-REDEEM:)
   const stripped = q.replace(/\s/g, '');
-  if (q.startsWith('IPEAR-OFFER:')) {
-    handleOfferQR(q.replace('IPEAR-OFFER:', '').trim());
-    return;
-  }
-  if (q.startsWith('IPEAR-REDEEM:')) {
-    handleRedeemQR(q.replace('IPEAR-REDEEM:', '').trim());
-    return;
-  }
-  // 6-digit code → try offer first, then reward
-  if (/^\d{6}$/.test(stripped)) {
-    try {
-      const ofSnap = await window._getDocs(window._query(
-        window._col(window._db, 'ipear_offer_redemptions'),
-        window._where('code', '==', stripped)
-      ));
-      if (!ofSnap.empty) { handleOfferQR(stripped); return; }
-    } catch(_) {}
-    // Not an offer → try reward
-    handleRedeemQR(stripped);
-    return;
-  }
+  if (q.startsWith('IPEAR-OFFER:')) { _sendScanRequest(q.replace('IPEAR-OFFER:', '').trim()); return; }
+  if (q.startsWith('IPEAR-REDEEM:')) { _sendScanRequest(q.replace('IPEAR-REDEEM:', '').trim()); return; }
+  if (/^\d{6}$/.test(stripped)) { _sendScanRequest(stripped); return; }
+  // L2.3A hotfix: manually-typed card (IP-XXXXXX) opens the same reward
+  // picker as a QR card scan. Everything else is a name/phone lookup.
+  if (_CARD_QR_RE.test(stripped.toUpperCase())) { _handleCardScan(stripped.toUpperCase()); return; }
+  // Phone-only lookup (matches the live production fix): the backend resolves a
+  // customer by exact phone, never by name. A non-phone input (e.g. a name) is
+  // rejected here with a clear message and NEVER reaches the server.
+  if (!/^\d{7,}$/.test(stripped)) { _showToast('⚠️ Εισάγετε έγκυρο αριθμό τηλεφώνου.'); return; }
+  await _doLookup(stripped);
+}
 
-  const qLower = q.toLowerCase();
+async function _doLookup(query) {
+  if (!_tabletStoreId) { _showToast('❌ Δεν είσαι συνδεδεμένος ως tablet.'); return; }
   const btn = document.getElementById('sbtn');
-  btn.innerHTML = '<div class="spin"></div>';
-  btn.disabled = true;
-
+  if (btn) { btn.innerHTML = '<div class="spin"></div>'; btn.disabled = true; }
   document.getElementById('cust-display').style.display = 'block';
-  document.getElementById('not-found').style.display    = 'none';
-
+  document.getElementById('not-found').style.display = 'none';
   try {
-    const db   = window._db;
-    let found = null;
-
-    // Try exact-match queries first (card, phone) to avoid full-collection scan
-    const cardMatch = qLower.match(/^ip-?(.+)$/i);
-    const searchFields = [
-      cardMatch ? { field: 'card', value: 'IP-' + cardMatch[1].toUpperCase() } : null,
-      /^\d{7,}$/.test(q) ? { field: 'phone', value: q } : null,
-    ].filter(Boolean);
-
-    for (const sf of searchFields) {
-      const snap = await window._getDocs(
-        window._query(window._col(db, 'ipear_customers'), window._where(sf.field, '==', sf.value))
-      );
-      if (!snap.empty) {
-        snap.forEach(d => { if (!found) found = { ...d.data(), id: d.id }; });
-        break;
-      }
-    }
-
-    // Fallback: full scan only if targeted queries found nothing
-    if (!found) {
-      const snap = await window._getDocs(window._col(db, 'ipear_customers'));
-      snap.forEach(d => {
-        const data = d.data();
-        if ([data.name||'', String(data.phone||''), String(data.card||'')]
-            .some(s => s.toLowerCase().includes(qLower))) {
-          found = { ...data, id: d.id };
-        }
-      });
-    }
-
-    if (found) {
-      if (found.blocked) {
-        document.getElementById('cust-display').style.display = 'none';
-        document.getElementById('not-found').style.display    = 'block';
-        document.getElementById('not-found').innerHTML = '<div style="font-size:1.8rem;margin-bottom:10px">🚫</div><div style="font-size:1.1rem;font-weight:700;color:#e53935">Ο πελάτης είναι blocked</div><div style="font-size:.88rem;color:#888;margin-top:8px">Επικοινωνήστε με τον διαχειριστή.</div>';
-        showResult();
-      } else {
-        renderCustomer(found);
-        showResult();
-      }
-    } else {
-      document.getElementById('cust-display').style.display = 'none';
-      document.getElementById('not-found').style.display    = 'block';
-      showResult();
-    }
-  } catch(e) {
-    _showToast('❌ Σφάλμα σύνδεσης: ' + e.message);
+    const res = await lookupCustomerForTablet(query);
+    if (!res.found) _showResultAsNotFound('Δεν βρέθηκε πελάτης.');
+    else if (res.blocked) _showResultAsNotFound('🚫 Ο πελάτης είναι blocked.');
+    else { _renderCustomerProjection(res.projection); _showResult(); }
+  } catch (e) {
+    _showToast('❌ ' + _friendlyErrorFor(e));
+  } finally {
+    if (btn) { btn.innerHTML = 'Αναζήτηση'; btn.disabled = false; }
   }
-
-  btn.innerHTML = 'Αναζήτηση';
-  btn.disabled  = false;
 }
 
-function renderCustomer(d) {
-  window._foundCustomer = d;
-  const pts = d.points || 0;
-  const tot = d.totalPoints || pts;
-  const ini = (d.name||'?').split(' ').map(n=>n[0]).join('').substring(0,2).toUpperCase();
-  const t   = tier(tot);
+function _showResultAsNotFound(msg) {
+  document.getElementById('cust-display').style.display = 'none';
+  const nf = document.getElementById('not-found');
+  nf.style.display = 'block';
+  nf.innerHTML = `<div style="font-size:1.8rem;margin-bottom:10px">ℹ️</div><div style="font-size:1.05rem;font-weight:700">${escHtml(msg)}</div>`;
+  _showResult();
+}
 
-  document.getElementById('r-av').textContent    = ini;
-  document.getElementById('r-name').textContent  = d.name;
-  const _ph = d.phone || '';
-  document.getElementById('r-phone').textContent = _ph.length > 4 ? '•••' + _ph.slice(-4) : _ph;
-  document.getElementById('r-card').textContent  = '📱 ' + d.card;
-  document.getElementById('r-pts').textContent   = pts.toLocaleString('el-GR');
+function _renderCustomerProjection(p) {
+  const ini = (p.displayName || '?').split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setText('r-av', ini);
+  setText('r-name', p.displayName || '—');
+  setText('r-phone', p.phoneMasked || '');
+  setText('r-card', '📱 ' + (p.cardMasked || ''));
+  setText('r-pts', (p.points || 0).toLocaleString('el-GR'));
+  setText('r-ticon', _tierIcon(p.tier));
+  setText('r-tname', _tierName(p.tier));
+  _renderTierProgress(p);
+  const rw = document.getElementById('r-rewards'); if (rw) rw.innerHTML = '';
+}
 
-  document.getElementById('r-ticon').textContent = t.icon;
-  document.getElementById('r-tname').textContent = t.name;
-
-  if (t.next) {
-    const floor = tierFloor(tot);
-    const pct   = Math.min(100, Math.round(((tot - floor) / (t.next - floor)) * 100));
-    const nName = t.next === 1000 ? '🥈 Silver' : t.next === 3000 ? '🥇 Gold' : t.next === 6000 ? '💎 Diamond' : '👑 Platinum';
-    document.getElementById('r-tsub').textContent = `${tot.toLocaleString('el-GR')} / ${t.next.toLocaleString('el-GR')} πόντοι για ${nName}`;
-    document.getElementById('r-prog').style.width = pct + '%';
-  } else {
-    document.getElementById('r-tsub').textContent = '🏆 Ανώτατη κατάταξη — Elite Member!';
-    document.getElementById('r-prog').style.width = '100%';
+// Truthful tier-progress bar. Progress-to-next-tier is a function of lifetime
+// totalPoints (NOT spendable points), so it needs totalPoints from the masked
+// projection. When present we fill the bar proportionally on the canonical
+// ladder (tier() → {floor, next}); at Platinum the bar is legitimately full.
+// When totalPoints is absent (older server projection) we HIDE the bar rather
+// than show a misleading permanently-full one.
+function _renderTierProgress(p) {
+  const prog = document.getElementById('r-prog');
+  const sub = document.getElementById('r-tsub');
+  const tp = Number(p && p.totalPoints);
+  if (!prog) return;
+  if (!Number.isFinite(tp)) {
+    prog.style.width = '0%';
+    const bar = prog.parentElement; if (bar) bar.style.display = 'none';
+    if (sub) sub.textContent = '';
+    return;
   }
-
-  // Rewards — source from the admin-managed ipear_rewards catalog (cached
-  // at bootstrap by _loadTabletRewards; falls back to the static ladder on
-  // empty/error). Display-only summary; the actionable redeem panel uses
-  // the same list with the same cost values.
-  document.getElementById('r-rewards').innerHTML = _tabletRewards.map(r => {
-    const cost = Number(r.cost) || 0;
-    const ok = pts >= cost;
-    const label = r.title || '';
-    return `<div class="reward-box ${ok ? 'available' : ''}">
-      <div class="r-pts">${escHtml(String(cost))} pts</div>
-      <div class="r-lbl">${ok ? '✅ ' : '🔒 '}${escHtml(label)}</div>
-    </div>`;
-  }).join('');
+  const bar = prog.parentElement; if (bar) bar.style.display = '';
+  const t = tier(tp);
+  if (t.next == null) {
+    prog.style.width = '100%';
+    if (sub) sub.textContent = 'Ανώτατο επίπεδο';
+    return;
+  }
+  const span = t.next - t.floor;
+  const pct = span > 0 ? Math.max(0, Math.min(100, ((tp - t.floor) / span) * 100)) : 0;
+  prog.style.width = pct.toFixed(1) + '%';
+  if (sub) sub.textContent = (t.next - tp).toLocaleString('el-GR') + ' πόντοι για ' + tier(t.next).name;
 }
 
-// ══════════════════════════════════════
-//  SCREENS
-// ══════════════════════════════════════
-function showResult() {
-  document.getElementById('idle').classList.add('hidden');
-  document.getElementById('result-screen').classList.add('show');
+function _tierIcon(tier) {
+  return { platinum: '👑', diamond: '💎', gold: '🥇', silver: '🥈', bronze: '🥉' }[tier] || '🥉';
+}
+function _tierName(tier) {
+  const map = { platinum: 'Platinum', diamond: 'Diamond', gold: 'Gold', silver: 'Silver', bronze: 'Bronze' };
+  return map[tier] || 'Bronze';
 }
 
+function _showResult() {
+  document.getElementById('idle')?.classList.add('hidden');
+  document.getElementById('result-screen')?.classList.add('show');
+}
 function goBack() {
-  document.getElementById('result-screen').classList.remove('show');
-  document.getElementById('idle').classList.remove('hidden');
-  document.getElementById('sinput').value = '';
-  document.getElementById('sinput').focus();
-  // Reset not-found / cust-display
+  document.getElementById('result-screen')?.classList.remove('show');
+  document.getElementById('idle')?.classList.remove('hidden');
+  const sinput = document.getElementById('sinput'); if (sinput) sinput.value = '';
   document.getElementById('cust-display').style.display = 'block';
-  document.getElementById('not-found').style.display    = 'none';
-  // Auto-focus after transition
-  setTimeout(() => document.getElementById('sinput').focus(), 450);
+  document.getElementById('not-found').style.display = 'none';
+  setTimeout(() => sinput?.focus(), 100);
 }
 
-// ══════════════════════════════════════
-//  REDEEM
-// ══════════════════════════════════════
-function openRedeemPanel() {
-  if (_maintenanceMode) { _showToast('Το σύστημα αναβαθμίζεται. Παρακαλούμε δοκιμάστε σε λίγο!'); return; }
-  const c = window._foundCustomer;
-  if (!c) return;
-  // Refresh catalog in the background so freshly-added rewards become
-  // available without a tablet reload. Best-effort: if it fails the cached
-  // list paints anyway.
-  _loadTabletRewards().catch(() => {});
-  const pts = c.points || 0;
-  document.getElementById('rp-name').textContent = c.name;
-  document.getElementById('rp-pts').textContent = pts;
-  document.getElementById('rp-options').innerHTML = _tabletRewards.map((r) => {
-    const cost = Number(r.cost) || 0;
-    const disc = Number(r.discount) || 0;
-    const label = r.title || '';
-    const ok = pts >= cost;
-    return `<div class="rp-opt ${ok ? 'ok' : 'no'}" ${ok ? `role="button" tabindex="0" onclick="confirmTabletRedeem(${Number(cost)},${Number(disc)})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();confirmTabletRedeem(${Number(cost)},${Number(disc)})}" aria-label="${escHtml(String(cost))} πόντοι για ${escHtml(String(disc))} ευρώ έκπτωση — ${escHtml(label)}"` : 'aria-disabled="true"'}>
-      <span style="font-weight:700">${escHtml(String(cost))} πόντοι</span>
-      <span style="font-size:1.2rem;font-weight:900;color:${ok ? '#5a9600' : '#767676'}">${escHtml(String(disc))}€ έκπτωση</span>
-    </div>`;
-  }).join('');
-  const rpEl = document.getElementById('redeem-panel');
-  rpEl.style.display = 'flex';
-  if (typeof _trapFocus === 'function') _trapFocus(rpEl);
+// ── L2.3A CORE: scan → server request → live status ───────────────────────
+// L2.3B (2026-09-01): removed the invented 6-minute client-side hard-stop.
+// The AUTHORITATIVE deadline is the request document's own `expiresAt`
+// field (server-set to +5 minutes, matching the "έως 5λ" UI label). At
+// `expiresAt` the tablet UI switches to an "expired — needs admin check"
+// state. Closing the modal is local-only (no DB mutation) — the server
+// itself flips the request to `expired` on the next approve/reject
+// attempt via its own TTL guard. Never automatically recreates or retries
+// the redemption.
+let _activeUnsub = null;
+let _activeTimeout = null;   // schedules the UI flip at authoritative expiresAt
+
+function _teardownActiveRequest() {
+  if (_activeUnsub) { try { _activeUnsub(); } catch (_) {} _activeUnsub = null; }
+  if (_activeTimeout) { clearTimeout(_activeTimeout); _activeTimeout = null; }
 }
-function closeRedeemPanel() {
-  document.getElementById('redeem-panel').style.display = 'none';
+
+// Schedule the local UI flip AT the authoritative expiresAt from the
+// request document. Does NOT mutate the request, does NOT retry, does NOT
+// second-guess the server: at expiresAt we simply render "expired — needs
+// admin verification" and the operator can close the modal locally. If
+// the server later reports a terminal state via the subscription, that
+// wins immediately.
+function _scheduleExpiryFlip(expiresAtIsoOrMs, rewardLabel) {
+  if (_activeTimeout) { clearTimeout(_activeTimeout); _activeTimeout = null; }
+  const ms = typeof expiresAtIsoOrMs === 'number'
+    ? expiresAtIsoOrMs
+    : (expiresAtIsoOrMs ? new Date(expiresAtIsoOrMs).getTime() : NaN);
+  if (!Number.isFinite(ms)) return;
+  const delta = Math.max(0, ms - Date.now());
+  _activeTimeout = setTimeout(() => {
+    _renderApprovalOverlay('expired', { rewardLabel, needsAdminCheck: true });
+    _playError();
+    // Keep the listener alive — the server may still flip status to
+    // approved/rejected via admin action, and we WANT to render that if
+    // it lands. Only unsubscribe on explicit close.
+  }, delta);
+}
+
+function closeApprovalOverlay() {
+  _teardownActiveRequest();
+  const ov = document.getElementById('qr-redeem-confirm'); if (ov) ov.style.display = 'none';
+  // Card-QR reward picker container — clean up on close so a subsequent
+  // approval overlay for a different flow doesn't render on top of stale buttons.
+  document.getElementById('qrc-card-rewards')?.remove();
   if (typeof _releaseFocus === 'function') _releaseFocus();
 }
-let _tabletTxnBusy = false;
-let _tabletTxnLastAt = 0;
-async function confirmTabletRedeem(cost, disc) {
-  if (_tabletTxnBusy) { _showToast('⏳ Επεξεργασία σε εξέλιξη...'); return; }
-  if (Date.now() - _tabletTxnLastAt < 2000) { _showToast('⏳ Περίμενε λίγο...'); return; }
-  if (_maintenanceMode) { _showToast('Το σύστημα αναβαθμίζεται. Παρακαλούμε δοκιμάστε σε λίγο!'); return; }
-  const c = window._foundCustomer;
-  if (!c || (c.points||0) < cost) return;
-  if (!confirm(`Επιβεβαίωση εξαργύρωσης ${cost} πόντων = ${disc}€ έκπτωση για ${c.name};`)) return;
-  _tabletTxnBusy = true;
-  _tabletTxnLastAt = Date.now();
-  const db = window._db;
+
+// L2.3A hotfix (2026-08-31) — customer loyalty-card QR flow.
+// The customer's Card-tab QR encodes the plain card string ("IP-ABC123").
+// We call lookupCustomerByCardQr → render a masked customer + reward picker
+// overlay → each reward tap fires createRedemptionRequestFromCard, then
+// subscribes to the resulting request just like the 6-digit path.
+async function _handleCardScan(cardQr) {
+  if (!_tabletStoreId) { _showToast('❌ Δεν είσαι συνδεδεμένος ως tablet.'); return; }
+  _teardownActiveRequest();
+  _showApprovalOverlayLoading();
   try {
-    // ── Atomic Transaction (prevents double-spend race condition) ─────
-    // Balance update + audit row + customer-facing ledger row share a single
-    // Firestore commit. Was previously two separate writes (txn then addDoc)
-    // which could leave points deducted with no ledger entry on partial fail.
-    let newPts;
-    const tabletNowIso = new Date().toISOString();
-    const tabletLedgerId = `redeem_manual_tablet_${c.id}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
-    await window._runTransaction(db, async (txn) => {
-      const custRef  = window._doc(db, 'ipear_customers', c.id);
-      const custSnap = await txn.get(custRef);
-      if (!custSnap.exists()) throw new Error('Ο πελάτης δεν βρέθηκε στη βάση.');
-      const cust = custSnap.data();
-
-      if (cust.blocked === true) throw new Error('Ο πελάτης είναι blocked.');
-      if ((cust.points || 0) < cost) {
-        throw new Error('Ανεπαρκείς πόντοι. Υπόλοιπο: ' + (cust.points||0) + ', Απαιτούνται: ' + cost);
-      }
-
-      newPts = Math.max(0, (cust.points || 0) - cost);
-
-      txn.update(custRef, { points: newPts });
-
-      // Audit trail (same transaction)
-      const auditRef = window._doc(db, 'audit_logs', 'manual_' + c.id + '_' + Date.now());
-      txn.set(auditRef, {
-        action: 'manual_redeem', source: 'tablet',
-        approvedByUid: _tabletActorUid || '', approvedAt: tabletNowIso,
-        customerId: c.id, customerUid: cust.uid || '',
-        pointsDeducted: cost, discount: disc,
-        storeId: _tabletStoreId || null, storeName: _tabletStoreName
-      });
-
-      // Customer-facing ledger entry (same transaction).
-      txn.set(window._doc(db, 'ipear_transactions', tabletLedgerId), {
-        customerId: c.id, customerUid: c.uid || cust.uid || '',
-        customerEmail: cust.email || '',
-        customerName: c.name, card: c.card,
-        type: 'redeem', points: -cost, discount: disc, method: 'manual',
-        storeId: _tabletStoreId || null, storeName: _tabletStoreName,
-        date: tabletNowIso,
-        approvedByTablet: _tabletActorUid || ''
-      });
-    });
-
-    window._foundCustomer.points = newPts;
-    closeRedeemPanel();
-    const ptEl = document.getElementById('r-pts');
-    if (ptEl) ptEl.textContent = newPts.toLocaleString('el-GR');
-    _playSuccess();
-    _showToast('✅ Εξαργύρωση ' + disc + '€ ολοκληρώθηκε! Νέο υπόλοιπο: ' + newPts.toLocaleString('el-GR') + ' πόντοι');
-  } catch(e) { _playError(); _showToast('❌ Σφάλμα: ' + e.message); }
-  finally { _tabletTxnBusy = false; }
-}
-
-// ══════════════════════════════════════
-//  QR REDEMPTION CONFIRM FLOW
-// ══════════════════════════════════════
-let _pendingQRRedeem = null;
-
-async function handleRedeemQR(code) {
-  // Validate format: exactly 6 digits
-  if (!/^\d{6}$/.test(code)) {
-    try { await _workerRedeemGuard('fail', { reason: 'invalid-format' }); } catch(_) {}
-    _showQRRedeemOverlay(null, 'Μη έγκυρος QR κωδικός εξαργύρωσης.');
-    return;
-  }
-  const db = window._db;
-  try {
-    // Run worker rate-limit guard in PARALLEL with the Firestore lookup.
-    // If guard throws (429), Promise.all rejects and we land in catch below.
-    const [, snap] = await Promise.all([
-      _workerRedeemGuard('check'),
-      window._getDocs(
-        window._query(
-          window._col(db, 'ipear_redemptions'),
-          window._where('code', '==', code)
-        )
-      )
-    ]);
-
-    if (snap.empty) {
-      await _workerRedeemGuard('fail', { reason: 'not-found', code });
-      _showQRRedeemOverlay(null, '⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      return;
-    }
-
-    let redemption = null, redemptionId = null;
-    snap.forEach(d => { if (!redemptionId) { redemption = d.data(); redemptionId = d.id; } });
-
-    if (redemption.used) {
-      await _workerRedeemGuard('fail', { reason: 'already-used', code });
-      _showQRRedeemOverlay(null, 'Αυτός ο κωδικός έχει ήδη χρησιμοποιηθεί.');
-      return;
-    }
-
-    if (redemption.status === 'cancelled' || redemption.status === 'rejected') {
-      await _workerRedeemGuard('fail', { reason: 'cancelled', code });
-      _showQRRedeemOverlay(null, '⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      return;
-    }
-
-    const expiresAtTime = _parseExpiryMs(redemption);
-    if (!expiresAtTime || isNaN(expiresAtTime) || Date.now() > expiresAtTime) {
-      await _workerRedeemGuard('fail', { reason: 'expired', code });
-      _showQRRedeemOverlay(null, '⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      return;
-    }
-
-    _pendingQRRedeem = { redemptionId, ...redemption };
-    _showQRRedeemOverlay(redemption, null);
-
-  } catch(e) {
-    _showToast('❌ Σφάλμα ανάκτησης κωδικού: ' + e.message);
-  }
-}
-
-function _showQRRedeemOverlay(data, error) {
-  const overlay  = document.getElementById('qr-redeem-confirm');
-  const errBox   = document.getElementById('qrc-error');
-  const confirmBtn = document.getElementById('qrc-confirm-btn');
-
-  if (error) {
+    const res = await lookupCustomerByCardQr(cardQr);
+    if (!res.found) { _renderApprovalOverlay('error', { message: 'Δεν βρέθηκε πελάτης με αυτή την κάρτα.' }); _playError(); return; }
+    if (res.blocked) { _renderApprovalOverlay('error', { message: 'Ο πελάτης είναι blocked.' }); _playError(); return; }
+    _renderCardRewardPicker(cardQr, res);
+  } catch (e) {
+    _renderApprovalOverlay('error', { message: _friendlyErrorFor(e) });
     _playError();
-    document.getElementById('qrc-title').textContent    = 'Μη έγκυρος κωδικός';
-    document.getElementById('qrc-customer').textContent = '';
-    document.getElementById('qrc-reward').textContent   = '';
-    document.getElementById('qrc-pts').textContent      = '';
-    errBox.textContent    = '⚠️ ' + error;
-    errBox.style.display  = 'block';
-    confirmBtn.disabled   = true;
-    confirmBtn.style.opacity = '.4';
-  } else {
-    document.getElementById('qrc-title').textContent    = 'Επιβεβαίωση Εξαργύρωσης';
-    document.getElementById('qrc-customer').textContent = '👤 ' + data.customerName;
-    document.getElementById('qrc-reward').textContent   = data.label || (data.discount + '€ Έκπτωση');
-    document.getElementById('qrc-pts').textContent      = '−' + data.points + ' πόντοι από το υπόλοιπο';
-    errBox.style.display   = 'none';
-    confirmBtn.disabled    = false;
-    confirmBtn.style.opacity = '1';
-    confirmBtn.textContent = '✅ Επιβεβαίωση';
-    // BUGFIX: restore onclick to confirmQRRedeem (offer flow overrides it to sendOfferForApproval)
-    confirmBtn.onclick     = confirmQRRedeem;
-  }
-  overlay.style.display = 'flex';
-  if (typeof _trapFocus === 'function') _trapFocus(overlay);
-}
-
-function closeQRRedeemConfirm() {
-  document.getElementById('qr-redeem-confirm').style.display = 'none';
-  if (typeof _releaseFocus === 'function') _releaseFocus();
-  _pendingQRRedeem = null;
-  _pendingOfferQR  = null;
-  // Reset confirm button to default reward handler
-  const btn = document.getElementById('qrc-confirm-btn');
-  if (btn) { btn.onclick = confirmQRRedeem; btn.disabled = false; btn.style.opacity = '1'; btn.textContent = '✅ Επιβεβαίωση'; }
-}
-
-async function confirmQRRedeem() {
-  if (_maintenanceMode) { _showToast('Το σύστημα αναβαθμίζεται. Παρακαλούμε δοκιμάστε σε λίγο!'); return; }
-  const p = _pendingQRRedeem;
-  if (!p) return;
-
-  const btn = document.getElementById('qrc-confirm-btn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Επεξεργασία...';
-
-  const db = window._db;
-  try {
-    await _workerRedeemGuard('check');
-    // ── Atomic Firestore Transaction ──────────────────────────────────────
-    // All reads + both writes execute as one atomic unit.
-    // If ANY check fails the whole transaction rolls back:
-    // → no double-spend, no partial state, no orphan deductions.
-    // Ledger entry id is pre-generated so it lives in the same Firestore
-    // commit as the balance update and the audit row (was previously
-    // written via a separate addDoc that could fail post-deduction).
-    let newPts, custUid, pointsToDeduct, discount, label, card, resolvedCustId;
-    const txLedgerId = `redeem_qr_${p.redemptionId}`;
-    await window._runTransaction(db, async (txn) => {
-
-      // 1. Re-read the redemption code INSIDE the transaction
-      const redRef  = window._doc(db, 'ipear_redemptions', p.redemptionId);
-      const redSnap = await txn.get(redRef);
-      if (!redSnap.exists()) throw new Error('⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      const redData = redSnap.data();
-
-      // Abort if already used (race-condition guard)
-      if (redData.used === true) throw new Error('Αυτός ο κωδικός έχει ήδη χρησιμοποιηθεί.');
-
-      // Abort if cancelled or rejected
-      if (redData.status === 'cancelled' || redData.status === 'rejected') throw new Error('⚠️ Άκυρος κωδικός ή έχει λήξει.');
-
-      // Abort if expired
-      const expiresAtTime = _parseExpiryMs(redData);
-      if (!expiresAtTime || isNaN(expiresAtTime) || Date.now() > expiresAtTime) {
-        throw new Error('⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      }
-
-      // Strict integer/positive guard
-      pointsToDeduct = redData.points;
-      if (!Number.isInteger(pointsToDeduct) || pointsToDeduct <= 0) {
-        throw new Error('Μη έγκυρο ποσό πόντων προς αφαίρεση.');
-      }
-      discount = redData.discount;
-      label = redData.label || '';
-      card = redData.card || p.card || '';
-
-      // 2. Re-read the customer INSIDE the transaction (try customerId, then customerUid fallback)
-      let custRef  = window._doc(db, 'ipear_customers', p.customerId);
-      let custSnap = await txn.get(custRef);
-      if (!custSnap.exists() && p.customerUid && p.customerUid !== p.customerId) {
-        custRef  = window._doc(db, 'ipear_customers', p.customerUid);
-        custSnap = await txn.get(custRef);
-      }
-      if (!custSnap.exists()) throw new Error('Ο πελάτης δεν βρέθηκε στη βάση.');
-      const cust = custSnap.data();
-
-      if (cust.blocked === true) throw new Error('Ο πελάτης είναι blocked.');
-
-      // Abort if insufficient balance
-      if ((cust.points || 0) < pointsToDeduct) {
-        throw new Error(`Ανεπαρκείς πόντοι. Υπόλοιπο: ${cust.points || 0}, Απαιτούνται: ${pointsToDeduct}`);
-      }
-
-      newPts  = Math.max(0, (cust.points || 0) - pointsToDeduct);
-      custUid = cust.uid || p.customerUid || '';
-      resolvedCustId = custRef.id;
-
-      // 3. Atomic writes — both commit or both roll back
-      const nowIso = new Date().toISOString();
-      txn.update(redRef,  { used: true, status: 'used', usedAt: nowIso });
-      txn.update(custRef, { points: newPts });
-
-      // Insider threat audit trail in same transaction
-      const auditRef = window._doc(db, 'audit_logs', 'redeem_' + p.redemptionId);
-      txn.set(auditRef, {
-        action: 'redeem_approved',
-        source: 'tablet',
-        approvedByUid: _tabletActorUid || '',
-        approvedAt: nowIso,
-        customerId: resolvedCustId,
-        customerUid: custUid,
-        redemptionId: p.redemptionId,
-        code: redData.code || p.code || '',
-        pointsDeducted: pointsToDeduct,
-        storeId: _tabletStoreId || null,
-        storeName: _tabletStoreName
-      });
-
-      // Customer-facing ledger entry — atomic with the deduction.
-      txn.set(window._doc(db, 'ipear_transactions', txLedgerId), {
-        customerId:    resolvedCustId,
-        customerUid:   custUid,
-        customerEmail: cust.email || '',
-        customerName:  p.customerName,
-        card:          card,
-        type:          'redeem',
-        points:        -pointsToDeduct,
-        discount:      discount,
-        label:         label,
-        method:        'qr',
-        storeId:       _tabletStoreId || null,
-        storeName:     _tabletStoreName,
-        date:          nowIso,
-        approvedByTablet: _tabletActorUid || ''
-      });
-    });
-
-    await _workerRedeemGuard('success', { code: p.code || '' });
-
-    // Sync _foundCustomer.id to resolvedCustId after potential fallback
-    // so the equality check below works even when tablet used customerUid path
-    if (window._foundCustomer && resolvedCustId) {
-      window._foundCustomer.id = resolvedCustId;
-    }
-    // Update displayed customer if same person
-    if (window._foundCustomer && window._foundCustomer.id === p.customerId) {
-      window._foundCustomer.points = newPts;
-      const ptEl = document.getElementById('r-pts');
-      if (ptEl) ptEl.textContent = newPts.toLocaleString('el-GR');
-    }
-
-    closeQRRedeemConfirm();
-    _playSuccess();
-    _showToast('✅ Εξαργύρωση ' + (p.label || p.discount + '€') + ' ολοκληρώθηκε!');
-
-  } catch(e) {
-    try { await _workerRedeemGuard('fail', { reason: 'confirm-failed' }); } catch(_) {}
-    _playError();
-    btn.disabled = false;
-    btn.textContent = '✅ Επιβεβαίωση';
-    const errBox = document.getElementById('qrc-error');
-      const errMsg = (e && e.message) ? e.message : 'Άγνωστο σφάλμα.';
-      errBox.textContent = '❌ ' + errMsg;
-      errBox.style.display = 'block';
-  } // closes catch
-} // closes confirmQRRedeem
-
-// ════════════════════════════════════════
-//  OFFER QR HANDLER — Fortress Mode
-//  Offers ADD bonus points (unlike rewards which deduct).
-//  Code lookup in Firestore → validate → approve → add points.
-// ════════════════════════════════════════
-let _pendingOfferQR = null;
-
-async function handleOfferQR(code) {
-
-  // Validate format: exactly 6 digits
-  if (!/^\d{6}$/.test(code)) {
-    _showOfferResult(null, 'Μη έγκυρος κωδικός προσφοράς.');
-    return;
-  }
-
-  const db = window._db;
-  try {
-    // ── STEP 1: Find the pending offer redemption by code ──
-    let snap;
-    try {
-      snap = await window._getDocs(
-        window._query(
-          window._col(db, 'ipear_offer_redemptions'),
-          window._where('code', '==', code)
-        )
-      );
-    } catch(qErr) {
-      _showOfferResult(null, 'Firestore query error: ' + (qErr.code || qErr.message));
-      return;
-    }
-    if (snap.empty) {
-      _showOfferResult(null, '⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      return;
-    }
-
-    let redemption = null, redemptionId = null;
-    snap.forEach(d => { if (!redemptionId) { redemption = d.data(); redemptionId = d.id; } });
-
-    // ── CHECK 1: Already used? ──
-    if (redemption.used) {
-      _showOfferResult(null, 'Αυτός ο κωδικός έχει ήδη χρησιμοποιηθεί.');
-      return;
-    }
-
-    // ── CHECK 2: Cancelled or rejected? ──
-    if (redemption.status === 'cancelled' || redemption.status === 'rejected') {
-      _showOfferResult(null, '⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      return;
-    }
-
-    // ── CHECK 3: Time Check (anti-screenshot) — 5 min ──
-    const expiresAt = new Date(redemption.expiresAt).getTime();
-    if (isNaN(expiresAt) || Date.now() > expiresAt) {
-      _showOfferResult(null, '⚠️ Άκυρος κωδικός ή έχει λήξει.');
-      return;
-    }
-
-    // ── CHECKS 3+4 in PARALLEL: offer active + customer exists ──
-    // These two are independent lookups — fire them together to cut
-    // ~200-400ms from the iPad approval-modal latency.
-    const offerId = redemption.offerId;
-    const [offersSnap, custSnapPrimary] = await Promise.all([
-      window._getDocs(
-        window._query(
-          window._col(db, 'ipear_offers'),
-          window._where('active', '==', true)
-        )
-      ),
-      window._getDoc(window._doc(db, 'ipear_customers', redemption.customerId))
-    ]);
-    let offerDoc = null;
-    offersSnap.forEach(d => {
-      const data = d.data();
-      if (d.id === offerId || data.title === offerId) {
-        offerDoc = { id: d.id, ...data };
-      }
-    });
-    if (!offerDoc) {
-      _showOfferResult(null, 'Η προσφορά δεν είναι πλέον ενεργή.');
-      return;
-    }
-
-    let custDocId = redemption.customerId;
-    let custSnap = custSnapPrimary;
-    if (!custSnap.exists() && redemption.customerDocId && redemption.customerDocId !== custDocId) {
-      custDocId = redemption.customerDocId;
-      custSnap = await window._getDoc(window._doc(db, 'ipear_customers', custDocId));
-    }
-    if (!custSnap.exists()) {
-      _showOfferResult(null, 'Ο πελάτης δεν βρέθηκε.');
-      return;
-    }
-    const cust = custSnap.data();
-    if (cust.blocked) {
-      _showOfferResult(null, 'Ο πελάτης είναι blocked.');
-      return;
-    }
-
-    // ── CHECK 5: Single-use — already redeemed before? ──
-    // Dual-ID query: check both customerDocId AND customerId to prevent
-    // post-migration double-redemption (pre-migration docs use old docId,
-    // post-migration docs use auth UID as customerId)
-    if (redemption.singleUse || offerDoc.singleUse) {
-      const idsToCheck = [custDocId];
-      if (redemption.customerId && redemption.customerId !== custDocId) {
-        idsToCheck.push(redemption.customerId);
-      }
-      // Query by customerDocId (covers pre-migration docs)
-      const prevByDoc = await window._getDocs(
-        window._query(
-          window._col(db, 'ipear_offer_redemptions'),
-          window._where('offerId', '==', offerDoc.id),
-          window._where('customerDocId', '==', custDocId),
-          window._where('used', '==', true)
-        )
-      );
-      if (!prevByDoc.empty) {
-        _showOfferResult(null, 'Ο πελάτης έχει ήδη χρησιμοποιήσει αυτή την προσφορά.');
-        return;
-      }
-      // Query by customerId if different from customerDocId (covers post-migration docs)
-      if (redemption.customerId && redemption.customerId !== custDocId) {
-        const prevById = await window._getDocs(
-          window._query(
-            window._col(db, 'ipear_offer_redemptions'),
-            window._where('offerId', '==', offerDoc.id),
-            window._where('customerId', '==', redemption.customerId),
-            window._where('used', '==', true)
-          )
-        );
-        if (!prevById.empty) {
-          _showOfferResult(null, 'Ο πελάτης έχει ήδη χρησιμοποιήσει αυτή την προσφορά.');
-          return;
-        }
-      }
-    }
-
-    // SECURITY: Read bonus from TRUSTED offer doc, not user-created redemption doc
-    const bonus = Number(offerDoc.bonusPoints) || Number(offerDoc.pointsCost) || 0;
-    _pendingOfferQR = {
-      redemptionId, offerDoc, bonus,
-      customerId: custDocId,
-      customerName: redemption.customerName,
-      card: redemption.card,
-      offerTitle: redemption.offerTitle || offerDoc.title
-    };
-
-    _showOfferResult({
-      customerName: redemption.customerName,
-      offerTitle: redemption.offerTitle || offerDoc.title,
-      bonus
-    }, null);
-
-  } catch(e) {
-    _showOfferResult(null, 'Σφάλμα: ' + (e.message || 'Άγνωστο'));
   }
 }
 
-let _offerApprovalUnsub = null;
-
-function _showOfferResult(data, error) {
+// Renders the picker inside the approval overlay: customer summary at the top,
+// reward buttons in a scrollable list. Each reward button is a callable trigger.
+function _renderCardRewardPicker(cardQr, res) {
   const overlay = document.getElementById('qr-redeem-confirm');
-  const errBox  = document.getElementById('qrc-error');
-  const confirmBtn = document.getElementById('qrc-confirm-btn');
-
-  if (error) {
-    document.getElementById('qrc-title').textContent    = '❌ Αποτυχία Προσφοράς';
-    document.getElementById('qrc-customer').textContent = '';
-    document.getElementById('qrc-reward').textContent   = '';
-    document.getElementById('qrc-pts').textContent      = '';
-    errBox.textContent   = '⚠️ ' + error;
-    errBox.style.display = 'block';
-    confirmBtn.disabled  = true;
-    confirmBtn.style.opacity = '.4';
-    confirmBtn.onclick = null;
-  } else {
-    document.getElementById('qrc-title').textContent    = '🎁 Προσφορά';
-    document.getElementById('qrc-customer').textContent = '👤 ' + data.customerName;
-    document.getElementById('qrc-reward').textContent   = data.offerTitle;
-    document.getElementById('qrc-pts').textContent      = data.bonus > 0 ? `+${data.bonus} bonus πόντοι` : 'Χωρίς bonus';
-    errBox.style.display   = 'none';
-    // Button sends to admin for approval instead of direct approve
-    confirmBtn.disabled    = false;
-    confirmBtn.style.opacity = '1';
-    confirmBtn.textContent = '📤 Αποστολή για Έγκριση';
-    confirmBtn.onclick     = sendOfferForApproval;
+  if (!overlay) return;
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  const errBox = document.getElementById('qrc-error');
+  const btn = document.getElementById('qrc-confirm-btn');
+  if (btn) btn.style.display = 'none';
+  if (errBox) { errBox.textContent = ''; errBox.style.display = 'none'; }
+  const p = res.projection || {};
+  const rewards = (res.rewards || []).filter(r => r && r.id && Number.isFinite(r.cost) && r.cost > 0);
+  setText('qrc-title', '💳 Επιλογή Ανταμοιβής');
+  setText('qrc-customer', '👤 ' + (p.displayName || '—'));
+  setText('qrc-reward', 'Διαθέσιμοι πόντοι: ' + (p.points || 0).toLocaleString('el-GR'));
+  setText('qrc-pts', '');
+  // Reward buttons — appended after the standard content in a dedicated
+  // container. Cleared on any subsequent overlay render (close/state-change).
+  let container = document.getElementById('qrc-card-rewards');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'qrc-card-rewards';
+    container.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-top:16px;max-height:40vh;overflow-y:auto';
+    // Insert before the error box for logical DOM order.
+    const parent = errBox?.parentNode || overlay;
+    parent.insertBefore(container, errBox || null);
+  }
+  container.innerHTML = '';
+  const pts = Number(p.points || 0);
+  for (const r of rewards) {
+    const affordable = pts >= r.cost;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.disabled = !affordable;
+    b.textContent = `${r.title || 'Ανταμοιβή'} — ${r.cost} πόντοι` + (r.discount ? ` (${r.discount}€ έκπτωση)` : '');
+    b.style.cssText = `padding:14px 18px;border-radius:12px;font-weight:800;font-family:inherit;font-size:.98rem;cursor:${affordable ? 'pointer' : 'not-allowed'};opacity:${affordable ? 1 : 0.45};background:${affordable ? '#8ae900' : '#333'};color:${affordable ? '#0a0a0a' : '#999'};border:none;text-align:left`;
+    if (affordable) {
+      b.onclick = async () => {
+        // Immediate lock — the container-wide guard prevents rapid-fire.
+        Array.from(container.querySelectorAll('button')).forEach(x => { x.disabled = true; x.style.opacity = 0.45; x.style.cursor = 'wait'; });
+        try {
+          const cRes = await createRedemptionRequestFromCard({ cardQrPayload: cardQr, rewardId: r.id });
+          // Drop the picker and switch to pending state.
+          container.remove();
+          _renderApprovalOverlay('pending', cRes);
+          _watchRequest(cRes.requestId);
+          // Use the AUTHORITATIVE server-issued expiresAt — do not invent a
+          // separate client policy. cRes.expiresAt is an ISO string from
+          // createRedemptionRequestFromCard.
+          _scheduleExpiryFlip(cRes.expiresAt, cRes.rewardLabel);
+        } catch (e) {
+          container.remove();
+          _renderApprovalOverlay('error', { message: _friendlyErrorFor(e) });
+          _playError();
+        }
+      };
+    }
+    container.appendChild(b);
+  }
+  if (!rewards.length) {
+    // L2.3C explicit empty state — reuses the existing `.empty` visual
+    // system from tablet.html (icon + title + supporting text) and adds
+    // a local Close action so the operator can back out of the modal
+    // without waiting or refreshing. Distinct from loading (which is the
+    // "Έλεγχος κωδικού..." title before this handler runs), from error
+    // (which uses _renderApprovalOverlay('error', …) in the catch above),
+    // from insufficient-points (rewards exist but are all disabled by the
+    // affordable check), and from server-side inactive/expired (which are
+    // filtered before the tablet receives them).
+    const empty = document.createElement('div');
+    empty.setAttribute('data-l23c-empty', 'no-rewards');
+    empty.setAttribute('role', 'status');
+    empty.className = 'empty';
+    empty.style.cssText = 'padding:24px 16px;text-align:center';
+    empty.innerHTML =
+      '<span class="e" aria-hidden="true">🎁</span>' +
+      '<div style="font-weight:800;color:#eee;font-size:1.02rem;margin-bottom:6px">Δεν υπάρχουν διαθέσιμες προσφορές</div>' +
+      '<div style="color:#aaa;font-size:.86rem;line-height:1.55">Δεν υπάρχει κάποια ενεργή προσφορά ή διαθέσιμη ανταμοιβή για αυτόν τον πελάτη αυτή τη στιγμή.</div>';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = '✕ Κλείσιμο';
+    closeBtn.setAttribute('data-l23c-empty-close', '1');
+    closeBtn.style.cssText = 'margin-top:14px;padding:12px 20px;background:#8ae900;color:#0a0a0a;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit;font-size:.92rem';
+    closeBtn.onclick = () => { closeApprovalOverlay(); };
+    empty.appendChild(closeBtn);
+    container.appendChild(empty);
   }
   overlay.style.display = 'flex';
   if (typeof _trapFocus === 'function') _trapFocus(overlay);
 }
 
-async function sendOfferForApproval() {
-  const p = _pendingOfferQR;
-  if (!p) return;
-
-  const btn = document.getElementById('qrc-confirm-btn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Αποστολή...';
-
-  const db = window._db;
+async function _sendScanRequest(code) {
+  if (!/^\d{6}$/.test(code)) { _showToast('⚠️ Μη έγκυρος κωδικός.'); return; }
+  if (!_tabletStoreId) { _showToast('❌ Δεν είσαι συνδεδεμένος ως tablet.'); return; }
+  _teardownActiveRequest();
+  _showApprovalOverlayLoading();
   try {
-    // Update redemption doc → status: pending_approval (admin will see it)
-    const redRef = window._doc(db, 'ipear_offer_redemptions', p.redemptionId);
-    await window._updateDoc(redRef, {
-      status: 'pending_approval',
-      tabletRequestedAt: new Date().toISOString(),
-      tabletStoreId: _tabletStoreId || null,
-      tabletStoreName: _tabletStoreName || ''
-    });
-
-    // Show waiting state
-    document.getElementById('qrc-title').textContent = '⏳ Αναμονή Έγκρισης...';
-    document.getElementById('qrc-pts').textContent   = 'Περιμένουμε έγκριση από τον διαχειριστή';
-    btn.textContent = '⏳ Αναμονή...';
-    btn.disabled = true;
-    btn.style.opacity = '.5';
-    document.getElementById('qrc-error').style.display = 'none';
-
-    // Start real-time watcher on this doc
-    _startOfferApprovalWatcher(p.redemptionId, p);
-
-  } catch(e) {
-    btn.disabled = false;
-    btn.textContent = '📤 Αποστολή για Έγκριση';
-    const errBox = document.getElementById('qrc-error');
-    const msg = (e.message || '');
-    errBox.textContent = msg.includes('No document') || msg.includes('not-found')
-      ? '⚠️ Άκυρος κωδικός ή έχει λήξει.'
-      : '❌ ' + (msg || 'Σφάλμα');
-    errBox.style.display = 'block';
+    const res = await createRedemptionRequest(code);
+    _renderApprovalOverlay('pending', res);
+    _watchRequest(res.requestId);
+    // Use the AUTHORITATIVE server-issued expiresAt.
+    _scheduleExpiryFlip(res.expiresAt, res.rewardLabel);
+  } catch (e) {
+    _renderApprovalOverlay('error', { message: _friendlyErrorFor(e) });
+    _playError();
   }
 }
 
-function _startOfferApprovalWatcher(redemptionId, p) {
-  // Stop any previous watcher
-  if (_offerApprovalUnsub) { try { _offerApprovalUnsub(); } catch(_) {} }
-
-  const ref = window._doc(window._db, 'ipear_offer_redemptions', redemptionId);
-  _offerApprovalUnsub = window._onSnapshot(ref, (snap) => {
-    if (!snap.exists()) return;
-    const data = snap.data();
-
-    if (data.status === 'approved' || (data.used === true && data.status === 'used')) {
-      // ✅ APPROVED by admin!
-      _stopOfferApprovalWatcher();
-      closeQRRedeemConfirm();
-      _pendingOfferQR = null;
-
-      // Update displayed customer points
-      if (window._foundCustomer && window._foundCustomer.id === p.customerId && p.bonus > 0) {
-        window._foundCustomer.points = (window._foundCustomer.points || 0) + p.bonus;
-        const ptEl = document.getElementById('r-pts');
-        if (ptEl) ptEl.textContent = window._foundCustomer.points.toLocaleString('el-GR');
-      }
-      _playSuccess();
-      _showToast('✅ Εγκρίθηκε! "' + p.offerTitle + '"' + (p.bonus > 0 ? ' — +' + p.bonus + ' πόντοι' : ''));
-
-    } else if (data.status === 'rejected') {
-      // ❌ REJECTED by admin
-      _stopOfferApprovalWatcher();
-      _playError();
-      document.getElementById('qrc-title').textContent = '❌ Απορρίφθηκε';
-      document.getElementById('qrc-pts').textContent   = 'Ο διαχειριστής απέρριψε την προσφορά';
-      document.getElementById('qrc-error').textContent  = '⚠️ ' + (data.rejectReason || 'Απορρίφθηκε');
-      document.getElementById('qrc-error').style.display = 'block';
-      const btn = document.getElementById('qrc-confirm-btn');
-      btn.textContent = 'Κλείσιμο';
-      btn.disabled = false;
-      btn.style.opacity = '1';
-      btn.onclick = () => { closeQRRedeemConfirm(); _pendingOfferQR = null; };
+function _friendlyErrorFor(e) {
+  const c = e?.code || e?.details?.code || '';
+  const m = e?.message || 'Unknown error';
+  if (String(c).includes('permission-denied')) return 'Δεν έχεις δικαιώματα tablet.';
+  if (String(c).includes('unauthenticated')) {
+    // A Firebase-callable `unauthenticated` can mean EITHER the Auth ID
+    // token is missing/expired OR the App Check token is missing/invalid.
+    // Differentiate using the LIVE auth state so the error message points
+    // the operator at the actual failure.
+    const hasSession = !!(window._auth && window._auth.currentUser);
+    if (hasSession) {
+      return 'Πρόβλημα ασφάλειας συσκευής (App Check). Δοκίμασε ξανά. [code: unauth-app]';
     }
-    // else still pending — keep waiting
-  }, (err) => {
-    logger.error('[offer-watcher]', err);
+    return 'Συνεδρία έληξε — κάνε ξανά είσοδο. [code: unauth-session]';
+  }
+  if (String(c).includes('resource-exhausted')) return 'Πάρα πολλά scans — περίμενε 1 λεπτό.';
+  if (String(c).includes('not-found')) return 'Ο κωδικός δεν υπάρχει.';
+  if (String(c).includes('failed-precondition')) return m; // server business msgs are Greek
+  // Unknown error: keep an already-Greek message, otherwise a safe generic —
+  // never surface a raw English/technical string to the store operator.
+  return /[Ͱ-Ͽ]/.test(m) ? m : 'Κάτι πήγε στραβά. Δοκίμασε ξανά.';
+}
+
+function _watchRequest(requestId) {
+  _activeUnsub = subscribeToRequest(requestId, (evt) => {
+    if (!evt) return;
+    if (evt.status === 'pending') return;
+    if (evt.status === 'approved') { _renderApprovalOverlay('approved', evt); _playSuccess(); _teardownActiveRequest(); return; }
+    if (evt.status === 'rejected') { _renderApprovalOverlay('rejected', evt); _playError(); _teardownActiveRequest(); return; }
+    if (evt.status === 'expired' || evt.status === 'missing') { _renderApprovalOverlay('expired', evt); _playError(); _teardownActiveRequest(); return; }
+    if (evt.status === 'error') { _renderApprovalOverlay('error', { message: 'Απώλεια πρόσβασης — έλεγξε το ρόλο σου.' }); _teardownActiveRequest(); }
   });
-
-  // Auto-timeout after 5 minutes
-  _offerApprovalTimeout = setTimeout(() => {
-    if (_offerApprovalUnsub) {
-      _stopOfferApprovalWatcher();
-      document.getElementById('qrc-title').textContent = '⏰ Timeout';
-      document.getElementById('qrc-pts').textContent   = 'Δεν ελήφθη έγκριση εντός 5 λεπτών';
-      const btn = document.getElementById('qrc-confirm-btn');
-      btn.textContent = 'Κλείσιμο';
-      btn.disabled = false;
-      btn.onclick = () => { closeQRRedeemConfirm(); _pendingOfferQR = null; };
-    }
-  }, 5 * 60 * 1000);
 }
 
-let _offerApprovalTimeout = null;
-function _stopOfferApprovalWatcher() {
-  if (_offerApprovalUnsub) { try { _offerApprovalUnsub(); } catch(_) {} _offerApprovalUnsub = null; }
-  if (_offerApprovalTimeout) { clearTimeout(_offerApprovalTimeout); _offerApprovalTimeout = null; }
+function _showApprovalOverlayLoading() {
+  const overlay = document.getElementById('qr-redeem-confirm');
+  if (!overlay) return;
+  // Strip any card-picker container from a prior scan.
+  document.getElementById('qrc-card-rewards')?.remove();
+  document.getElementById('qrc-title').textContent = 'Έλεγχος κωδικού...';
+  document.getElementById('qrc-customer').textContent = '⏳';
+  document.getElementById('qrc-reward').textContent = '';
+  document.getElementById('qrc-pts').textContent = '';
+  const errBox = document.getElementById('qrc-error');
+  if (errBox) { errBox.textContent = ''; errBox.style.display = 'none'; }
+  const btn = document.getElementById('qrc-confirm-btn');
+  if (btn) btn.style.display = 'none';
+  overlay.style.display = 'flex';
+  if (typeof _trapFocus === 'function') _trapFocus(overlay);
 }
 
-function _showToast(msg) {
-  const t = document.createElement('div');
-  t.className   = 'ipear-toast';
-  t.textContent = msg;
-  t.setAttribute('role', 'status');
-  t.setAttribute('aria-live', 'polite');
-  t.setAttribute('aria-atomic', 'true');
-  document.body.appendChild(t);
-  setTimeout(() => { t.style.transition = 'opacity .5s'; t.style.opacity = '0'; }, 2500);
-  setTimeout(() => t.remove(), 3100);
+function _renderApprovalOverlay(state, data) {
+  const overlay = document.getElementById('qr-redeem-confirm');
+  if (!overlay) return;
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  const errBox = document.getElementById('qrc-error');
+  const btn = document.getElementById('qrc-confirm-btn');
+  if (btn) btn.style.display = 'none';
+  if (errBox) { errBox.textContent = ''; errBox.style.display = 'none'; }
+  if (state === 'pending') {
+    setText('qrc-title', '⏳ Αναμονή έγκρισης από Admin');
+    const p = data?.projection || {};
+    setText('qrc-customer', '👤 ' + (p.displayName || '—'));
+    setText('qrc-reward', data?.rewardLabel || '');
+    const cost = data?.rewardCost || 0;
+    if (cost > 0) setText('qrc-pts', '−' + cost + ' πόντοι από το υπόλοιπο');
+    else if (cost < 0) setText('qrc-pts', '+' + (-cost) + ' πόντοι bonus');
+    else setText('qrc-pts', '');
+  } else if (state === 'approved') {
+    setText('qrc-title', '✅ Εγκρίθηκε');
+    setText('qrc-customer', 'Νέο υπόλοιπο: ' + (typeof data?.newPoints === 'number' ? data.newPoints.toLocaleString('el-GR') : '—') + ' πόντοι');
+    setText('qrc-reward', ''); setText('qrc-pts', '');
+  } else if (state === 'rejected') {
+    setText('qrc-title', '❌ Απορρίφθηκε');
+    setText('qrc-customer', data?.rejectReason ? ('Αιτία: ' + data.rejectReason) : 'Ο Admin απέρριψε το αίτημα.');
+    setText('qrc-reward', ''); setText('qrc-pts', '');
+  } else if (state === 'expired') {
+    setText('qrc-title', '⏱️ Το αίτημα έληξε');
+    // If we reached expiresAt without a server-side terminal event, the
+    // request has NOT been finalized by the admin. Do NOT mutate it from
+    // the tablet — the server flips it to `expired` on the next call.
+    // Tell the operator to check the admin queue and offer a local Close.
+    setText('qrc-customer',
+      data?.needsAdminCheck
+        ? 'Πέρασε ο χρόνος έγκρισης — έλεγξε την ουρά του Admin ή κλείσε αυτό το παράθυρο.'
+        : 'Δοκίμασε ξανά με νέο κωδικό.');
+    setText('qrc-reward', ''); setText('qrc-pts', '');
+  } else if (state === 'error') {
+    setText('qrc-title', 'Σφάλμα');
+    if (errBox) { errBox.textContent = '⚠️ ' + (data?.message || 'Άγνωστο σφάλμα'); errBox.style.display = 'block'; }
+    setText('qrc-customer', ''); setText('qrc-reward', ''); setText('qrc-pts', '');
+  }
+  overlay.style.display = 'flex';
+  if (typeof _trapFocus === 'function') _trapFocus(overlay);
 }
 
-// ══════════════════════════════════════
-//  REAL-TIME PENDING OFFER LISTENER
-//  Auto-surfaces new customer offer redemptions — no scanning needed.
-// ══════════════════════════════════════
-let _pendingOfferUnsub = null;
-let _pendingOfferSeenIds = new Set();
-
-function _startPendingOfferListener() {
-  if (_pendingOfferUnsub || window.DEMO) return;
-  const db = window._db;
-  try {
-    const q = window._query(
-      window._col(db, 'ipear_offer_redemptions'),
-      window._where('status', '==', 'pending')
-    );
-    _pendingOfferUnsub = window._onSnapshot(q, snap => {
-      snap.docChanges().forEach(change => {
-        try {
-          if (change.type !== 'added') return;
-          const id = change.doc.id;
-          if (_pendingOfferSeenIds.has(id)) return;
-          _pendingOfferSeenIds.add(id);
-          const data = change.doc.data();
-          if (!data || !data.code) return;
-          const expiresAt = new Date(data.expiresAt).getTime();
-          if (isNaN(expiresAt) || Date.now() > expiresAt) return;
-          _showIncomingOfferBanner(data, id);
-        } catch(e) { logger.warn('[pending-offer-listener] skipping doc:', change.doc?.id, e); }
-      });
-    }, err => logger.warn('[pending-offer-listener]', err));
-  } catch(e) { logger.warn('[pending-offer-listener] setup error:', e); }
+async function tabletLogout() {
+  _teardownActiveRequest();
+  try { await window._tabletSignOut(window._auth); } catch (_) {}
+  _tabletActorUid = null; _tabletStoreId = null; _tabletStoreName = '—';
+  document.getElementById('tablet-login').style.display = 'flex';
+  document.getElementById('result-screen')?.classList.remove('show');
+  document.getElementById('idle')?.classList.remove('hidden');
 }
 
-function _stopPendingOfferListener() {
-  if (_pendingOfferUnsub) { try { _pendingOfferUnsub(); } catch(_) {} _pendingOfferUnsub = null; }
+function setOnline(on) {
+  const dot = document.getElementById('cdot');
+  const txt = document.getElementById('ctxt');
+  if (dot) dot.className = 'conn-dot ' + (on ? 'ok' : 'err');
+  if (txt) txt.textContent = on ? 'Online' : 'Offline';
 }
+window.addEventListener('online', () => setOnline(true));
+window.addEventListener('offline', () => setOnline(false));
+setOnline(navigator.onLine);
 
-function _showIncomingOfferBanner(data, docId) {
-  const existing = document.getElementById('incoming-offer-' + docId);
-  if (existing) return;
-
-  const banner = document.createElement('div');
-  banner.id = 'incoming-offer-' + docId;
-  banner.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:99999;background:linear-gradient(135deg,#1a2a00,#2a3a10);border:2px solid #8ae900;border-radius:16px;padding:18px 24px;min-width:340px;max-width:90vw;box-shadow:0 12px 40px rgba(0,0,0,.5);animation:slideDown .4s ease-out;font-family:system-ui,sans-serif';
-  const bp = data.bonusPoints || 0;
-  banner.innerHTML = `
-    <div style="display:flex;align-items:center;gap:14px">
-      <div style="font-size:2.2rem;flex-shrink:0">🔔</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:.72rem;color:#8ae900;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Νέα Εξαργύρωση Προσφοράς</div>
-        <div style="font-size:1rem;font-weight:800;color:#fff;margin-bottom:2px">${_escBanner(data.customerName || 'Πελάτης')}</div>
-        <div style="font-size:.85rem;color:rgba(255,255,255,.7)">${_escBanner(data.offerTitle || '')}${bp > 0 ? ' · +' + bp + ' πόντοι' : ''}</div>
-        <div style="font-size:1.3rem;font-weight:900;letter-spacing:3px;color:#8ae900;font-family:monospace;margin-top:6px">${data.code.slice(0,3)} ${data.code.slice(3)}</div>
-      </div>
-    </div>
-    <div style="display:flex;gap:10px;margin-top:14px">
-      <button onclick="_handleIncomingOffer('${_escBanner(data.code)}','${docId}')" style="flex:1;padding:12px;background:#8ae900;color:#111;border:none;border-radius:10px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">✅ Επεξεργασία</button>
-      <button onclick="this.closest('[id^=incoming-offer]').remove()" style="padding:12px 18px;background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:10px;font-weight:700;font-size:.9rem;cursor:pointer;min-height:44px">✕</button>
-    </div>`;
-  document.body.appendChild(banner);
-
-  setTimeout(() => { if (banner.parentNode) banner.remove(); }, 10 * 60 * 1000);
+// Admin route guard — refuse any in-app admin navigation.
+function _guardAdminNav() {
+  document.addEventListener('click', (ev) => {
+    const a = ev.target?.closest?.('a[href*="/admin"]');
+    if (!a) return;
+    ev.preventDefault();
+    _showToast('❌ Το tablet δεν έχει πρόσβαση στο Admin.');
+  }, { capture: true });
 }
+_guardAdminNav();
 
-function _escBanner(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+void _tabletActorUid; // exposed via window.TABLET_BUILD_TAG for debugging
 
-function _handleIncomingOffer(code, docId) {
-  const el = document.getElementById('incoming-offer-' + docId);
-  if (el) el.remove();
-  handleOfferQR(code);
-}
-
-// ══════════════════════════════════════
-//  MAINTENANCE MODE LISTENER (Kill Switch)
-// ══════════════════════════════════════
-function _startMaintenanceListener() {
-  if (_maintenanceUnsub || window.DEMO) return;
-  const db = window._db; if (!db) return;
-  try {
-    const ref = window._doc(db, 'settings', 'system');
-    _maintenanceUnsub = window._onSnapshot(ref, snap => {
-      if (!snap.exists()) { _setMaintenanceMode(false); return; }
-      _setMaintenanceMode(!!snap.data().maintenance);
-    }, () => { _maintenanceUnsub = null; });
-  } catch(_) { _maintenanceUnsub = null; }
-}
-
-function _setMaintenanceMode(active) {
-  _maintenanceMode = active;
-  document.querySelectorAll('.redeem-btn, [data-redeem-btn]').forEach(btn => {
-    btn.disabled = active;
-    if (active) { btn.style.opacity = '.4'; btn.style.pointerEvents = 'none'; }
-    else { btn.style.opacity = ''; btn.style.pointerEvents = ''; }
-  });
-  if (active) _showToast('Το σύστημα αναβαθμίζεται. Παρακαλούμε δοκιμάστε σε λίγο!');
-}
-
-// ══════════════════════════════════════
-//  AUTO-RESET after inactivity (3 min)
-// ══════════════════════════════════════
-let idleTimer;
-function resetTimer() {
-  clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    if (document.getElementById('result-screen').classList.contains('show')) {
-      goBack();
-    }
-  }, 3 * 60 * 1000);
-}
-document.addEventListener('touchstart', resetTimer);
-document.addEventListener('mousemove',  resetTimer);
-document.addEventListener('keydown',    resetTimer);
-resetTimer();
-
-// ════════════════════════════════════════
-//  A11Y: ESCAPE KEY CLOSES DIALOGS (WCAG 2.1 SC 2.1.2)
-// ════════════════════════════════════════
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  // Priority order: topmost modal first
-  const qrc = document.getElementById('qr-redeem-confirm');
-  if (qrc && qrc.style.display === 'flex') { closeQRRedeemConfirm(); return; }
-  const rp = document.getElementById('redeem-panel');
-  if (rp && rp.style.display === 'flex') { closeRedeemPanel(); return; }
-  const qo = document.getElementById('qr-overlay');
-  if (qo && qo.classList.contains('show')) { closeQRScanner(); return; }
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  WINDOW EXPORTS — required for inline HTML event handlers (onclick, etc.)
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Global exports for inline HTML handlers ────────────────────────────────
 window.tabletLogin = tabletLogin;
-window.doSearch = doSearch;
-window.searchByCard = searchByCard;
-window.switchToManualSearch = switchToManualSearch;
-window.openRedeemPanel = openRedeemPanel;
-window.closeRedeemPanel = closeRedeemPanel;
-window.confirmTabletRedeem = confirmTabletRedeem;
+window.tabletLogout = tabletLogout;
 window.openQRScanner = openQRScanner;
 window.closeQRScanner = closeQRScanner;
-window.confirmQRRedeem = confirmQRRedeem;
-window.closeQRRedeemConfirm = closeQRRedeemConfirm;
+window.doSearch = doSearch;
+window.searchByCard = searchByCard;
 window.goBack = goBack;
-window._handleIncomingOffer = _handleIncomingOffer;
+window.closeApprovalOverlay = closeApprovalOverlay;
+// Neutralized legacy handlers — old inline HTML may still call these.
+window.openRedeemPanel = () => _showToast('ℹ️ Η εξαργύρωση γίνεται πλέον με QR από τον πελάτη.');
+window.closeRedeemPanel = () => {};
+window.confirmTabletRedeem = () => _showToast('ℹ️ Χειροκίνητη εξαργύρωση απενεργοποιήθηκε.');
+window.confirmQRRedeem = () => {};
+window.closeQRRedeemConfirm = closeApprovalOverlay;
+window.handleRedeemQR = _sendScanRequest;
+window.handleOfferQR = _sendScanRequest;
+window.switchToManualSearch = () => { closeQRScanner(); document.getElementById('sinput')?.focus(); };
+window.togglePassVis = (id) => {
+  const el = document.getElementById(id); if (!el) return;
+  el.type = el.type === 'password' ? 'text' : 'password';
+};
 
 window.dispatchEvent(new Event('tablet-ready'));

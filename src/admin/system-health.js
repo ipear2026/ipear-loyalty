@@ -1,8 +1,11 @@
 import {
   getDb, collection, doc, query, where, getDocs, deleteDoc,
 } from '../services/firebase.js';
-import { escHtml } from '../utils.js';
+import { escHtml, friendlyError } from '../utils.js';
 import { toast } from './ui.js';
+// ADMIN FORTRESS Stage 2 — append-only ledger: the admin UI must not delete
+// financial evidence. Flag-gated to preserve rollback.
+import { isServerFinancialEnabled } from './financial-mutations.js';
 
 // Callback invoked when a delete operation alters customer/transaction set.
 // admin-main wires this to its loadStats() so KPIs refresh.
@@ -21,7 +24,6 @@ const SECONDARY_ORPHAN_COLLECTIONS = [
   { col: 'ipear_redemptions',       fields: ['customerId', 'customerUid'], label: '🎟️ Pending εκπτώσεις' },
   { col: 'ipear_referral_queue',    fields: ['newCustomerId', 'newCustomerUid'], label: '🤝 Referral queue' },
   { col: 'ipear_offer_redemptions', fields: ['customerId', 'customerDocId'], label: '🎁 Offer redemptions' },
-  { col: 'ipear_notifications',     fields: ['customerUid'], label: '🔔 Notifications' },
   { col: 'ipear_birthday_claims',   fields: ['customerUid', 'customerId'], label: '🎂 Birthday claims' },
 ];
 
@@ -139,6 +141,15 @@ export async function scanOrphans() {
 }
 
 export async function deleteOrphanTxs(customerId) {
+  // ── ADMIN FORTRESS Stage 2 — financial ledger is append-only ──
+  //    Deleting transaction history from the admin UI is no longer permitted
+  //    (and is blocked by the Firestore rule lock). Personal-data removal for
+  //    GDPR is handled separately by the anonymization flow (gdpr.js), which
+  //    preserves the immutable financial evidence while scrubbing PII.
+  if (isServerFinancialEnabled()) {
+    toast('🔒 Το ιστορικό συναλλαγών είναι append-only — δεν διαγράφεται. Για GDPR χρησιμοποίησε την ανωνυμοποίηση.', 'error');
+    return;
+  }
   if (!confirm('Θα διαγραφούν ΟΛΕΣ οι συναλλαγές αυτού του πελάτη. Συνέχεια;')) return;
   try {
     const db = getDb();
@@ -154,7 +165,7 @@ export async function deleteOrphanTxs(customerId) {
     toast('✅ Διαγράφηκαν ' + count + ' ορφανές συναλλαγές', 'success');
     scanOrphans();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -167,7 +178,7 @@ export async function deleteGhostCustomer(id, name) {
     scanOrphans();
     _onDataChanged();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -201,7 +212,7 @@ export async function deleteSecondaryOrphans(collectionName) {
     scanOrphans();
     _onDataChanged();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -268,14 +279,13 @@ export async function runSystemHealthCheck() {
       getDocs(collection(db, 'ipear_transactions')),
     ]);
     const custIds = new Set();
-    let _noPts = 0, noName = 0, noCard = 0, pushCount = 0, negPts = 0;
+    let _noPts = 0, noName = 0, noCard = 0, negPts = 0;
     csnap.forEach(d => {
       custIds.add(d.id);
       const c = d.data();
       if (!c.name) noName++;
       if (!c.card) noCard++;
       if ((c.points || 0) < 0) negPts++;
-      if (c.fcmToken) pushCount++;
       if ((c.points || 0) === 0 && (c.totalPoints || 0) === 0) _noPts++;
     });
 
@@ -305,7 +315,7 @@ export async function runSystemHealthCheck() {
     }
 
     pass('📊 Στατιστικά Βάσης',
-      'Πελάτες: ' + csnap.size + ' · Συναλλαγές: ' + tsnap.size + ' · Push: ' + pushCount + '/' + csnap.size + ' · Χωρίς αγορά: ' + ghosts);
+      'Πελάτες: ' + csnap.size + ' · Συναλλαγές: ' + tsnap.size + ' · Χωρίς αγορά: ' + ghosts);
 
     if (noName) warn('👤 Ελλιπή Στοιχεία', noName + ' πελάτες χωρίς όνομα');
     if (noCard) warn('🪪 Ελλιπή Στοιχεία', noCard + ' πελάτες χωρίς κάρτα');

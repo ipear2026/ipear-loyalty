@@ -1,5 +1,8 @@
-import { showToast, _WORKER_URL } from './utils.js';
-import { state } from './state.js';
+// state.foundCustomer is customer-only — no longer imported here. The four
+// push handlers that used to live in this file moved to src/customer/
+// customer-push.js (Sprint 2 Epic 2.2, 2026-06-23). The DEMO push stubs
+// below are intentionally state-free; they always show a demo toast and
+// don't need real customer-doc binding.
 import { logger, tagLog } from './logger.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -10,20 +13,15 @@ import {
   getFirestore, collection, addDoc, setDoc, updateDoc, deleteDoc,
   doc, getDoc, getDocs, query, where, orderBy, limit, startAfter,
   onSnapshot, runTransaction,
-  getCountFromServer, getAggregateFromServer, sum, average,
+  getCountFromServer, getAggregateFromServer, sum,
 } from 'firebase/firestore';
 import {
   getAuth, onAuthStateChanged,
   signInWithEmailAndPassword, createUserWithEmailAndPassword,
   sendPasswordResetEmail, sendEmailVerification, signOut, deleteUser,
-  RecaptchaVerifier, signInWithPhoneNumber,
-  linkWithCredential, EmailAuthProvider,
   setPersistence, browserLocalPersistence, browserSessionPersistence,
 } from 'firebase/auth';
-import {
-  getMessaging, getToken, onMessage, isSupported as fcmIsSupported,
-} from 'firebase/messaging';
-import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
+import { initializeAppCheck, ReCaptchaV3Provider, getToken as _getAppCheckToken } from 'firebase/app-check';
 
 // Build-time env only. No production-key fallbacks: a missing or placeholder
 // VITE_FB_API_KEY routes the app into DEMO mode (see IS_DEMO below) instead of
@@ -36,24 +34,14 @@ export const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FB_MSG_SENDER_ID      ?? '',
   appId:             import.meta.env.VITE_FB_APP_ID             ?? '',
 };
-export const CUSTOMER_BUILD_TAG = 'customer-20260615-v55';
-window.CUSTOMER_BUILD_TAG = CUSTOMER_BUILD_TAG;
-logger.log('customer.html loaded', CUSTOMER_BUILD_TAG);
-
-export const VAPID_KEY = import.meta.env.VITE_FCM_VAPID_KEY ?? '';
+// Build tag surfaced to HTML footers via window.CUSTOMER_BUILD_TAG (never
+// imported as ES named export — index.html reads window global directly).
+window.CUSTOMER_BUILD_TAG = 'customer-20260615-v55';
 
 // E2E-FIX: capture silent promise rejections for diagnostics
 window.addEventListener('unhandledrejection', (ev) => {
   logger.warn('[unhandled-rejection]', ev.reason?.message || ev.reason);
 });
-
-// Safety fallback: ensure _togglePush always exists on window (overridden below)
-if (!window._togglePush) {
-  window._togglePush = () => {
-    if (typeof window._enablePush === 'function') window._enablePush();
-    else window.toast && window.toast('⚠️ Ειδοποιήσεις μη διαθέσιμες','red');
-  };
-}
 
 const IS_DEMO = !firebaseConfig.apiKey
   || firebaseConfig.apiKey === 'YOUR_API_KEY'
@@ -141,17 +129,11 @@ if (IS_DEMO) {
   window._signOut = async () => {};
   window._onSnapshot = (_ref, _cb) => () => {};
   window._sendEmailVerif = async () => {};
+  window._reloadUser = async () => {};
   window._deleteAuthUser = async () => {};
   window._getDoc = async () => ({ exists: () => false, data: () => ({}) });
-  window._requestPush = window._enablePush = async () => showToast('🔔 Push notifications: demo mode','green');
-  window._disablePush = async () => showToast('🔕 Push disabled: demo mode','green');
-  window._togglePush = () => { if (state.foundCustomer?.fcmToken) window._disablePush(); else window._enablePush(); };
   // S-2 fix: demo stub takes string mode, persistence constants no longer exposed
   window._setPersistenceMode = async () => {};
-  window._RecaptchaVerifier = class { constructor(){} clear(){} };
-  window._sendPhoneOTP = async (_auth, _phone) => ({ confirm: async code => code === '123456' ? {user:{uid:'demo-phone-'+Date.now()}} : (() => { throw {code:'auth/invalid-verification-code'}; })() });
-  window._linkCredential = async (user) => user;
-  window._emailCredential = () => ({});
   window.dispatchEvent(new Event('firebase-ready'));
 } else {
   const app=initializeApp(firebaseConfig);
@@ -165,7 +147,7 @@ if (IS_DEMO) {
   // P-1: server-side aggregation helpers (zero per-doc read cost)
   window._getCountFromServer = getCountFromServer;
   window._getAggregateFromServer = getAggregateFromServer;
-  window._sum = sum; window._average = average;
+  window._sum = sum;
   const auth = getAuth(app);
   // Persistence policy:
   //   • /tablet — kiosk device, MUST keep session across tab/browser restarts
@@ -188,11 +170,12 @@ if (IS_DEMO) {
   window._sendPassReset = sendPasswordResetEmail;
   window._signOut = () => signOut(auth);
   window._sendEmailVerif = (user) => user ? sendEmailVerification(user) : Promise.resolve();
+  // L2.4-A: needed by the ?verifyOk=1 handler so the client can force-refresh
+  // the User object before deciding whether emailVerified is true. Without a
+  // reload, the client-side flag remains stale (reflects the ID token issued
+  // before the user clicked the verification link).
+  window._reloadUser = (user) => user ? user.reload() : Promise.resolve();
   window._deleteAuthUser = (user) => deleteUser(user);
-  window._RecaptchaVerifier = RecaptchaVerifier;
-  window._sendPhoneOTP = signInWithPhoneNumber;
-  window._linkCredential = linkWithCredential;
-  window._emailCredential = EmailAuthProvider.credential;
   // S-2 fix: closure-scoped persistence constants. Expose a single string-mode
   // entry point only; persistence objects no longer reachable from DevTools.
   window._setPersistenceMode = async (mode) => {
@@ -221,201 +204,95 @@ if (IS_DEMO) {
   // VITE_APP_CHECK_DISABLED=0 (or unsetting it). Firestore reads/writes
   // are not gated on App Check at the rules level — the only protection
   // we lose is the "monitor mode" telemetry until this is resolved.
+  // App Check status is exposed via `window._appCheckReady()` so downstream
+  // callable dispatchers (admin approvals, tablet callables) can BLOCK on a
+  // proven-mintable token before firing a financial callable. Rationale:
+  // the 2026-08-31 21:58 UTC incident — a stale admin tab kept dispatching
+  // approveRedemption with `X-Firebase-AppCheck: MISSING` because init had
+  // been skipped silently in an earlier bundle generation; the framework
+  // returned 401 pre-handler. Never expose the token value itself; expose
+  // only a boolean readiness state + a masked error code on failure.
   const _AC_KEY = import.meta.env.VITE_APP_CHECK_KEY ?? '';
   const _AC_DISABLED = String(import.meta.env.VITE_APP_CHECK_DISABLED ?? '').trim() === '1';
   const _AC_KEY_LOOKS_REAL = _AC_KEY && _AC_KEY.length > 30 && !/X{4,}/.test(_AC_KEY);
+  const _READY_TIMEOUT_MS = 10_000;
+  let _appCheckInstance = null;
+  const _readyPromise = new Promise((resolve) => {
+    window.__appCheckResolveReady = resolve;
+  });
+  window._appCheckStatus = 'initializing';
+  window._appCheckError  = null;
+  // Public readiness API: resolves on success within timeout, rejects otherwise.
+  // Never resolves with a token value — only with 'ready'.
+  window._appCheckReady = function _appCheckReady(timeoutMs = _READY_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+      if (window._appCheckStatus === 'ready') return resolve('ready');
+      if (window._appCheckStatus === 'failed' || window._appCheckStatus === 'skipped') {
+        return reject(new Error('appcheck-not-ready:' + window._appCheckStatus));
+      }
+      let done = false;
+      const t = setTimeout(() => {
+        if (done) return;
+        done = true;
+        reject(new Error('appcheck-timeout'));
+      }, timeoutMs);
+      _readyPromise.then((s) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        s === 'ready' ? resolve('ready') : reject(new Error('appcheck-not-ready:' + s));
+      });
+    });
+  };
+  const _markFailed = (reason) => {
+    if (window._appCheckStatus === 'ready') return; // don't downgrade
+    window._appCheckStatus = 'failed';
+    window._appCheckError  = String(reason || '').slice(0, 60); // masked
+    try { window.__appCheckResolveReady?.('failed'); } catch (_) {}
+  };
   if (_AC_DISABLED) {
+    window._appCheckStatus = 'skipped';
+    window._appCheckError  = 'disabled-by-env';
+    try { window.__appCheckResolveReady?.('skipped'); } catch (_) {}
     logger.log('[app-check] ⏭️ skipped (VITE_APP_CHECK_DISABLED=1)');
   } else if (!_AC_KEY_LOOKS_REAL) {
+    window._appCheckStatus = 'skipped';
+    window._appCheckError  = 'key-missing-or-placeholder';
+    try { window.__appCheckResolveReady?.('skipped'); } catch (_) {}
     logger.log('[app-check] ⏭️ skipped (VITE_APP_CHECK_KEY missing or placeholder)');
   } else {
     try {
-      initializeAppCheck(app, { provider: new ReCaptchaV3Provider(_AC_KEY), isTokenAutoRefreshEnabled: true });
+      _appCheckInstance = initializeAppCheck(app, { provider: new ReCaptchaV3Provider(_AC_KEY), isTokenAutoRefreshEnabled: true });
       logger.log('[app-check] ✅ initialized');
-    } catch(e) { logger.warn('[app-check] init failed:', e.message); }
-  }
-
-  // ── FCM Push Notifications ────────────────────────────────────────────
-  let _messaging = null;
-  try {
-    const _fcmOk = await fcmIsSupported();
-    if (_fcmOk) {
-      _messaging = getMessaging(app);
-    } else {
-      logger.warn('[fcm] Push not supported on this browser');
-    }
-  } catch(e) { logger.warn('[fcm] messaging init failed:', e.message); }
-
-  if (_messaging) {
-    onMessage(_messaging, payload => {
-      const n = payload.notification || {};
-      showToast(`🔔 ${n.title||'iPear'}: ${n.body||''}`, 'green');
-    });
-  }
-
-  // ── Push notifications with state machine + timeout ──
-  // FIXME (next sprint): the four window._*Push handlers below still couple
-  // to state.foundCustomer (customer-state). They belong in main.js next to
-  // the rest of the customer flow. Until then, each handler short-circuits
-  // on cashier surfaces (/tablet, /admin) so it cannot accidentally fire
-  // from a cashier session — defense-in-depth after the 2026-06-23 outage.
-  const _isCustomerSurface = typeof location === 'undefined' ||
-    !/^\/(tablet|admin)(\.html)?(\/|$)/.test(location.pathname);
-
-  let _pushBusy = false;
-
-  function _withTimeout(promise, ms) {
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
-    ]);
-  }
-
-  window._enablePush = async () => {
-    if (!_isCustomerSurface) return;  // no-op on tablet/admin
-    if (_pushBusy) return;
-    if (!_messaging) return showToast('❌ Messaging μη διαθέσιμο','red');
-    if (!VAPID_KEY || VAPID_KEY === 'YOUR_FCM_VAPID_KEY') return showToast('⚠️ VAPID key δεν έχει οριστεί','red');
-
-    // iOS Safari does NOT deliver web push unless the site is installed as a
-    // PWA (Home Screen). Without this check the user grants permission, we
-    // store a token, the toggle shows "on" — but no notification ever lands.
-    // Apple has required PWA-install for web push since iOS 16.4 and this is
-    // not negotiable, so block clearly here rather than letting the user blame
-    // the app.
-    const _ua = navigator.userAgent || '';
-    const _isIOS = /iphone|ipad|ipod/i.test(_ua);
-    const _isStandalone =
-      window.matchMedia?.('(display-mode: standalone)').matches ||
-      window.matchMedia?.('(display-mode: fullscreen)').matches ||
-      window.navigator.standalone === true;
-    if (_isIOS && !_isStandalone) {
-      return showToast('📱 Για iPhone: πρόσθεσε πρώτα την εφαρμογή στην Αρχική Οθόνη (Safari → Κοινοποίηση → Προσθήκη στην Αρχική Οθόνη). Μετά άνοιξέ την από το εικονίδιο και ενεργοποίησε ξανά.', 'red');
-    }
-
-    _pushBusy = true;
-    const { _setPushUI, _PUSH_TIMEOUT_MS } = await import('./push-notifications.js');
-    _setPushUI('loading');
-
-    try {
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') {
-        _setPushUI(false);
-        _pushBusy = false;
-        return showToast('❌ Δεν δόθηκε άδεια notifications','red');
-      }
-
-      // Let Firebase Messaging auto-register firebase-messaging-sw.js at its
-      // default scope (/firebase-cloud-messaging-push-scope/). This does NOT
-      // conflict with sw-customer.js which lives at root scope /.
-      logger.log('[push] requesting FCM token...');
-      const t0 = Date.now();
-      const token = await _withTimeout(
-        getToken(_messaging, { vapidKey: VAPID_KEY }),
-        _PUSH_TIMEOUT_MS
-      );
-      logger.log(`[push] getToken completed in ${Date.now() - t0}ms`);
-
-      if (!token) {
-        _setPushUI(false);
-        _pushBusy = false;
-        return showToast('❌ Αποτυχία λήψης token','red');
-      }
-
-      if (state.foundCustomer?.id && window._db) {
-        await _withTimeout(
-          window._updateDoc(
-            window._doc(window._db,'ipear_customers',state.foundCustomer.id),
-            { fcmToken: token, fcmUpdatedAt: new Date().toISOString() }
-          ),
-          _PUSH_TIMEOUT_MS
-        );
-        state.foundCustomer.fcmToken = token;
-      }
-
-      _setPushUI(true);
-      showToast('✅ Push notifications ενεργοποιήθηκαν!','green');
-
-      // Confirmation push — proves end-to-end delivery (SW registered, FCM
-      // accepted the token, OS surfaces the notification). Uses the worker's
-      // self-push branch (idToken auth): server verifies the token, resolves
-      // OUR uid, looks up OUR fcmToken from Firestore, pushes only to that.
-      // The `tokens` array is intentionally not sent — the worker ignores it
-      // in self-push mode so a customer can't aim a push at anyone else.
+      // ADMIN FORTRESS Stage 3B — expose a transient App Check token getter for
+      // the owner-auth adapter. Returns the token STRING for a single request;
+      // the SDK manages caching/refresh. Never persisted. Throws if unavailable.
+      window._getAppCheckToken = async (forceRefresh = false) => {
+        if (!_appCheckInstance) throw new Error('appcheck-unavailable');
+        const r = await _getAppCheckToken(_appCheckInstance, forceRefresh);
+        if (!r || !r.token) throw new Error('appcheck-no-token');
+        return r.token;
+      };
+      // Verify a token can actually be minted — an initialized SDK is not the
+      // same as a working exchange. `getToken(inst, false)` uses cache when
+      // available; a rejection here means the exchange failed at some point.
+      // We DO NOT store the token value anywhere; we only observe success.
       (async () => {
         try {
-          const idToken = await window._auth?.currentUser?.getIdToken();
-          if (!idToken) return;
-          await fetch(_WORKER_URL + '/push', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              idToken,
-              title: '🍐 iPear Loyalty',
-              message: 'Έτοιμος για ειδοποιήσεις! Θα ενημερώνεσαι πρώτος για προσφορές & πόντους.'
-            })
-          });
-        } catch(_) {}
+          await _getAppCheckToken(_appCheckInstance, /*forceRefresh*/ false);
+          window._appCheckStatus = 'ready';
+          window._appCheckError  = null;
+          try { window.__appCheckResolveReady?.('ready'); } catch (_) {}
+        } catch (e) {
+          _markFailed(e?.code || e?.message || 'token-verify-failed');
+          logger.warn('[app-check] token verify failed:', String(e?.code || e?.message || '').slice(0,60));
+        }
       })();
     } catch(e) {
-      const { _setPushUI: resetUI } = await import('./push-notifications.js');
-      resetUI(false);
-      // Map known FCM error codes to user-friendly Greek copy. Raw e.message
-      // is something like "FirebaseError: Messaging: A problem occurred while
-      // subscribing the user to FCM (messaging/permission-blocked). (...)" —
-      // useless to a real user. logger.error keeps the raw form for ops.
-      const friendly =
-          e.message === 'timeout'                                  ? '⏳ Η ενεργοποίηση καθυστερεί, δοκιμάστε ξανά'
-        : e.code === 'messaging/permission-blocked'                ? '🔕 Έχεις μπλοκάρει τα notifications από τις ρυθμίσεις του browser. Άνοιξε τις άδειες της σελίδας και δοκίμασε ξανά.'
-        : e.code === 'messaging/permission-default'                ? '🔕 Δεν δόθηκε άδεια. Δοκίμασε ξανά και πάτησε "Επιτρέπεται".'
-        : e.code === 'messaging/failed-service-worker-registration' ? '🔄 Πρόβλημα service worker. Κάνε hard refresh (Cmd/Ctrl+Shift+R) και δοκίμασε ξανά.'
-        : e.code === 'messaging/unsupported-browser'               ? '🚫 Ο browser σου δεν υποστηρίζει push notifications.'
-        : e.code === 'messaging/token-subscribe-failed'            ? '📡 Αποτυχία εγγραφής. Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά.'
-        : e.code === 'messaging/token-subscribe-no-token'          ? '📡 Δεν δόθηκε token από το FCM. Δοκίμασε ξανά σε λίγο.'
-        : e.name === 'AbortError'                                  ? '⏳ Λήξη χρόνου, δοκίμασε ξανά.'
-        :                                                            '❌ Σφάλμα ενεργοποίησης notifications.';
-      showToast(friendly, 'red');
-      logger.error('[push enable]', e.code || e.name, e.message);
-    } finally {
-      _pushBusy = false;
+      _markFailed(e?.message || e?.code || 'init-failed');
+      logger.warn('[app-check] init failed:', String(e?.message || '').slice(0,60));
     }
-  };
-
-  window._disablePush = async () => {
-    if (!_isCustomerSurface) return;  // no-op on tablet/admin
-    if (_pushBusy) return;
-    _pushBusy = true;
-    const { _setPushUI } = await import('./push-notifications.js');
-    _setPushUI('loading');
-
-    try {
-      if (state.foundCustomer?.id && window._db) {
-        await _withTimeout(
-          window._updateDoc(
-            window._doc(window._db,'ipear_customers',state.foundCustomer.id),
-            { fcmToken: '', fcmUpdatedAt: new Date().toISOString() }
-          ),
-          5000
-        );
-        state.foundCustomer.fcmToken = '';
-      }
-      _setPushUI(false);
-      showToast('🔕 Ειδοποιήσεις απενεργοποιήθηκαν','green');
-    } catch(e) {
-      _setPushUI(true);
-      showToast('❌ ' + e.message, 'red');
-    } finally {
-      _pushBusy = false;
-    }
-  };
-
-  window._togglePush = () => {
-    if (!_isCustomerSurface) return;  // no-op on tablet/admin
-    if (state.foundCustomer?.fcmToken) window._disablePush();
-    else window._enablePush();
-  };
-
-  window._requestPush = window._enablePush;
+  }
 
   // Wait for Firebase Auth to restore persisted session from IndexedDB
   await new Promise(resolve => {

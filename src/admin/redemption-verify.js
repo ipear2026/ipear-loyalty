@@ -9,10 +9,17 @@
 //  reaching into globals.
 // ═══════════════════════════════════════════════════════════════════════════
 import { escHtml, escJs } from '../utils.js';
+import { friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 import { publishLeaderboard } from './leaderboard.js';
+// ADMIN FORTRESS Stage 2 — server-authoritative code verification (flag-gated).
+import { isServerFinancialEnabled, serverVerifyRedemption } from './financial-mutations.js';
 
 const DB = () => window._db;
+
+// Last looked-up code (set by verifyCode) — the server resolves by code, so the
+// confirm handlers pass it to adminVerifyRedemption when the flag is ON.
+let _lastCode = '';
 
 // Injected by admin-main once on bootstrap.
 let _ctx = {
@@ -32,6 +39,7 @@ export async function verifyCode() {
     toast('⚠️ Εισάγετε 6-ψήφιο κωδικό!', 'error');
     return;
   }
+  _lastCode = raw; // server resolves by code when the fortress flag is ON
   const resEl = document.getElementById('rcode-result');
   resEl.style.display = 'none';
   try {
@@ -108,7 +116,7 @@ export async function verifyCode() {
       </div>`;
     }
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }
 
@@ -118,6 +126,28 @@ export async function confirmVerify(redemptionId, code) {
   if (vBtn) {
     vBtn.disabled = true;
     vBtn.textContent = '⏳ Εξαργύρωση...';
+  }
+  // ── ADMIN FORTRESS Stage 2 — server-authoritative path (flag-gated) ──
+  //    The server resolves the code → reward, re-reads the catalog cost, debits,
+  //    and writes the ledger + audit. Mutually exclusive with the legacy path.
+  if (isServerFinancialEnabled()) {
+    try {
+      const r = await serverVerifyRedemption({ code: code || _lastCode });
+      const debited = Math.abs(Number(r && r.amount) || 0);
+      document.getElementById('rcode-result').innerHTML = `<div style="background:linear-gradient(135deg,#0f1f00,#1a3300);border:1px solid #8ae900;border-radius:11px;padding:20px;text-align:center">
+        <div style="font-size:2.5rem;margin-bottom:8px">✅</div>
+        <div style="color:#8ae900;font-weight:900;font-size:1.2rem;margin-bottom:4px">${r && r.idempotent ? 'Ήδη εξαργυρωμένο' : 'Εξαργύρωση Επιτυχής!'}</div>
+        <div style="color:#888;font-size:.82rem;margin-top:4px">${r && r.idempotent ? '' : 'Αφαιρέθηκαν ' + debited + ' πόντοι'}</div>
+      </div>`;
+      document.getElementById('rcode-in').value = '';
+      toast(r && r.idempotent ? '↺ Ήδη εξαργυρωμένο' : '✅ Εξαργύρωση OK', 'success');
+      publishLeaderboard().catch(() => {});
+      _ctx.refreshAdminViews();
+    } catch (e) {
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+      if (vBtn && document.body.contains(vBtn)) { vBtn.disabled = false; vBtn.textContent = '💶 Επιβεβαίωση & Εξαργύρωση'; }
+    }
+    return; // never fall through to the legacy direct-write path
   }
   try {
     const db = DB();
@@ -248,7 +278,7 @@ export async function confirmVerify(redemptionId, code) {
     toast(`✅ ${found.label} — ${found.customerName}`, 'success');
     _ctx.refreshAdminViews();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
     if (vBtn && document.body.contains(vBtn)) {
       vBtn.disabled = false;
       vBtn.textContent = '💶 Επιβεβαίωση & Εξαργύρωση';
@@ -262,6 +292,28 @@ export async function confirmOfferVerify(redemptionId) {
   if (vBtn) {
     vBtn.disabled = true;
     vBtn.textContent = '⏳ Επεξεργασία...';
+  }
+  // ── ADMIN FORTRESS Stage 2 — server-authoritative path (flag-gated) ──
+  //    Server resolves the code → offer, re-reads the canonical offer value
+  //    (H1-safe), credits, and writes the ledger + audit.
+  if (isServerFinancialEnabled()) {
+    try {
+      const r = await serverVerifyRedemption({ code: _lastCode });
+      const credited = Math.abs(Number(r && r.amount) || 0);
+      document.getElementById('rcode-result').innerHTML = `<div style="background:linear-gradient(135deg,#0f1f00,#1a3300);border:1px solid #8ae900;border-radius:11px;padding:20px;text-align:center">
+        <div style="font-size:2.5rem;margin-bottom:8px">🎁</div>
+        <div style="color:#8ae900;font-weight:900;font-size:1.2rem;margin-bottom:4px">${r && r.idempotent ? 'Ήδη εγκεκριμένο' : 'Προσφορά Εγκρίθηκε!'}</div>
+        <div style="color:#888;font-size:.82rem;margin-top:4px">${r && r.idempotent ? '' : '+' + credited + ' bonus πόντοι'}</div>
+      </div>`;
+      document.getElementById('rcode-in').value = '';
+      toast(r && r.idempotent ? '↺ Ήδη εγκεκριμένο' : '🎁 Προσφορά OK', 'success');
+      publishLeaderboard().catch(() => {});
+      _ctx.refreshAdminViews();
+    } catch (e) {
+      toast('❌ ' + (e?.message || 'Σφάλμα διακομιστή'), 'error');
+      if (vBtn && document.body.contains(vBtn)) { vBtn.disabled = false; vBtn.textContent = '🎁 Έγκριση Προσφοράς'; }
+    }
+    return; // never fall through to the legacy direct-write path
   }
   try {
     const db = DB();
@@ -284,20 +336,32 @@ export async function confirmOfferVerify(redemptionId) {
       if (!redSnap.exists()) throw new Error('Κωδικός δεν βρέθηκε.');
       found = redSnap.data();
       if (found.used) throw new Error('Ήδη χρησιμοποιημένος.');
+      if (found.status === 'cancelled' || found.status === 'rejected') {
+        throw new Error('⚠️ Άκυρος κωδικός ή έχει λήξει.');
+      }
+      if (found.expiresAt && new Date() > new Date(found.expiresAt)) {
+        throw new Error('⚠️ Ο κωδικός έληξε.');
+      }
 
-      // SECURITY: bonus read from OFFER DOC (trusted), not redemption doc.
+      // SECURITY (Pen-Test Fix #1): bonus read from OFFER DOC (trusted)
+      // INSIDE the txn — was previously a getDocs(query(active==true))
+      // OUTSIDE the txn, which left a race window where an admin could
+      // disable the offer between the lookup and the credit-write.
+      //
+      // txn.get on the offer doc serialises the read with the rest of the
+      // commit so a concurrent admin disable forces a txn retry that picks
+      // up the new active==false state and rejects the credit.
       const offerId = found.offerId;
       let offerBonus = 0;
       if (offerId) {
-        const offersSnap = await window._getDocs(
-          window._query(window._col(db, 'ipear_offers'), window._where('active', '==', true))
-        );
-        offersSnap.forEach((d) => {
-          if (d.id === offerId || d.data().title === offerId) {
-            offerBonus =
-              Number(d.data().bonusPoints) || Number(d.data().pointsCost) || 0;
-          }
-        });
+        const offerRef = window._doc(db, 'ipear_offers', offerId);
+        const offerSnap = await txn.get(offerRef);
+        if (offerSnap.exists() && offerSnap.data().active === true) {
+          const offerData = offerSnap.data();
+          offerBonus = Number(offerData.bonusPoints) || Number(offerData.pointsCost) || 0;
+        } else {
+          throw new Error('Η προσφορά δεν είναι πλέον ενεργή.');
+        }
       }
 
       // Try customerId (auth UID) first, fallback to customerDocId (legacy).
@@ -358,7 +422,7 @@ export async function confirmOfferVerify(redemptionId) {
     _ctx.refreshAdminViews();
     if (bonus > 0) publishLeaderboard().catch(() => {});
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
     if (vBtn && document.body.contains(vBtn)) {
       vBtn.disabled = false;
       vBtn.textContent = '🎁 Έγκριση Προσφοράς';

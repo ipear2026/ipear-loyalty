@@ -32,10 +32,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { test, expect } from '@playwright/test';
-import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { initializeApp, cert, applicationDefault, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
-const REQUIRED_ENV = ['TEST_EMAIL', 'TEST_PASS', 'FIREBASE_SERVICE_ACCOUNT_JSON'];
+const REQUIRED_ENV = ['TEST_EMAIL', 'TEST_PASS'];
 const REWARD_COST = 1000; // 5€ tier — smallest, fastest to reset
 // Stable id for the dummy reward we upsert so the customer app has at least
 // one active reward to render even on a project where the admin hasn't
@@ -55,8 +55,17 @@ const E2E_REWARD_PAYLOAD = {
 function ensureAdminApp() {
   if (getApps().length) return;
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  const sa = JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
-  initializeApp({ credential: cert(sa), projectId: sa.project_id });
+  if (raw) {
+    // Local/dev: explicit service-account JSON (base64).
+    const sa = JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
+    initializeApp({ credential: cert(sa), projectId: sa.project_id });
+  } else {
+    // CI: keyless Workload Identity Federation → Application Default Credentials.
+    initializeApp({
+      credential: applicationDefault(),
+      projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'loyalty-ipear',
+    });
+  }
 }
 
 test.describe('Golden path', () => {

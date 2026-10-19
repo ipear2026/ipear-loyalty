@@ -16,10 +16,80 @@
 //    createdAt   string
 //    updatedAt   string
 // ═══════════════════════════════════════════════════════════════════════════
-import { escHtml, escJs } from '../utils.js';
+import { escHtml, escJs, friendlyError } from '../utils.js';
 import { toast, closeM } from './ui.js';
 
 const DB = () => window._db;
+
+// ── Image upload / compression ─────────────────────────────────────────────
+// Mirrors offers.js — same 900px / JPEG 0.78 compression so the result
+// stays under Firestore's 1 MB doc limit.
+let _rewardPendingFile = null;
+
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 900;
+        let w = img.width;
+        let h = img.height;
+        if (w > MAX) {
+          h = Math.round((h * MAX) / w);
+          w = MAX;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.78));
+      };
+      img.onerror = reject;
+      img.src = ev.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+export function previewRewardImage(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    toast('⚠️ Η εικόνα δεν πρέπει να ξεπερνά 10MB', 'error');
+    return;
+  }
+  _rewardPendingFile = file;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    document.getElementById('rw-img-thumb').src = ev.target.result;
+    document.getElementById('rw-img-placeholder').style.display = 'none';
+    document.getElementById('rw-img-preview').style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+export function removeRewardImage(e) {
+  if (e) e.stopPropagation();
+  _rewardPendingFile = null;
+  document.getElementById('rw-imageUrl').value = '';
+  document.getElementById('rw-image-file').value = '';
+  document.getElementById('rw-img-thumb').src = '';
+  document.getElementById('rw-img-placeholder').style.display = '';
+  document.getElementById('rw-img-preview').style.display = 'none';
+}
+
+function showExistingRewardImg(url) {
+  if (url) {
+    document.getElementById('rw-img-thumb').src = url;
+    document.getElementById('rw-img-placeholder').style.display = 'none';
+    document.getElementById('rw-img-preview').style.display = 'block';
+    document.getElementById('rw-imageUrl').value = url;
+  } else {
+    removeRewardImage(null);
+  }
+}
 
 // ── Render list ────────────────────────────────────────────────────────────
 export async function loadRewards() {
@@ -76,6 +146,9 @@ export function openRewardModal() {
   document.getElementById('rw-discount').value = '5';
   document.getElementById('rw-order').value = '0';
   document.getElementById('rw-active').checked = true;
+  document.getElementById('rw-eshop').checked = false;
+  _rewardPendingFile = null;
+  removeRewardImage(null);
   document.getElementById('m-reward').classList.add('show');
 }
 
@@ -92,6 +165,9 @@ export async function openRewardEdit(id) {
   document.getElementById('rw-discount').value = Number(data.discount) || 0;
   document.getElementById('rw-order').value = Number(data.order) || 0;
   document.getElementById('rw-active').checked = !!data.isActive;
+  document.getElementById('rw-eshop').checked = !!data.eshopEligible;
+  _rewardPendingFile = null;
+  showExistingRewardImg(data.imageUrl || '');
   document.getElementById('m-reward').classList.add('show');
 }
 
@@ -128,14 +204,26 @@ export async function saveReward() {
   }
 
   try {
+    let imageUrl = document.getElementById('rw-imageUrl').value || '';
+    if (_rewardPendingFile) {
+      if (btn) btn.textContent = '⏳ Συμπίεση εικόνας...';
+      imageUrl = await compressImage(_rewardPendingFile);
+      _rewardPendingFile = null;
+    }
+    const safeUrl = imageUrl && (imageUrl.startsWith('https://') || imageUrl.startsWith('data:image/')) ? imageUrl : '';
     const data = {
       icon: document.getElementById('rw-icon').value.trim() || '🎟️',
+      imageUrl: safeUrl,
       title,
       description: document.getElementById('rw-desc').value.trim() || '',
       cost,
       discount,
       order: parseInt(document.getElementById('rw-order').value, 10) || 0,
       isActive: document.getElementById('rw-active').checked,
+      // Flow B gate: only rewards explicitly flagged here can be redeemed as an
+      // online WooCommerce coupon via /woo-reward-coupon. Absent/false ⇒ in-store
+      // QR only (unchanged behaviour).
+      eshopEligible: document.getElementById('rw-eshop').checked,
       updatedAt: new Date().toISOString(),
     };
     const editId = document.getElementById('reward-edit-id').value;
@@ -150,7 +238,7 @@ export async function saveReward() {
     closeM();
     loadRewards();
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -171,7 +259,7 @@ export async function toggleReward(id, current) {
     loadRewards();
     toast(current ? '⏸ Απενεργοποιήθηκε' : '▶️ Ενεργοποιήθηκε', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _toggleRewardBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;
@@ -191,7 +279,7 @@ export async function deleteReward(id) {
     loadRewards();
     toast('🗑 Η ανταμοιβή διαγράφηκε.', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _deleteRewardBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;

@@ -17,76 +17,25 @@
 //    for backwards compat.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Pure SDK functions (no init needed — safe to re-export directly).
+// Pure SDK re-exports — only the symbols currently used by admin modules.
+// If you need another Firestore/Auth symbol, prefer a direct import from
+// 'firebase/firestore' or 'firebase/auth' instead of expanding this list.
 export {
-  collection, addDoc, setDoc, updateDoc, deleteDoc,
-  doc, getDoc, getDocs, query, where, orderBy, limit,
+  collection, doc, setDoc, deleteDoc,
+  getDocs, query, where,
   onSnapshot, runTransaction,
-  getCountFromServer, getAggregateFromServer, sum, average,
 } from 'firebase/firestore';
 
-export {
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
-  sendEmailVerification,
-  deleteUser,
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-  linkWithCredential,
-  EmailAuthProvider,
-} from 'firebase/auth';
-
-// ── Live bindings to the singletons created by firebase-init.js ──
-// Cannot use top-level `export const db = window._db;` because firebase-init.js
-// may not have finished initializing when this module is first evaluated.
-// Getter functions defer the read to call-time.
-
-/** Get the initialized Firestore instance. Throws if Firebase not yet ready. */
-export function getDb() {
-  if (!window._db) throw new Error('[services/firebase] Firestore not initialized — wait for "firebase-ready" event');
-  return window._db;
-}
-
-/** Get the initialized Auth instance. Throws if Firebase not yet ready. */
+/** Get the initialized Firebase Auth instance. Throws if Firebase not yet ready. */
 export function getAuth() {
   if (!window._auth) throw new Error('[services/firebase] Auth not initialized — wait for "firebase-ready" event');
   return window._auth;
 }
 
-/** True once firebase-init.js has finished initialization. */
-export function isReady() {
-  return !!window._firebaseReady;
-}
-
-// ── Auth convenience wrappers (bind the singleton auth) ──────────
-
-export function signIn(email, password) {
-  return window._signIn(getAuth(), email, password);
-}
-
-export function signOut() {
-  return window._signOut();
-}
-
-export function createUser(email, password) {
-  return window._createUser(getAuth(), email, password);
-}
-
-export function sendPasswordReset(email) {
-  return window._sendPassReset(getAuth(), email);
-}
-
-export function sendEmailVerif(user) {
-  return window._sendEmailVerif(user);
-}
-
-export function deleteAuthUser(user) {
-  return window._deleteAuthUser(user);
-}
-
-export function setPersistenceMode(mode) {
-  return window._setPersistenceMode(mode);
+/** Get the initialized Firestore instance. Throws if Firebase not yet ready. */
+export function getDb() {
+  if (!window._db) throw new Error('[services/firebase] Firestore not initialized — wait for "firebase-ready" event');
+  return window._db;
 }
 
 // ── Customer lookup ladder (HIGH-1 / SMS-only compatible) ───────────
@@ -115,6 +64,63 @@ export function setPersistenceMode(mode) {
 //   Conflating that with a network error sends users into a confusing
 //   "App Check problem" message when their account simply does not
 //   exist. Treating it as not-found is the correct UX.
+// ═══════════════════════════════════════════════════════════════════════════
+//  HIGH-1 (Pen-Test 2026-06-24): Customer-app field whitelist
+//
+//  The customer doc rule allows the owner to read their own document, but
+//  Firestore can't project fields server-side — the entire doc reaches the
+//  client. We can't hide it from the Network tab (architectural fix tracked
+//  for Sprint 4 = split customer / customer_internal collections), but we
+//  CAN keep the admin-only fields out of in-app state + localStorage so
+//  they're not surfaced via DevTools Console / Application tabs.
+//
+//  Excluded fields (deliberately NOT in the whitelist):
+//   • suspicious        — fraud watchlist flag set by admin. Leaking this
+//                         to the customer defeats the entire feature.
+//   • _migratedFrom     — internal data-model metadata (legacy doc id).
+//   • registeredStoreId — which store onboarded the customer. Will become
+//   • registeredStoreName intelligence once iPear adds more stores.
+//
+//  ⚠️ MAINTENANCE: when the Worker (email-worker.js) adds a NEW server-set
+//      flag to ipear_customers that the CUSTOMER APP reads to gate a retry
+//      (e.g. "send X if Y is not set"), that flag MUST be added here. Missing
+//      a flag turns into a per-login spam loop because the client sees
+//      `undefined !== true` and re-fires. See the 2026-06-25 regression:
+//      marketingWelcomeProcessed was missed → welcome-email per login.
+//      Reference _retryPendingBonuses in src/main.js for the pattern.
+//
+//  Kept (customer needs them for UI):
+//   • Identity / profile (name, phone, email, card, uid, birthday)
+//   • Financial state   (points, totalPoints, tier, lastTierCheck)
+//   • Consent           (marketingOptIn*, termsAcceptedAt)
+//   • Lifecycle flags   (blocked, deletionRequested*, eshopCouponUsed,
+//                        referralCount, referralProcessed, createdAt)
+// ═══════════════════════════════════════════════════════════════════════════
+const _CUSTOMER_SAFE_FIELDS = [
+  'name', 'phone', 'email', 'card', 'uid',
+  'points', 'totalPoints', 'tier', 'lastTierCheck',
+  'birthday', 'blocked', 'createdAt',
+  'referralCount', 'referralProcessed', 'eshopCouponUsed',
+  'marketingOptIn', 'marketingOptInAt', 'termsAcceptedAt',
+  // marketingWelcomeProcessed / marketingWelcomeAt are owned by the Worker
+  // (set inside /send-welcome's atomic transaction) but the customer client
+  // MUST be able to read them — _retryPendingBonuses gates the
+  // /send-welcome retry on the customer-app side using these flags. Leaving
+  // them out of the whitelist caused a welcome-email spam loop: client
+  // saw `undefined !== true`, retried, worker skipped the bonus credit but
+  // still sent the email. (Pen-Test regression fix, 2026-06-25.)
+  'marketingWelcomeProcessed', 'marketingWelcomeAt',
+  'notificationsEnabled', 'deletionRequested', 'deletionRequestedAt',
+];
+
+function _pickCustomerFields(raw) {
+  const out = {};
+  for (const k of _CUSTOMER_SAFE_FIELDS) {
+    if (k in raw) out[k] = raw[k];
+  }
+  return out;
+}
+
 export async function findCustomerByAuth(authUid, email, { logger } = {}) {
   const _log = logger || { warn: () => {} };
   let found = null;
@@ -133,7 +139,7 @@ export async function findCustomerByAuth(authUid, email, { logger } = {}) {
   if (authUid) {
     try {
       const docSnap = await window._getDoc(window._doc(window._db, 'ipear_customers', authUid));
-      if (docSnap.exists()) found = { id: docSnap.id, ...docSnap.data() };
+      if (docSnap.exists()) found = { id: docSnap.id, ..._pickCustomerFields(docSnap.data()) };
     } catch (e) { noteError('uid-doc', e); }
 
     if (!found) {
@@ -141,7 +147,7 @@ export async function findCustomerByAuth(authUid, email, { logger } = {}) {
         const uidSnap = await window._getDocs(
           window._query(window._col(window._db, 'ipear_customers'), window._where('uid', '==', authUid))
         );
-        uidSnap.forEach(d => { if (!found) found = { id: d.id, ...d.data() }; });
+        uidSnap.forEach(d => { if (!found) found = { id: d.id, ..._pickCustomerFields(d.data()) }; });
       } catch (e) { noteError('uid-field', e); }
     }
   }
@@ -151,7 +157,7 @@ export async function findCustomerByAuth(authUid, email, { logger } = {}) {
       const snap = await window._getDocs(
         window._query(window._col(window._db, 'ipear_customers'), window._where('email', '==', email))
       );
-      snap.forEach(d => { if (!found) found = { id: d.id, ...d.data() }; });
+      snap.forEach(d => { if (!found) found = { id: d.id, ..._pickCustomerFields(d.data()) }; });
     } catch (e) { noteError('email', e); }
   }
 

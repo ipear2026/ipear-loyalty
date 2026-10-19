@@ -1,4 +1,5 @@
 import { getDb, doc, setDoc, onSnapshot } from '../services/firebase.js';
+import { friendlyError } from '../utils.js';
 import { authState } from './auth-state.js';
 import { toast } from './ui.js';
 import { logger } from '../logger.js';
@@ -61,6 +62,6 @@ export async function toggleKillSwitch() {
     });
     toast(newVal ? '🔴 Λειτουργία Συντήρησης ΕΝΕΡΓΗ' : '✅ Λειτουργία Συντήρησης ΑΠΕΝΕΡΓΟΠΟΙΗΘΗΚΕ', newVal ? 'error' : 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }

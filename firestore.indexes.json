@@ -33,6 +33,23 @@
         { "fieldPath": "customerEmail", "order": "ASCENDING" },
         { "fieldPath": "date",          "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "ipear_redemption_requests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",         "order": "ASCENDING" },
+        { "fieldPath": "requestedAtTs",  "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "ipear_redemption_requests",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",         "order": "ASCENDING" },
+        { "fieldPath": "storeId",        "order": "ASCENDING" },
+        { "fieldPath": "requestedAtTs",  "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

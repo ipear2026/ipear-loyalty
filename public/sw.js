@@ -1,152 +1,67 @@
-// ─── bump this version every deploy to bust the cache ────────────────────────
-const CACHE_VER = 'ipear-admin-20260615-v6';
+// ═══════════════════════════════════════════════════════════════════════════
+//  TOMBSTONE SERVICE WORKER  —  /sw.js
+//
+//  Purpose: migrate clients still controlled by the OBSOLETE pre-rename
+//  `/sw.js` worker onto the current build. Older builds registered `/sw.js`;
+//  the app now registers `/sw-customer.js`. A client opened on an old build is
+//  stuck: its old `/sw.js` serves old cached HTML+JS (which calls now-retired
+//  Worker endpoints → the "endpoint-retired" toast), and the browser's periodic
+//  update of that registration used to FAIL because `/sw.js` had become the SPA
+//  HTML fallback (text/html + nosniff → "unsupported MIME type"). So the old
+//  worker could never be replaced and the client never loaded the new bundle.
+//
+//  Serving this real JS at `/sw.js` makes that update SUCCEED. This worker then
+//  purges every cache, unregisters itself, and reloads its window clients once.
+//  The reloaded (now SW-less) client fetches fresh from the network → current
+//  index.html → current bundle → registers `sw-customer.js` → converges.
+//
+//  Safety:
+//   • Runs once per stale client (it unregisters itself; the reloaded client
+//     registers `sw-customer.js`, never `/sw.js`) → NO reload loop.
+//   • The reload is a GET navigation, never a POST replay; redemptions are
+//     user-tap-initiated and the server is idempotent (deterministic ledger
+//     ids) → NO repeated financial action on migration.
+//   • Caches/serves NO application assets — it only tears the old worker down.
+//   • Fresh clients never register `/sw.js`, so they are unaffected.
+// ═══════════════════════════════════════════════════════════════════════════
 
-// ═══ KILL SWITCH: Nuclear self-destruct for zombie PWA recovery ═════════════
-const _KILL_CHECK_URL = 'https://email-worker.ipear2026.workers.dev/sw-kill';
-let _killChecked = false;
-async function _checkKillSwitch() {
-  if (_killChecked) return false;
-  _killChecked = true;
-  try {
-    const res = await fetch(_KILL_CHECK_URL, { cache: 'no-store' });
-    if (!res.ok) return false;
-    const data = await res.json();
-    if (data.nuke) {
+self.addEventListener('install', () => {
+  // Take over as fast as possible so `activate` runs on this update.
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    // 1) Purge ALL caches — the old bundle + old index.html live here.
+    try {
       const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-      await self.registration.unregister();
-      const clients = await self.clients.matchAll();
-      clients.forEach(c => c.navigate(c.url));
-      return true;
-    }
-  } catch(_) {}
-  return false;
-}
-const SHELL = ['admin.html', 'manifest.json'];
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch (_) { /* best-effort */ }
 
-// ── Install: pre-cache shell ─────────────────────────────────────────────────
-self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(CACHE_VER)
-      .then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' }))))
-      .then(() => self.skipWaiting())
-  );
+    // 2) Take control of in-scope window clients so we can reload them. A real
+    //    stale client is already controlled via its inherited /sw.js
+    //    registration; claim() also covers any client not yet controlled by
+    //    this worker (and makes the one-time reload deterministic).
+    try { await self.clients.claim(); } catch (_) { /* best-effort */ }
+
+    // 3) Unregister self — the active worker keeps running (and keeps
+    //    controlling existing clients) for the rest of this handler, but once
+    //    a client reloads it is served straight from the network with no SW.
+    try { await self.registration.unregister(); } catch (_) { /* best-effort */ }
+
+    // 4) Reload each controlled window client exactly once to pull fresh code.
+    //    GET navigation only — never a POST replay — so no redemption/ledger
+    //    action is repeated. Runs once (this worker then unregisters), so the
+    //    reloaded client registers sw-customer.js, never /sw.js → no loop.
+    try {
+      const clients = await self.clients.matchAll({ type: 'window' });
+      for (const client of clients) {
+        try { await client.navigate(client.url); } catch (_) { /* ignore per-client */ }
+      }
+    } catch (_) { /* best-effort */ }
+  })());
 });
 
-// ── Activate: check kill switch, delete old caches, take control ────────────
-self.addEventListener('activate', e => {
-  e.waitUntil(
-    _checkKillSwitch().then(nuked => {
-      if (nuked) return;
-      return caches.keys()
-        .then(keys => Promise.all(
-          keys.filter(k => k !== CACHE_VER).map(k => caches.delete(k))
-        ))
-        .then(() => self.clients.claim());
-    })
-  );
-});
-
-// ── Fetch: network-first for HTML, cache-first for assets ────────────────────
-self.addEventListener('fetch', e => {
-  const url = e.request.url;
-  if (!url.startsWith(self.location.origin)) return;
-
-  // Hostname-based bypass for Firebase/CDN — avoids false matches on path segments
-  try {
-    const { hostname } = new URL(url);
-    if (
-      hostname.endsWith('googleapis.com') ||
-      hostname.endsWith('gstatic.com')    ||
-      hostname.endsWith('firebaseio.com') ||
-      hostname.endsWith('firebaseapp.com')||
-      hostname === 'cdnjs.cloudflare.com'
-    ) return;
-  } catch (_) { return; }
-
-  // Cross-SW guard: this SW only handles admin; never intercept customer/tablet pages
-  if (url.endsWith('customer.html') || url.endsWith('tablet.html')) return;
-
-  const isHTML = e.request.headers.get('accept')?.includes('text/html') ||
-                 url.endsWith('.html') || url.endsWith('/admin');
-
-  if (isHTML) {
-    // Network-first: always get fresh admin.html, fall back to cache offline
-    e.respondWith(
-      fetch(e.request, { cache: 'no-store' })
-        .then(res => {
-          if (res.status === 200) {
-            const clone = res.clone();
-            caches.open(CACHE_VER).then(c => c.put(e.request, clone)).catch(() => {});
-          }
-          return res;
-        })
-        .catch(() => caches.match('admin.html'))
-    );
-  } else {
-    // Cache-first for assets (manifest, icons, fonts)
-    // No HTML fallback for failed asset fetches — returning wrong content type causes errors
-    e.respondWith(
-      caches.match(e.request).then(cached => {
-        if (cached) return cached;
-        return fetch(e.request).then(res => {
-          if (e.request.method === 'GET' && res.status === 200) {
-            const clone = res.clone();
-            caches.open(CACHE_VER).then(c => c.put(e.request, clone)).catch(() => {});
-          }
-          return res;
-        });
-      })
-    );
-  }
-});
-
-// ── Listen for messages from client ──────────────────────────────────────────
-self.addEventListener('message', e => {
-  if (e.data === 'SKIP_WAITING') self.skipWaiting();
-  if (e.data === 'NUKE') {
-    caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))))
-      .then(() => self.registration.unregister())
-      .then(() => self.clients.matchAll())
-      .then(cls => cls.forEach(c => c.navigate(c.url)));
-  }
-});
-
-// ── FCM Push Notifications ─────────────────────────────────────────────────
-// This SW (admin) shares scope "/" with sw-customer.js.  When admin.html is
-// the last page visited this SW becomes the active controller.  Without a
-// push handler, incoming FCM pushes would be silently dropped.
-self.addEventListener('push', e => {
-  if (!e.data) return;
-  let payload;
-  try { payload = e.data.json(); } catch(_) { return; }
-
-  const notif = payload.notification || {};
-  const data  = payload.data || {};
-
-  const title = notif.title || data.title || 'iPear Loyalty';
-  const body  = notif.body  || data.body  || '';
-
-  e.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      icon:  '/icon-192.png',
-      badge: '/icon-192.png',
-      tag:   data.tag || 'ipear-push',
-      data:  data,
-    })
-  );
-});
-
-// ── Notification click → open customer app ──────────────────────────────────
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  const url = '/customer.html';
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-      const existing = list.find(c => c.url.includes('customer'));
-      if (existing) return existing.focus().catch(() => clients.openWindow(url));
-      return clients.openWindow(url);
-    })
-  );
-});
+// Passthrough: never cache or serve application assets during this worker's
+// brief life, so nothing stale is handed back.
+self.addEventListener('fetch', () => { /* defer to network */ });

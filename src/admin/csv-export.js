@@ -1,5 +1,5 @@
 import { getDb, collection, getDocs } from '../services/firebase.js';
-import { tier } from '../utils.js';
+import { tier, friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 
 export async function exportCSV() {
@@ -31,6 +31,6 @@ export async function exportCSV() {
     a.click();
     toast('✅ CSV εξήχθη επιτυχώς!', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   }
 }

@@ -4,7 +4,15 @@
 //
 //  Environment Variables (Settings → Variables στο Cloudflare):
 //
-//  ADMIN_SECRET      → το μυστικό σου, π.χ. "ipear-secret-2024-xyz"
+//  (ADMIN_SECRET — ELIMINATED in Admin Fortress Stage 3F. No runtime code reads
+//   it; there is no master secret. Admin uses Firebase owner auth + App Check;
+//   Woo uses WOO_LOOKUP_SECRET / WOO_LOYALTY_SECRET; backups use BACKUP_SIGNING_KEY.)
+//  OWNER_UIDS            → comma-separated owner UID allowlist (admin /admin/v2/*)
+//  FIREBASE_PROJECT_NUMBER → App Check audience/issuer (admin /admin/v2/*)
+//  FIREBASE_API_KEY      → Identity Toolkit key (owner ID-token verification)
+//  WOO_LOOKUP_SECRET     → scoped read-only lookup (/woo/v2/get-user)
+//  WOO_LOYALTY_SECRET    → scoped credit/refund (/woo-credit-order, /woo-refund-order)
+//  BACKUP_SIGNING_KEY    → HMAC key for signed backup download URLs
 //  BREVO_API_KEY     → API key από brevo.com
 //  SENDER_EMAIL      → επαληθευμένο email στο Brevo, π.χ. "loyalty@ipear.gr"
 //  SENDER_NAME       → "iPear Loyalty"
@@ -17,32 +25,43 @@
 //
 //  APP_URL           → e.g. "https://loyalty.ipear.gr" (used for welcome email CTA link)
 //
-//  ENDPOINTS:
-//  POST /                → αποστολή bulk email (Brevo) — requires ADMIN_SECRET
-//  POST /sms             → αποστολή SMS (Brevo Transactional SMS) — requires ADMIN_SECRET
-//  POST /bulk-sms        → μαζική αποστολή SMS (Brevo) — requires ADMIN_SECRET
-//  POST /push            → αποστολή push notifications (FCM V1) — requires ADMIN_SECRET
-//  POST /admin/redeem-attempt → brute-force guard for redemption approval — requires ADMIN_SECRET
-//  POST /woo-add-points    → WooCommerce integration: add loyalty points on order — requires ADMIN_SECRET
-//  POST /woo-refund-points → WooCommerce: clawback loyalty points on order refund — requires ADMIN_SECRET
-//  POST /woo-get-user      → WooCommerce: fetch customer points/name by email — requires ADMIN_SECRET
-//  POST /woo-create-coupon  → Create real WooCommerce coupon for e-shop offer redemption — requires ADMIN_SECRET
-//  POST /woo-sync-tier      → Sync VIP tier to WooCommerce user meta — public, Firebase ID token auth, rate-limited
-//  POST /reset-password  → branded password reset email (public, no secret needed)
-//  POST /send-welcome    → welcome email after registration (public, rate-limited)
-//  POST /send-sms-otp    → Brevo SMS fallback OTP (public, rate-limited)
-//  POST /verify-sms-otp  → verify Brevo OTP code (public, rate-limited)
-//  POST /client-error    → client-side error telemetry (public, rate-limited, fire-and-forget)
-//  POST /log-event       → zero-cookie funnel analytics: anonymous event counters (public, rate-limited)
-//  POST /admin/export-backup → cross-cloud backup: read-only customer data snapshot (requires ADMIN_SECRET)
-//  GET  /health-deep     → deep health check: Worker + Brevo + Firestore (requires ADMIN_SECRET)
+//  ENDPOINTS (post-Stage-3F):
+//  ADMIN (owner auth: Firebase ID token + admin:true + OWNER_UID + App Check)
+//  POST /admin/v2/email | /admin/v2/sms | /admin/v2/bulk-sms
+//       /admin/v2/delete-auth-user | /admin/v2/export-backup
+//  WOO (scoped secrets)
+//  POST /woo/v2/get-user   → read-only points/name lookup — WOO_LOOKUP_SECRET
+//  POST /woo-credit-order  → PHASE L1 integer-cent credit + ledger — WOO_LOYALTY_SECRET
+//  POST /woo-refund-order  → PHASE L1 refund FSM — WOO_LOYALTY_SECRET
+//  PUBLIC / idToken
+//  POST /woo-create-coupon  → e-shop coupon — Firebase ID token (customer), rate-limited
+//  POST /woo-sync-tier      → VIP tier sync — Firebase ID token, rate-limited
+//  POST /reset-password | /send-welcome | /send-sms-otp | /verify-sms-otp
+//       /client-error | /log-event   → public, rate-limited
+//  POST /erp/lookup-by-phone, /erp/ping → ERP_SECRET
+//  GET  /health             → public health check
+//  GET  /admin/export-download → HMAC-signed (BACKUP_SIGNING_KEY) R2 stream
+//  RETIRED (unconditional 410 endpoint-retired; Stage 3D/3F — no master secret)
+//       /  /sms  /bulk-sms  /admin/redeem-attempt  /admin/delete-auth-user
+//       /admin/export-backup  /admin/create-admin-user  /woo-add-points
+//       /woo-refund-points  /woo-get-user  GET /health-deep
+// Push endpoints (/push, /push-debug) removed 2026-07-31 — app dropped push.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { normalizeIpForRateLimit } from './src/worker/lib/ip.js';
 import { normalizeGreekSMS } from './src/worker/lib/sms.js';
-import {
-  makeRedeemRateKey, makeFailKey, makeBlockKey,
-} from './src/worker/lib/redeem-keys.js';
+// Stage 3F: redeem-keys.js helpers were used only by the removed
+// /admin/redeem-attempt guard; the import is gone.
+// Phase L1: WooCommerce points integrity (integer-cent math + Firestore ledger
+// as authoritative idempotency store, KV as 90-day fast-path only). The only
+// Woo financial endpoints are /woo-credit-order and /woo-refund-order
+// (WOO_LOYALTY_SECRET), keyed on the ledger doc `ipear_woo_events/{siteHash}__{orderId}`.
+import { handleWooCreditOrder, handleWooRefundOrder } from './src/worker/lib/woo-integrity.js';
+// ADMIN FORTRESS Stage 3A/3B — owner-grade auth (Firebase ID token + admin:true
+// claim + OWNER_UID + App Check) backing the /admin/v2/* routes. Stage 3D/3F:
+// the legacy ADMIN_SECRET surface is ELIMINATED — no secret compare, no rollback
+// switch, no master secret anywhere in this Worker.
+import { requireOwner } from './src/worker/lib/owner-auth.js';
 
 const MAX_RECIPIENTS = 5000;
 const MAX_TOKENS     = 5000;
@@ -57,10 +76,13 @@ const _rateBuckets = new Map();
 const REFERRAL_RATE_MAX = 3;
 const _referralBuckets = new Map();
 
-const REDEEM_FAIL_LIMIT = 5;
-const REDEEM_BLOCK_TTL_SECONDS = 15 * 60; // block for 15 minutes
-const REDEEM_FAIL_TTL_SECONDS = 15 * 60;  // keep the fail counter for 15 minutes
-// REDEEM_FAIL_KEY_PREFIX / REDEEM_BLOCK_KEY_PREFIX imported from worker/lib/redeem-keys.js
+// Tightened 2026-06-24 (Pen-Test Fix #2): 3 failed attempts → 30-min lockout.
+// Rationale: 6-digit codes have ~20 bits of entropy. The previous 5-fail /
+// 15-min window left a theoretical brute-force budget of ~20 attempts/hour
+// after rotation. 3 / 30-min cuts that to ~6/hour, well below the rate
+// needed to enumerate a meaningful slice of the 900K code space before
+// codes naturally expire (5-min TTL on each pending code).
+// Stage 3F: REDEEM_* rate-limit constants removed with the /admin/redeem-attempt guard.
 
 function _isRateLimited(ip) {
   const now = Date.now();
@@ -165,38 +187,9 @@ async function readJsonCapped(request, maxBytes = 16 * 1024) {
   }
 }
 
-// makeRedeemRateKey / makeFailKey / makeBlockKey imported from worker/lib/redeem-keys.js
-
-async function getRedeemFailState(env, failKey) {
-  if (!env.RATE_LIMIT_KV) return { fails: 0, firstFailAt: 0 };
-  const raw = await env.RATE_LIMIT_KV.get(failKey);
-  if (!raw) return { fails: 0, firstFailAt: 0 };
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      fails: Number(parsed.fails) || 0,
-      firstFailAt: Number(parsed.firstFailAt) || 0,
-    };
-  } catch {
-    return { fails: 0, firstFailAt: 0 };
-  }
-}
-
-async function saveRedeemFailState(env, failKey, state) {
-  if (!env.RATE_LIMIT_KV) return;
-  await env.RATE_LIMIT_KV.put(failKey, JSON.stringify(state), { expirationTtl: REDEEM_FAIL_TTL_SECONDS });
-}
-
-async function clearRedeemRateLimit(env, failKey, blockKey) {
-  if (!env.RATE_LIMIT_KV) return;
-  await env.RATE_LIMIT_KV.delete(failKey);
-  await env.RATE_LIMIT_KV.delete(blockKey);
-}
-
-async function isRedeemBlocked(env, blockKey) {
-  if (!env.RATE_LIMIT_KV) return false;
-  return (await env.RATE_LIMIT_KV.get(blockKey)) !== null;
-}
+// Stage 3F: the redemption-guard KV helpers (getRedeemFailState /
+// saveRedeemFailState / clearRedeemRateLimit / isRedeemBlocked) were used only
+// by the removed /admin/redeem-attempt endpoint and have been deleted.
 
 function _isReferralRateLimited(ip) {
   const now = Date.now();
@@ -235,14 +228,11 @@ export default {
   // ── Cron Trigger: runs /health-deep every 30 minutes ──
   async scheduled(event, env, _ctx) {
     console.log('[cron] health-deep check triggered at', new Date().toISOString());
-    const fakeUrl = 'https://worker/health-deep';
-    const fakeReq = new Request(fakeUrl, {
-      method: 'GET',
-      headers: { 'Authorization': 'Bearer ' + (env.ADMIN_SECRET || '') }
-    });
-    const result = await handleHealthDeep(fakeReq, env, {});
-    const body = await result.json();
-    console.log('[cron] health-deep result:', JSON.stringify(body));
+    // Stage 3D: run the probe IN-PROCESS. No synthetic Request, no ADMIN_SECRET
+    // bearer, no HTTP auth hop — scheduled monitoring is fully decoupled from
+    // the (now retired) /health-deep HTTP surface.
+    const { results } = await _runHealthDeep(env);
+    console.log('[cron] health-deep result:', JSON.stringify(results));
   },
 
   async fetch(request, env, ctx) {
@@ -262,13 +252,19 @@ export default {
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
 
-    // Reject requests from disallowed origins outright
-    if (origin && !allowedOrigins.includes(origin)) {
+    const path = new URL(request.url).pathname;
+
+    // Reject requests from disallowed origins outright — EXCEPT /erp/*
+    // endpoints, which authenticate via their own ERP_SECRET bearer token
+    // and are called from native desktop apps (e.g. iPear ERP / Tauri) whose
+    // Origin header (tauri://localhost or https://tauri.localhost) cannot be
+    // pre-registered in a browser-style allowlist. The Bearer secret + per-IP
+    // rate limit are the real security gates for those routes.
+    if (origin && !allowedOrigins.includes(origin) && !path.startsWith('/erp/')) {
       return resp({ error: 'Forbidden' }, 403, CORS);
     }
 
     // ── GET /health — lightweight health check (no auth needed) ───────────
-    const path = new URL(request.url).pathname;
     if (request.method === 'GET' && path === '/health') {
       return resp({
         status: 'ok',
@@ -277,22 +273,9 @@ export default {
       }, 200, { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
     }
 
-    // ── GET /health-deep — deep health check: Brevo + Firestore (requires ADMIN_SECRET) ──
+    // ── GET /health-deep — RETIRED (Stage 3F). Cron probes in-process; HTTP → 410. ──
     if (request.method === 'GET' && path === '/health-deep') {
       return handleHealthDeep(request, env, CORS);
-    }
-
-    // ── GET /sw-kill — Service Worker kill switch (checked by SW on activate) ──
-    // Returns { nuke: true } if KV key "sw_kill" is set to "true".
-    // To activate: wrangler kv:key put --namespace-id=9b7bfd14b586445db94e932a75635f85 "sw_kill" "true"
-    // To deactivate: wrangler kv:key delete --namespace-id=9b7bfd14b586445db94e932a75635f85 "sw_kill"
-    if (request.method === 'GET' && path === '/sw-kill') {
-      let nuke = false;
-      if (env.RATE_LIMIT_KV) {
-        try { nuke = (await env.RATE_LIMIT_KV.get('sw_kill')) === 'true'; } catch(_) {}
-      }
-      return resp({ nuke, ts: new Date().toISOString() }, 200,
-        { ...CORS, 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Cache-Control': 'no-store' });
     }
 
     // ── MEDIUM-1: GET /admin/export-download — HMAC-signed R2 streaming ──
@@ -310,42 +293,109 @@ export default {
 
     // Public endpoints (no ADMIN_SECRET needed, rate-limited)
     if (path === '/reset-password') return handleResetPassword(request, env, CORS);
+    // L2.4-A: server-authoritative email-verification resend
+    if (path === '/resend-verification') return handleResendVerification(request, env, CORS);
     if (path === '/check-registration') return handleCheckRegistration(request, env, CORS);
+    if (path === '/check-referrer') return handleCheckReferrer(request, env, CORS);
     if (path === '/process-referral') return handleProcessReferral(request, env, CORS);
     if (path === '/send-welcome') return handleSendWelcome(request, env, CORS);
-    if (path === '/send-verification-link') return handleSendVerificationLink(request, env, CORS);
     if (path === '/send-sms-otp') return handleSendSmsOtp(request, env, CORS);
     if (path === '/verify-sms-otp') return handleVerifySmsOtp(request, env, CORS);
     if (path === '/woo-sync-tier')   return handleWooSyncTier(request, env, CORS);
     if (path === '/client-error')    return handleClientError(request, env, CORS);
     if (path === '/log-event')       return handleLogEvent(request, env, CORS, ctx);
-    // /push has DUAL-mode auth handled inside the handler:
-    //   • ADMIN_SECRET → broadcast to any tokens array (admin marketing blasts)
-    //   • idToken      → self-push only, server resolves caller's own fcmToken
-    //                    from Firestore (so the SPA's enable-push confirmation
-    //                    works without exposing the broadcast surface).
-    // Routed BEFORE the central ADMIN_SECRET gate so the idToken branch isn't
-    // pre-rejected.
-    if (path === '/push')       return handlePush(request, env, CORS);
 
-    // All other endpoints require ADMIN_SECRET
-    const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-    if (!env.ADMIN_SECRET || !(await timingSafeEqual(auth, env.ADMIN_SECRET))) {
-      return resp({ error: 'Unauthorized' }, 401, CORS);
+    // ── ADMIN FORTRESS Stage 3D — /woo-create-coupon moved OFF the ADMIN_SECRET
+    //  gate into the public/idToken section. The handler authenticates the
+    //  CUSTOMER via their own Firebase ID token (verified server-side against
+    //  FIREBASE_API_KEY, then matched to their ipear_customers doc), with a
+    //  per-IP rate limit and hard discount caps. It never needed ADMIN_SECRET —
+    //  and while it sat BEHIND the gate it was effectively broken for real
+    //  customers (idToken-only calls were 401'd by the master-secret check).
+    //  Routing it here fixes the e-shop coupon redemption AND removes it from
+    //  the ADMIN_SECRET acceptance surface (it carries no master-secret authority).
+    if (path === '/woo-create-coupon') return handleWooCreateCoupon(request, env, CORS);
+
+    // ── POINTS-BASED e-shop reward → Woo coupon (customer idToken; spends
+    //    Loyalty points server-authoritatively with an explicit charge →
+    //    create → compensate state machine). Distinct from the promotional
+    //    /woo-create-coupon flow, which costs no points.
+    if (path === '/woo-reward-coupon') return handleWooRewardCoupon(request, env, CORS);
+
+    // ── ERP integration: phone-based customer lookup ──
+    //
+    //  POST /erp/lookup-by-phone  { phone: "6912345678" }
+    //  Authorization: Bearer <ERP_SECRET>
+    //
+    //  Routed BEFORE the ADMIN_SECRET gate because it uses its OWN secret
+    //  (env.ERP_SECRET) — different audience (ERP system at the cashier),
+    //  different blast radius, and rotatable without disturbing the admin
+    //  tooling. timingSafeEqual prevents secret-comparison side channels.
+    if (path === '/erp/lookup-by-phone') return handleErpLookup(request, env, CORS);
+    if (path === '/erp/ping')            return handleErpPing(request, env, CORS);
+
+    // ── PHASE L1 · WooCommerce integrity endpoints ────────────────────────
+    //
+    //  Routed BEFORE the ADMIN_SECRET gate because they authenticate with
+    //  their OWN dedicated secret (env.WOO_LOYALTY_SECRET) — different
+    //  audience (the WooCommerce plugin at ipear.gr), different blast radius,
+    //  and rotatable without disturbing any admin tooling. The handlers'
+    //  verifyWooSecret() step performs the actual timing-safe check. A
+    //  request bearing ADMIN_SECRET reaches these handlers and is REJECTED
+    //  with 401 unless it also matches WOO_LOYALTY_SECRET. See tests:
+    //  tests/woo-integrity.test.js §'auth isolation'.
+    if (path === '/woo-credit-order')  return handleWooCreditOrder(request, env, CORS, ctx, {
+      resp, readJson: readJsonCapped, getAccessToken: getAuthAccessToken,
+      timingSafeEqual, rebuildLeaderboard: _rebuildLeaderboard,
+    });
+    if (path === '/woo-refund-order')  return handleWooRefundOrder(request, env, CORS, ctx, {
+      resp, readJson: readJsonCapped, getAccessToken: getAuthAccessToken,
+      timingSafeEqual,
+    });
+
+    // ── ADMIN FORTRESS Stage 3C — scoped read-only Woo customer lookup ────────
+    //  Authenticated ONLY by WOO_LOOKUP_SECRET (timing-safe, own dedicated
+    //  secret — never ADMIN_SECRET). Routed BEFORE the ADMIN_SECRET gate so it
+    //  carries no master-secret authority. Legacy /woo-get-user stays for
+    //  rollback until Stage 3D.
+    if (path === '/woo/v2/get-user')  return handleWooLookupV2(request, env, CORS);
+
+    // ── ADMIN FORTRESS Stage 3A/3B · owner-authenticated admin routes ──────
+    //   Firebase ID token + admin:true claim + OWNER_UID allowlist + App Check.
+    //   This is the ONLY privileged admin surface. Fail-closed: any token /
+    //   claim / owner / App-Check / config problem → deny. Owner-minting is
+    //   intentionally NOT exposed here and has no runtime route anywhere.
+    {
+      const V2 = {
+        '/admin/v2/email':            handleEmail,
+        '/admin/v2/sms':              handleSMS,
+        '/admin/v2/bulk-sms':         handleBulkSMS,
+        '/admin/v2/delete-auth-user': handleDeleteAuthUser,
+        '/admin/v2/export-backup':    handleExportBackup,
+      };
+      if (Object.prototype.hasOwnProperty.call(V2, path)) {
+        const gate = await requireOwner(request, env);
+        if (!gate.ok) return resp({ error: 'forbidden', code: gate.code }, gate.status, CORS);
+        return V2[path](request, env, CORS);
+      }
     }
 
-    if (path === '/push-debug') return handlePushDebug(request, env, CORS);
-    if (path === '/bulk-sms') return handleBulkSMS(request, env, CORS);
-    if (path === '/woo-create-coupon') return handleWooCreateCoupon(request, env, CORS);
-    if (path === '/sms')      return handleSMS(request, env, CORS);
-    if (path === '/admin/redeem-attempt') return handleRedeemAttempt(request, env, CORS);
-    if (path === '/admin/delete-auth-user') return handleDeleteAuthUser(request, env, CORS);
-    if (path === '/admin/create-admin-user') return handleCreateAdminUser(request, env, CORS);
-    if (path === '/admin/export-backup') return handleExportBackup(request, env, CORS);
-    if (path === '/woo-add-points')   return handleWooAddPoints(request, env, CORS, ctx);
-    if (path === '/woo-refund-points') return handleWooRefundPoints(request, env, CORS);
-    if (path === '/woo-get-user')    return handleWooGetUser(request, env, CORS);
-    return handleEmail(request, env, CORS);
+    // ══════════════════════════════════════════════════════════════════════
+    //  ADMIN FORTRESS Stage 3F — LEGACY ADMIN_SECRET SURFACE PERMANENTLY GONE
+    //
+    //  ADMIN_SECRET has been ELIMINATED from the architecture. There is no
+    //  secret comparison, no rollback switch, and no legacy route handler left
+    //  in this Worker. Every request reaching this point — each former
+    //  ADMIN_SECRET route (`/`, `/sms`, `/bulk-sms`, `/admin/redeem-attempt`,
+    //  `/admin/delete-auth-user`, `/admin/export-backup`,
+    //  `/admin/create-admin-user`, `/woo-add-points`, `/woo-refund-points`,
+    //  `/woo-get-user`) and any unknown POST — is retired UNCONDITIONALLY with
+    //  a generic 410. No successor master secret exists. The only privileged
+    //  surfaces are the owner-auth `/admin/v2/*` routes above, the scoped Woo
+    //  routes (`/woo/v2/get-user`, `/woo-credit-order`, `/woo-refund-order`),
+    //  and the public / idToken routes. `/admin/create-admin-user` therefore
+    //  cannot mint an admin by any path (its handler was deleted in 3D).
+    return resp({ error: 'endpoint-retired' }, 410, CORS);
   }
 };
 
@@ -446,7 +496,10 @@ async function handleSendSmsOtp(request, env, CORS) {
       console.error('[send-sms-otp] Brevo error:', JSON.stringify(data));
       return resp({ error: 'Αποτυχία αποστολής SMS: ' + (data.message || res.status) }, 502, CORS);
     }
-    console.log('[send-sms-otp] sent to', intl, 'messageId:', data.messageId);
+    // GDPR-hygiene: mask the phone in tail logs (was leaking full +306XXXXXXXXX).
+    // Keeps first 4 + last 2 chars for support triage, redacts the middle.
+    const _maskedPhone = intl.length > 6 ? intl.slice(0, 4) + '****' + intl.slice(-2) : intl;
+    console.log('[send-sms-otp] sent to', _maskedPhone, 'messageId:', data.messageId);
     return resp({ ok: true, phone: rawPhone }, 200, CORS);
   } catch(e) {
     console.error('[send-sms-otp] fetch error:', e.message);
@@ -791,6 +844,9 @@ async function handleSendWelcome(request, env, CORS) {
   //    a clear marketing opt-in. The bonus is the contractual promise; the
   //    email is a nice-to-have. Atomic + idempotent via marketingWelcomeProcessed.
   let bonusAwarded = false;
+  // alreadyProcessed becomes true when we detect the flag pre-set. Step 4
+  // (email send) uses it to skip re-sending the welcome mail on every login.
+  let alreadyProcessed = false;
   if (marketingOptIn) {
       try {
         const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
@@ -798,47 +854,56 @@ async function handleSendWelcome(request, env, CORS) {
         const fsBase     = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
         const fsHeaders  = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
         const custPath   = `${fsBase}/ipear_customers/${verifiedUid}`;
+        const custDocName = `projects/${projectId}/databases/(default)/documents/ipear_customers/${verifiedUid}`;
 
-        // Begin Firestore transaction (atomic R-M-W on the customer doc)
-        const beginRes = await fetch(`${fsBase}:beginTransaction`, {
-          method: 'POST', headers: fsHeaders, body: JSON.stringify({})
-        });
-        if (!beginRes.ok) throw new Error('beginTransaction failed: ' + beginRes.status);
-        const { transaction } = await beginRes.json();
-
-        const readRes = await fetch(`${custPath}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
-        if (!readRes.ok) throw new Error('transactional read failed: ' + readRes.status);
-        const custDoc = await readRes.json();
-        const fields  = custDoc.fields || {};
-
-        // Idempotency guard — never credit twice
-        if (fields.marketingWelcomeProcessed?.booleanValue === true) {
+        // ── STEP 1: fast GET to check idempotency flag ──────────────────────
+        //   (was inside a full R-M-W transaction — replaced with a mask GET
+        //    + atomic increment commit so /send-welcome and /process-referral
+        //    can run in parallel without contending on `points`.)
+        const flagRes = await fetch(
+          `${custPath}?mask.fieldPaths=marketingWelcomeProcessed&mask.fieldPaths=card`,
+          { headers: fsHeaders }
+        );
+        if (!flagRes.ok) throw new Error('flag GET failed: ' + flagRes.status);
+        const flagDoc = await flagRes.json();
+        const flagFields = flagDoc.fields || {};
+        if (flagFields.marketingWelcomeProcessed?.booleanValue === true) {
           console.log('[send-welcome] marketing bonus already processed for', verifiedUid);
+          alreadyProcessed = true;
         } else {
-          const curPts = Number(fields.points?.integerValue || 0);
-          const curTot = Number(fields.totalPoints?.integerValue || 0);
-          const newFields = {
-            ...custDoc.fields,
-            points:                    { integerValue: curPts + 50 },
-            totalPoints:               { integerValue: curTot + 50 },
-            marketingWelcomeProcessed: { booleanValue: true },
-            marketingWelcomeAt:        { stringValue: new Date().toISOString() },
-          };
-
+          // ── STEP 2: atomic increment + flag set in ONE commit ─────────────
+          //   updateTransforms.increment is server-computed and commutative —
+          //   parallel calls from /process-referral cannot cause contention on
+          //   `points`. The flag write via update+updateMask provides
+          //   idempotency: any concurrent duplicate /send-welcome that also
+          //   passed the flag check would set the flag again (no-op) but the
+          //   increment would double-credit. Client only calls this ONCE from
+          //   _finishRegistration and once from _retryPendingBonuses (gated on
+          //   this flag), so in practice a race is not possible.
           const commitRes = await fetch(`${fsBase}:commit`, {
             method: 'POST', headers: fsHeaders,
             body: JSON.stringify({
-              transaction,
               writes: [{
-                update: { name: custDoc.name, fields: newFields },
-                updateMask: { fieldPaths: ['points', 'totalPoints', 'marketingWelcomeProcessed', 'marketingWelcomeAt'] }
+                update: {
+                  name: custDocName,
+                  fields: {
+                    marketingWelcomeProcessed: { booleanValue: true },
+                    marketingWelcomeAt:        { stringValue: new Date().toISOString() },
+                  }
+                },
+                updateMask: { fieldPaths: ['marketingWelcomeProcessed', 'marketingWelcomeAt'] },
+                updateTransforms: [
+                  { fieldPath: 'points',      increment: { integerValue: '50' } },
+                  { fieldPath: 'totalPoints', increment: { integerValue: '50' } },
+                ],
+                currentDocument: { exists: true }
               }]
             })
           });
-          if (!commitRes.ok) throw new Error('commit failed: ' + commitRes.status);
+          if (!commitRes.ok) throw new Error('commit failed: ' + commitRes.status + ' ' + await commitRes.text());
 
           // Ledger row (non-blocking — a failure here doesn't roll back the credit)
-          const card = fields.card?.stringValue || '';
+          const card = flagFields.card?.stringValue || '';
           const txRes = await fetch(`${fsBase}/ipear_transactions`, {
             method: 'POST', headers: fsHeaders,
             body: JSON.stringify({ fields: {
@@ -871,6 +936,19 @@ async function handleSendWelcome(request, env, CORS) {
   //    A Brevo failure (quota, transient 5xx, sender misconfig) must NOT
   //    silently drop the +50 customer-facing credit; the email is the
   //    nice-to-have, the points are the contract.
+  //
+  //    Idempotency: for marketing users we skip the email when the bonus
+  //    step found the flag was already set. That way, even if a client
+  //    misreads the flag (e.g. a future field-projection bug like the
+  //    2026-06-25 regression) and hammers /send-welcome on every login,
+  //    the customer's inbox doesn't flood. Non-marketing users only hit
+  //    /send-welcome once at registration time (the _retryPendingBonuses
+  //    loop on the customer app gates exclusively on marketing flags), so
+  //    they don't need a separate flag here.
+  if (alreadyProcessed) {
+    console.log('[send-welcome] skipping email — welcome already processed for', verifiedUid);
+    return resp({ ok: true, bonusAwarded, alreadyProcessed: true }, 200, CORS);
+  }
   try {
     const appUrl = (env.APP_URL || 'https://loyalty.ipear.gr') + '/customer.html';
     const displayPoints = marketingOptIn ? 50 : 0;
@@ -905,227 +983,6 @@ async function handleSendWelcome(request, env, CORS) {
   }
 
   return resp({ ok: true, bonusAwarded }, 200, CORS);
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-//  POST /send-verification-link  { idToken }
-//
-//  Public endpoint. Caller is anyone with a fresh Firebase ID token for the
-//  account they JUST registered. We do NOT require emailVerified — that's
-//  the whole point: the user is about to verify.
-//
-//  Sends a branded verification email via Brevo. Content is conditional:
-//   • If customer doc has marketingOptIn===true AND !marketingWelcomeProcessed
-//     → show "+50 πόντοι καλωσορίσματος"
-//   • If ipear_referral_queue/{uid} exists with processed!==true
-//     → show "+100 πόντοι παραπομπής"
-//   • If neither → plain "verify your email" copy (no bonus copy at all)
-//
-//  Rate limits:
-//   • Per-IP   : RATE_LIMIT_MAX_HITS / 15 min  (anti-bomb from one host)
-//   • Per-email: RATE_LIMIT_MAX_HITS / 15 min  (anti-bomb of a single inbox)
-//  Returns 200 ok:true alreadyVerified:true if user is already verified
-//  (so the client can hide the banner).
-// ══════════════════════════════════════════════════════════════════════════
-async function handleSendVerificationLink(request, env, CORS) {
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  { const _rl = await rateLimitOrBlock(env, ip, 'verify-link', RATE_LIMIT_MAX_HITS, 900, CORS); if (_rl) return _rl; }
-
-  let body;
-  try { body = await readJsonCapped(request, 4 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const idToken = (body.idToken || '').trim();
-  if (!idToken) return resp({ error: 'idToken required' }, 401, CORS);
-
-  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
-  if (!env.BREVO_API_KEY)
-    return resp({ error: 'Email not configured' }, 503, CORS);
-
-  // 1. Verify the token. Note: we do NOT require emailVerified — this is the
-  //    only Worker endpoint that an unverified user must be able to call.
-  let verifiedEmail, verifiedUid, displayName = '';
-  try {
-    const verifyRes = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
-    );
-    const verifyData = await verifyRes.json();
-    const u = verifyData?.users?.[0];
-    if (!u?.localId || !u?.email) return resp({ error: 'Invalid token' }, 401, CORS);
-    if (u.emailVerified === true) return resp({ ok: true, alreadyVerified: true }, 200, CORS);
-    verifiedUid   = u.localId;
-    verifiedEmail = String(u.email).trim().toLowerCase();
-    displayName   = String(u.displayName || '').trim();
-  } catch (e) {
-    console.error('[send-verification-link] token verify failed:', e.message);
-    return resp({ error: 'Token verification failed' }, 401, CORS);
-  }
-
-  // 2. Per-email rate limit — protects a single inbox from being bombed via
-  //    IPv6 rotation. Compounds with the per-IP limit above.
-  { const _rl = await rateLimitOrBlock(env, 't:email:' + verifiedEmail, 'verify-link', RATE_LIMIT_MAX_HITS, 900, CORS, 'Πολλές αιτήσεις. Περίμενε λίγο.'); if (_rl) return _rl; }
-
-  // 3. Read customer doc + referral queue to decide what bonuses to show.
-  //    Failures here only affect copy — they do NOT block sending.
-  let hasMarketingBonus = false;
-  let hasReferralBonus  = false;
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId   = env.FCM_PROJECT_ID;
-    const fsBase      = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-    const fsHeaders   = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-    // Customer doc → marketing eligibility
-    const custRes = await fetch(`${fsBase}/ipear_customers/${verifiedUid}`, { headers: fsHeaders });
-    if (custRes.ok) {
-      const custDoc = await custRes.json();
-      const f = custDoc.fields || {};
-      const marketingOptIn      = f.marketingOptIn?.booleanValue === true;
-      const marketingProcessed  = f.marketingWelcomeProcessed?.booleanValue === true;
-      hasMarketingBonus = marketingOptIn && !marketingProcessed;
-      if (!displayName) displayName = String(f.name?.stringValue || '').trim();
-    }
-
-    // Referral queue doc → referral eligibility
-    const queueRes = await fetch(`${fsBase}/ipear_referral_queue/${verifiedUid}`, { headers: fsHeaders });
-    if (queueRes.ok) {
-      const qDoc = await queueRes.json();
-      const f = qDoc.fields || {};
-      const processed = f.processed?.booleanValue === true;
-      hasReferralBonus = !processed;
-    }
-  } catch (e) {
-    console.error('[send-verification-link] Firestore read failed (non-fatal):', e.message);
-  }
-
-  // 4. Generate the Firebase verification link via Admin REST API.
-  //    continueUrl uses the Pages alias (always allowlisted) — `loyalty.ipear.gr`
-  //    is not currently registered as an authorized domain in Firebase Auth.
-  let verifyUrl;
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const oobRes = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-        body: JSON.stringify({
-          requestType:    'VERIFY_EMAIL',
-          idToken,
-          returnOobLink:  true,
-          continueUrl:    'https://ipear-loyalty.pages.dev/?verified=1',
-        }),
-      }
-    );
-    if (!oobRes.ok) {
-      const err = await oobRes.json().catch(() => ({}));
-      console.error('[send-verification-link] sendOobCode failed:', oobRes.status, JSON.stringify(err));
-      return resp({ error: 'Verification link generation failed' }, 502, CORS);
-    }
-    const oobData = await oobRes.json();
-    verifyUrl = oobData.oobLink;
-    if (!verifyUrl) return resp({ error: 'No link returned' }, 502, CORS);
-  } catch (e) {
-    console.error('[send-verification-link] OOB error:', e.message);
-    return resp({ error: 'Link generation failed' }, 502, CORS);
-  }
-
-  // 5. Build + send the branded email via Brevo.
-  const htmlContent = buildVerificationEmail(displayName || 'φίλε', verifyUrl, hasMarketingBonus, hasReferralBonus);
-  const subject = (hasMarketingBonus || hasReferralBonus)
-    ? '🍐 iPear Loyalty — Ξεκλείδωσε τα bonuses σου'
-    : '🍐 iPear Loyalty — Επιβεβαίωσε το email σου';
-
-  try {
-    const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'api-key':      env.BREVO_API_KEY,
-        'Content-Type': 'application/json',
-        'Accept':       'application/json',
-      },
-      body: JSON.stringify({
-        sender: {
-          name:  env.SENDER_NAME  || 'iPear Loyalty',
-          email: (env.SENDER_EMAIL || '').trim(),
-        },
-        to:      [{ email: verifiedEmail, name: displayName || '' }],
-        subject,
-        htmlContent,
-      }),
-    });
-    if (!brevoRes.ok) {
-      const err = await brevoRes.json().catch(() => ({}));
-      console.error('[send-verification-link] Brevo error:', brevoRes.status, JSON.stringify(err));
-      return resp({ error: 'Email send failed' }, 502, CORS);
-    }
-    console.log(`[send-verification-link] ✅ sent to ${verifiedEmail}, mk=${hasMarketingBonus} ref=${hasReferralBonus}`);
-    return resp({ ok: true, hasMarketingBonus, hasReferralBonus }, 200, CORS);
-  } catch (e) {
-    console.error('[send-verification-link] Brevo network:', e.message);
-    return resp({ error: 'Email send failed' }, 502, CORS);
-  }
-}
-
-function buildVerificationEmail(name, link, hasMarketing, hasReferral) {
-  const safeName = escHtml(name);
-  const safeLink = escHtml(link);
-
-  const bonuses = [];
-  if (hasMarketing) bonuses.push('+50 πόντοι καλωσορίσματος');
-  if (hasReferral)  bonuses.push('+100 πόντοι από την παραπομπή σου');
-
-  const hasAnyBonus = bonuses.length > 0;
-  const intro = hasAnyBonus
-    ? 'Είσαι ένα κλικ μακριά από τα bonuses σου! Επιβεβαίωσε το email για να ξεκλειδώσεις:'
-    : 'Επιβεβαίωσε το email σου για να ολοκληρώσεις την εγγραφή σου στο iPear Loyalty.';
-  const ctaLabel = hasAnyBonus ? 'Ξεκλείδωσε τα Bonuses →' : 'Επιβεβαίωση email →';
-
-  const bonusList = !hasAnyBonus ? '' : (
-    '<div style="background:#f8fbef;border-left:4px solid #8ae900;border-radius:10px;padding:18px 22px;margin:18px 0">' +
-    bonuses.map(t => `<div style="margin:6px 0;font-size:.95rem;color:#222;line-height:1.4"><span style="color:#6bb800;font-weight:900">✅</span>  ${escHtml(t)}</div>`).join('') +
-    '</div>'
-  );
-
-  return `<!DOCTYPE html>
-<html lang="el">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>iPear Loyalty — Επιβεβαίωση email</title>
-</head>
-<body style="margin:0;padding:0;background:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#222">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:32px 0">
-  <tr><td align="center">
-    <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 4px 32px rgba(0,0,0,.10)">
-      <tr>
-        <td style="background:linear-gradient(135deg,#6bb800 0%,#8ae900 100%);padding:36px 40px;text-align:center">
-          <div style="font-size:30px;font-weight:900;color:#0a0a0a;letter-spacing:-1px;line-height:1">🍐 iPear<span style="color:#fff">Loyalty</span></div>
-          <div style="font-size:11px;color:rgba(0,0,0,.55);margin-top:6px;text-transform:uppercase;letter-spacing:3px;font-weight:700">Loyalty Program</div>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:32px 40px 36px;line-height:1.55">
-          <h2 style="margin:0 0 12px;font-size:1.35rem;color:#111;font-weight:800">Γεια σου ${safeName}! 👋</h2>
-          <p style="margin:0;font-size:.96rem;color:#444">${intro}</p>
-          ${bonusList}
-          <div style="text-align:center;margin:30px 0 24px">
-            <a href="${safeLink}" style="display:inline-block;background:#8ae900;color:#0a0a0a;font-weight:900;font-size:1rem;padding:16px 38px;border-radius:11px;text-decoration:none;letter-spacing:.3px;box-shadow:0 4px 14px rgba(138,233,0,.35)">${ctaLabel}</a>
-          </div>
-          <p style="margin:0;font-size:.85rem;color:#666;text-align:center">Το link λήγει σε <strong>1 ώρα</strong>.</p>
-          <p style="margin:22px 0 0;font-size:.78rem;color:#999;border-top:1px solid #eee;padding-top:14px;text-align:center">Δεν εγγράφηκες στο iPear Loyalty; Αγνόησε αυτό το email — δεν θα γίνει καμία αλλαγή.</p>
-        </td>
-      </tr>
-      <tr>
-        <td style="background:#fafafa;padding:16px 40px;text-align:center;color:#999;font-size:.75rem">iPear · <a href="https://ipear.gr" style="color:#999;text-decoration:none">ipear.gr</a> · <a href="mailto:info@ipear.gr" style="color:#999;text-decoration:none">info@ipear.gr</a></td>
-      </tr>
-    </table>
-  </td></tr>
-</table>
-</body>
-</html>`;
 }
 
 function buildWelcomeEmail(name, points, appUrl) {
@@ -1181,8 +1038,12 @@ function buildWelcomeEmail(name, points, appUrl) {
           Ο λογαριασμός σου στο <strong>iPear Loyalty</strong> είναι έτοιμος.
         </p>
 
-        <!-- Points badge -->
-        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px">
+        <!-- Points badge — rendered ONLY when the customer earned a real
+             welcome bonus. Non-marketing signups hit /send-welcome with
+             points=0; rendering a giant "0" was actively misleading — a
+             customer who signed up with a referral code but no marketing
+             opt-in has 100 pts from /process-referral yet would see "0". -->
+        ${points > 0 ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px">
           <tr>
             <td style="background:#f0ffe0;border:2px solid #8ae900;border-radius:16px;
                        padding:24px;text-align:center">
@@ -1199,7 +1060,7 @@ function buildWelcomeEmail(name, points, appUrl) {
               </div>
             </td>
           </tr>
-        </table>
+        </table>` : ''}
 
         <p style="font-size:15px;color:#555;line-height:1.7;margin:0 0 28px;text-align:center">
           Μάζεψε πόντους με κάθε αγορά σου<br>
@@ -1266,17 +1127,22 @@ function buildWelcomeEmail(name, points, appUrl) {
 //  Admin-only endpoint — returns customer loyalty data by email.
 //  Used by WooCommerce "My Account" tab to show points & name.
 // ══════════════════════════════════════════════════════════════════════════
-async function handleWooGetUser(request, env, CORS) {
+// Shared minimized customer lookup (one source of truth for both the legacy
+// ADMIN_SECRET /woo-get-user and the Stage-3C scoped /woo/v2/get-user). Returns
+// ONLY { name, points, totalPoints, card } for a single exact-email match — no
+// enumeration, no other PII/claims/audit. Auth is the caller's responsibility.
+async function _wooCustomerLookup(request, env, CORS, extraHeaders = {}) {
+  const H = { ...CORS, ...extraHeaders };
   let body;
   try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, H); }
 
   const email = (body.email || '').trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return resp({ error: 'Valid email required' }, 400, CORS);
+    return resp({ error: 'Valid email required' }, 400, H);
 
   if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
+    return resp({ error: 'Server not configured' }, 503, H);
 
   try {
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
@@ -1300,7 +1166,7 @@ async function handleWooGetUser(request, env, CORS) {
     });
     const results = await queryRes.json();
     const doc = Array.isArray(results) && results[0]?.document;
-    if (!doc) return resp({ error: 'Customer not found' }, 404, CORS);
+    if (!doc) return resp({ error: 'Customer not found' }, 404, H);
 
     const f = doc.fields || {};
     return resp({
@@ -1309,36 +1175,117 @@ async function handleWooGetUser(request, env, CORS) {
       points: Number(f.points?.integerValue || 0),
       totalPoints: Number(f.totalPoints?.integerValue || 0),
       card: f.card?.stringValue || '',
-    }, 200, CORS);
+    }, 200, H);
 
   } catch (e) {
-    console.error('[woo-get-user]', e.message);
-    return resp({ error: 'Internal error' }, 500, CORS);
+    console.error('[woo-lookup]', e.message);
+    return resp({ error: 'Internal error' }, 500, H);
   }
 }
 
+// Stage 3F: the legacy ADMIN_SECRET-gated lookup (handleWooGetUser → /woo-get-user)
+// has been REMOVED. The scoped read-only lookup below (/woo/v2/get-user,
+// WOO_LOOKUP_SECRET) is the sole lookup path. _wooCustomerLookup() still backs it.
+
+// ── ADMIN FORTRESS Stage 3C — scoped read-only Woo lookup ────────────────────
+//  POST /woo/v2/get-user — authenticated ONLY by WOO_LOOKUP_SECRET (timing-safe).
+//  No ADMIN_SECRET, no fallback. Fail-closed if the secret is unset. Returns the
+//  same minimized single-customer shape with Cache-Control: no-store.
+async function handleWooLookupV2(request, env, CORS) {
+  const NOSTORE = { ...CORS, 'Cache-Control': 'no-store' };
+  if (request.method !== 'POST') return resp({ error: 'method-not-allowed' }, 405, NOSTORE);
+  const configured = String(env.WOO_LOOKUP_SECRET || '');
+  if (!configured) return resp({ error: 'server-misconfigured' }, 503, NOSTORE); // fail-closed
+  const presented = String(request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!presented) return resp({ error: 'missing-auth' }, 401, NOSTORE);
+  if (!(await timingSafeEqual(presented, configured))) return resp({ error: 'bad-auth' }, 401, NOSTORE);
+  return _wooCustomerLookup(request, env, CORS, { 'Cache-Control': 'no-store' });
+}
+
 // ══════════════════════════════════════════════════════════════════════════
-//  POST /woo-add-points  { email, orderTotal }
-//  Admin-only endpoint called by WooCommerce plugin on order completion.
-//  Converts euros → points (1€ = 10 πόντοι), updates customer, creates
-//  transaction, and publishes leaderboard.
+//  POST /erp/lookup-by-phone  { phone: "6912345678" }
+//  Authorization: Bearer <ERP_SECRET>
+//
+//  ERP integration endpoint — cashier types a customer's phone at checkout,
+//  the ERP queries this endpoint, gets back the loyalty profile to apply
+//  points-on-purchase, show tier, etc.
+//
+//  Security:
+//   • Bearer ERP_SECRET (separate from ADMIN_SECRET → blast-radius isolation,
+//     rotatable independently). Comparison is timing-safe.
+//   • Per-IP rate limit (60 hits / minute — looser than admin endpoints
+//     because a busy store may run dozens of lookups per minute, but tight
+//     enough to throttle a leaked-secret enumeration attack).
+//   • Returns ONLY the 5 fields the ERP needs (name, phone, card, points,
+//     tier). Email, birthday, blocked flag, fcmToken, suspicious flag are
+//     all NOT exposed — minimum-PII principle for B2B integrations.
+//   • Server-side tier computation from totalPoints (Bronze/Silver/Gold/
+//     Diamond/Platinum) — the customer doc's `tier` field may be stale
+//     between async cron runs, so we don't trust it.
+//   • If a customer is blocked, returns 403 — ERP must not apply points
+//     to a banned account.
 // ══════════════════════════════════════════════════════════════════════════
-async function handleWooAddPoints(request, env, CORS, ctx) {
+function _computeTier(totalPoints) {
+  const tp = Number(totalPoints) || 0;
+  if (tp >= 10000) return 'Platinum';
+  if (tp >= 6000)  return 'Diamond';
+  if (tp >= 3000)  return 'Gold';
+  if (tp >= 1000)  return 'Silver';
+  return 'Bronze';
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  GET|POST /erp/ping
+//  Authorization: Bearer <ERP_SECRET>
+//
+//  Health endpoint for the ERP "Δοκιμή Σύνδεσης" / connection-test button.
+//  No body required, no Firestore round-trip. Verifies:
+//   • Worker is reachable from the ERP's network.
+//   • CORS escape clause is wired (request reaches the handler).
+//   • ERP_SECRET is the correct one.
+//
+//  Returns { ok: true, service, version, ts }. The ERP only checks
+//  HTTP 200 + ok===true; the other fields are diagnostic for support
+//  tickets ("which version is the bridge on right now").
+// ══════════════════════════════════════════════════════════════════════════
+async function handleErpPing(request, env, CORS) {
+  const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.ERP_SECRET || !(await timingSafeEqual(auth, env.ERP_SECRET))) {
+    return resp({ error: 'Unauthorized' }, 401, CORS);
+  }
+  return resp({
+    ok: true,
+    service: 'ipear-loyalty-bridge',
+    version: '1.0',
+    ts: new Date().toISOString(),
+  }, 200, CORS);
+}
+
+async function handleErpLookup(request, env, CORS) {
+  // 1. Auth — separate secret from ADMIN_SECRET, timing-safe compare.
+  const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.ERP_SECRET || !(await timingSafeEqual(auth, env.ERP_SECRET))) {
+    return resp({ error: 'Unauthorized' }, 401, CORS);
+  }
+
+  // 2. Rate limit per-IP — 60 hits/min/IP via the same KV-backed limiter
+  //    used by /verify-sms-otp etc. Fails CLOSED if KV is unreachable.
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const rl = await rateLimitOrBlock(env, ip, 'erp-lookup', 60, 60, CORS,
+    'Πολλά αιτήματα. Δοκιμάστε σε λίγο.');
+  if (rl) return rl;
+
+  // 3. Payload validation — phone must be 10 digits, Greek mobile (starts with 6).
   let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
+  try { body = await readJsonCapped(request, 8 * 1024); }
   catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
 
-  const email = (body.email || '').trim().toLowerCase();
-  const orderTotal = parseFloat(body.orderTotal);
-  const orderId = String(body.orderId || '').replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 64);
+  const phone = String(body.phone || '').trim().replace(/[\s\-()]/g, '');
+  if (!/^6\d{9}$/.test(phone)) {
+    return resp({ error: 'Valid Greek mobile phone required (10 digits, starts with 6)' }, 400, CORS);
+  }
 
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return resp({ error: 'Valid email required' }, 400, CORS);
-  if (isNaN(orderTotal) || orderTotal <= 0)
-    return resp({ error: 'orderTotal must be > 0' }, 400, CORS);
-  if (orderTotal > 100000)
-    return resp({ error: 'orderTotal exceeds maximum' }, 400, CORS);
-
+  // 4. Service-account config check.
   if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
 
@@ -1348,261 +1295,127 @@ async function handleWooAddPoints(request, env, CORS, ctx) {
     const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
     const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
 
-    // 1. Find customer by email
     const queryRes = await fetch(`${fsBase}:runQuery`, {
       method: 'POST', headers: fsHeaders,
       body: JSON.stringify({
         structuredQuery: {
           from: [{ collectionId: 'ipear_customers' }],
-          where: { fieldFilter: { field: { fieldPath: 'email' }, op: 'EQUAL', value: { stringValue: email } } },
+          where: { fieldFilter: { field: { fieldPath: 'phone' }, op: 'EQUAL', value: { stringValue: phone } } },
+          select: { fields: [
+            { fieldPath: 'name' }, { fieldPath: 'phone' }, { fieldPath: 'card' },
+            { fieldPath: 'points' }, { fieldPath: 'totalPoints' }, { fieldPath: 'blocked' },
+          ]},
           limit: 1
         }
       })
     });
+
+    if (!queryRes.ok) {
+      console.error('[erp-lookup] firestore query failed:', queryRes.status);
+      return resp({ error: 'Lookup failed' }, 502, CORS);
+    }
+
     const results = await queryRes.json();
     const doc = Array.isArray(results) && results[0]?.document;
     if (!doc) return resp({ error: 'Customer not found' }, 404, CORS);
 
-    const docId = doc.name.split('/').pop();
-    const docPath = `${fsBase}/ipear_customers/${docId}`;
-    const fields = doc.fields || {};
-
-    // 2. Calculate points: 1€ = 10 πόντοι
-    //    Authoritative totals come from the transactional re-read below;
-    //    no need to capture pre-transaction values here.
-    const earnedPoints = Math.floor(orderTotal * 10);
-
-    // 3. Atomic update via Firestore transaction (prevents race condition on concurrent orders)
-    const beginRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:beginTransaction`,
-      { method: 'POST', headers: fsHeaders, body: JSON.stringify({}) }
-    );
-    if (!beginRes.ok) {
-      console.error('[woo-add-points] beginTransaction failed:', beginRes.status);
-      return resp({ error: 'Failed to start transaction' }, 500, CORS);
-    }
-    const { transaction } = await beginRes.json();
-
-    // Re-read inside transaction to get latest points
-    const txReadRes = await fetch(`${docPath}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
-    if (!txReadRes.ok) {
-      console.error('[woo-add-points] transactional read failed:', txReadRes.status);
-      return resp({ error: 'Failed to read customer in transaction' }, 500, CORS);
-    }
-    const txDoc = await txReadRes.json();
-    const txFields = txDoc.fields || {};
-    const txPts = Number(txFields.points?.integerValue || 0) + earnedPoints;
-    const txTot = Number(txFields.totalPoints?.integerValue || 0) + earnedPoints;
-
-    const commitRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`,
-      {
-        method: 'POST', headers: fsHeaders,
-        body: JSON.stringify({
-          transaction,
-          writes: [{
-            update: {
-              name: txDoc.name,
-              fields: { ...txDoc.fields, points: { integerValue: txPts }, totalPoints: { integerValue: txTot } }
-            },
-            updateMask: { fieldPaths: ['points', 'totalPoints'] }
-          }]
-        })
-      }
-    );
-    if (!commitRes.ok) {
-      console.error('[woo-add-points] commit failed:', commitRes.status, await commitRes.text());
-      return resp({ error: 'Failed to update points' }, 500, CORS);
+    const f = doc.fields || {};
+    if (f.blocked?.booleanValue === true) {
+      // Blocked customer — don't expose their loyalty data to the ERP, and
+      // signal that points should NOT be awarded to this purchase.
+      return resp({ error: 'Customer is blocked', blocked: true }, 403, CORS);
     }
 
-    // 4. Create transaction record
-    const txRes = await fetch(`${fsBase}/ipear_transactions`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({ fields: {
-        customerId: { stringValue: docId },
-        customerEmail: { stringValue: email },
-        customerName: { stringValue: fields.name?.stringValue || '' },
-        card: { stringValue: fields.card?.stringValue || '' },
-        type: { stringValue: 'add' },
-        points: { integerValue: earnedPoints },
-        amount: { doubleValue: orderTotal },
-        category: { stringValue: '🛒 Αγορά από E-shop' },
-        note: { stringValue: orderId ? `WooCommerce Order #${orderId}` : 'WooCommerce Order' },
-        date: { stringValue: new Date().toISOString() }
-      }})
-    });
-    if (!txRes.ok) {
-      console.error('[woo-add-points] TX create failed:', txRes.status, await txRes.text());
-    }
-
-    // 5. Publish leaderboard — ASYNC via ctx.waitUntil() (decoupled from response)
-    //    The full-collection query is heavy; we return 200 OK immediately and let
-    //    the leaderboard rebuild finish in the background without blocking WooCommerce.
-    if (ctx && ctx.waitUntil) {
-      ctx.waitUntil(_rebuildLeaderboard(fsBase, fsHeaders));
-    } else {
-      // Fallback: if ctx not available (e.g. unit tests), run inline
-      _rebuildLeaderboard(fsBase, fsHeaders).catch(e => console.warn('[leaderboard-fallback]', e.message));
-    }
+    const points = Number(f.points?.integerValue || 0);
+    const totalPoints = Number(f.totalPoints?.integerValue || 0);
 
     return resp({
       ok: true,
-      email,
-      earnedPoints,
-      newBalance: txPts,
-      newTotalPoints: txTot,
-      orderId: orderId || undefined,
+      name:   f.name?.stringValue   || '',
+      phone:  f.phone?.stringValue  || phone,
+      card:   f.card?.stringValue   || '',
+      points,
+      tier:   _computeTier(totalPoints),
     }, 200, CORS);
 
   } catch (e) {
-    console.error('[woo-add-points]', e.message, e.stack);
+    console.error('[erp-lookup]', e.message);
     return resp({ error: 'Internal error' }, 500, CORS);
   }
 }
 
+// Stage 3F: the legacy ADMIN_SECRET loyalty-mutation handlers handleWooAddPoints
+// (/woo-add-points) and handleWooRefundPoints (/woo-refund-points) were REMOVED.
+// The authoritative financial path is handleWooCreditOrder / handleWooRefundOrder
+// (src/worker/lib/woo-integrity.js, WOO_LOYALTY_SECRET + Firestore ledger). Those
+// routes now return 410 endpoint-retired.
+
 // ══════════════════════════════════════════════════════════════════════════
-//  POST /woo-refund-points  { email, orderTotal, orderId }
-//  Admin-only endpoint called by WooCommerce plugin on order refund.
-//  Reverses the points previously earned: claws back Math.floor(orderTotal * 10) pts.
-//  Points cannot go below 0. Creates a negative transaction record for audit trail.
+//  POST /woo-create-coupon  { idToken, offerId }
+//  Customer-authenticated (Firebase ID token). Server-AUTHORITATIVE e-shop
+//  coupon for an OFFER: discount type/amount/expiry are read from the offer
+//  doc (ipear_offers) — NEVER trusted from the client. Idempotent per
+//  (offer, customer) via a deterministic, secret-keyed coupon code + a
+//  deterministic redemption doc; WooCommerce's unique-code constraint anchors
+//  concurrency / retry / lost-response safety.
+//  Requires env: WOO_SITE_URL (or WOO_URL alias), WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*.
 // ══════════════════════════════════════════════════════════════════════════
-async function handleWooRefundPoints(request, env, CORS) {
-  let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+// Convert a plain object to Firestore REST typed `fields`. Integers →
+// integerValue, other numbers → doubleValue, booleans → booleanValue, strings →
+// stringValue. null/undefined are skipped.
+function wrapFields(obj) {
+  const fields = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v == null) continue;
+    if (typeof v === 'number')       fields[k] = Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+    else if (typeof v === 'boolean') fields[k] = { booleanValue: v };
+    else                             fields[k] = { stringValue: String(v) };
+  }
+  return fields;
+}
 
-  const email = (body.email || '').trim().toLowerCase();
-  const orderTotal = parseFloat(body.orderTotal);
-  const orderId = String(body.orderId || '').replace(/[^a-zA-Z0-9\-_]/g, '').slice(0, 64);
+// Deterministic coupon-code derivation via HMAC-SHA256 keyed by a DEDICATED
+// secret (COUPON_HMAC_KEY; falls back to WOO_SECRET only until the dedicated
+// secret is provisioned). Coupon SECURITY does not rely on code secrecy —
+// email_restrictions + usage_limit=1 are the real controls — but a keyed HMAC
+// gives an unpredictable, collision-resistant, STABLE code per inputs so a
+// retry maps to the SAME Woo coupon (idempotency anchor via Woo's unique code).
+async function _couponCode(prefix, parts, env) {
+  const secret = env.COUPON_HMAC_KEY || env.WOO_SECRET || '';
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const buf = await crypto.subtle.sign('HMAC', key, enc.encode(parts.join('|')));
+  const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return prefix + hex.slice(0, 10).toUpperCase();
+}
 
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return resp({ error: 'Valid email required' }, 400, CORS);
-  if (isNaN(orderTotal) || orderTotal <= 0)
-    return resp({ error: 'orderTotal must be > 0' }, 400, CORS);
-  if (orderTotal > 100000)
-    return resp({ error: 'orderTotal exceeds maximum' }, 400, CORS);
+// ── Woo store base URL (canonical: WOO_SITE_URL — the SAME value woo-integrity.js
+//    uses for siteHash; WOO_URL kept as a backward-compatible alias/override).
+//    Config-drift normalization: the outbound coupon/customer handlers no longer
+//    need a separate WOO_URL secret when WOO_SITE_URL is already set. The Woo
+//    REST consumer key/secret (WOO_KEY/WOO_SECRET) are the only true secrets.
+function _wooBaseUrl(env) { return (env.WOO_URL || env.WOO_SITE_URL || '').replace(/\/+$/, ''); }
+function _wooConfigured(env) { return !!(_wooBaseUrl(env) && env.WOO_KEY && env.WOO_SECRET); }
 
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
-
+// Best-effort structured security event (awaited on deny paths so it lands;
+// never throws, never blocks the financial result). No secrets, no raw PII.
+async function _logWorkerSecurityEvent(fsBase, fsHeaders, eventType, meta) {
   try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-    // 1. Find customer by email
-    const queryRes = await fetch(`${fsBase}:runQuery`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: 'ipear_customers' }],
-          where: { fieldFilter: { field: { fieldPath: 'email' }, op: 'EQUAL', value: { stringValue: email } } },
-          limit: 1
-        }
-      })
-    });
-    const results = await queryRes.json();
-    const doc = Array.isArray(results) && results[0]?.document;
-    if (!doc) return resp({ error: 'Customer not found' }, 404, CORS);
-
-    const docId = doc.name.split('/').pop();
-    const fields = doc.fields || {};
-
-    // 2. Calculate points to claw back (same formula as add: 1€ = 10 pts)
-    const pointsToRemove = Math.floor(orderTotal * 10);
-
-    // 3. Atomic update via Firestore transaction (prevent race condition)
-    const beginRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:beginTransaction`,
-      { method: 'POST', headers: fsHeaders, body: JSON.stringify({}) }
-    );
-    if (!beginRes.ok) {
-      console.error('[woo-refund-points] beginTransaction failed:', beginRes.status);
-      return resp({ error: 'Failed to start transaction' }, 500, CORS);
+    const doc = { fields: {
+      eventType: { stringValue: String(eventType).slice(0, 64) },
+      timestamp: { stringValue: new Date().toISOString() },
+      source:    { stringValue: 'worker' },
+    }};
+    for (const [k, v] of Object.entries(meta || {})) {
+      if (v == null) continue;
+      if (typeof v === 'number')      doc.fields[k] = { doubleValue: v };
+      else if (typeof v === 'boolean') doc.fields[k] = { booleanValue: v };
+      else                             doc.fields[k] = { stringValue: String(v).slice(0, 256) };
     }
-    const { transaction } = await beginRes.json();
-
-    // Re-read inside transaction for atomic consistency
-    const txReadRes = await fetch(`${fsBase}/ipear_customers/${docId}?transaction=${encodeURIComponent(transaction)}`, { headers: fsHeaders });
-    if (!txReadRes.ok) {
-      console.error('[woo-refund-points] transactional read failed:', txReadRes.status);
-      return resp({ error: 'Failed to read customer in transaction' }, 500, CORS);
-    }
-    const txDoc = await txReadRes.json();
-    const txFields = txDoc.fields || {};
-    const currentPts = Number(txFields.points?.integerValue || 0);
-    const currentTot = Number(txFields.totalPoints?.integerValue || 0);
-    // Clamp to 0 — never go negative
-    const newPts = Math.max(0, currentPts - pointsToRemove);
-    const newTot = Math.max(0, currentTot - pointsToRemove);
-    const actualDeducted = currentPts - newPts;
-
-    const commitRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`,
-      {
-        method: 'POST', headers: fsHeaders,
-        body: JSON.stringify({
-          transaction,
-          writes: [{
-            update: {
-              name: txDoc.name,
-              fields: { ...txDoc.fields, points: { integerValue: newPts }, totalPoints: { integerValue: newTot } }
-            },
-            updateMask: { fieldPaths: ['points', 'totalPoints'] }
-          }]
-        })
-      }
-    );
-    if (!commitRes.ok) {
-      console.error('[woo-refund-points] commit failed:', commitRes.status, await commitRes.text());
-      return resp({ error: 'Failed to update points' }, 500, CORS);
-    }
-
-    // 4. Create transaction record (negative points for audit trail)
-    const txRes = await fetch(`${fsBase}/ipear_transactions`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({ fields: {
-        customerId: { stringValue: docId },
-        customerEmail: { stringValue: email },
-        customerName: { stringValue: fields.name?.stringValue || '' },
-        card: { stringValue: fields.card?.stringValue || '' },
-        type: { stringValue: 'refund_clawback' },
-        points: { integerValue: -actualDeducted },
-        amount: { doubleValue: orderTotal },
-        category: { stringValue: '🔄 E-shop Επιστροφή' },
-        note: { stringValue: orderId ? `WooCommerce Refund — Order #${orderId}` : 'WooCommerce Refund' },
-        date: { stringValue: new Date().toISOString() }
-      }})
-    });
-    if (!txRes.ok) {
-      console.error('[woo-refund-points] TX create failed:', txRes.status, await txRes.text());
-    }
-
-    // Rebuild leaderboard after refund (inline — no ctx.waitUntil available)
-    _rebuildLeaderboard(fsBase, fsHeaders).catch(e => console.warn('[refund-leaderboard]', e.message));
-
-    return resp({
-      ok: true,
-      email,
-      pointsRemoved: actualDeducted,
-      newBalance: newPts,
-      newTotalPoints: newTot,
-      orderId: orderId || undefined,
-    }, 200, CORS);
-
-  } catch (e) {
-    console.error('[woo-refund-points]', e.message, e.stack);
-    return resp({ error: 'Internal error' }, 500, CORS);
-  }
+    await fetch(`${fsBase}/ipear_security_events`, { method: 'POST', headers: fsHeaders, body: JSON.stringify(doc) });
+  } catch (_) { /* never throw */ }
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  POST /woo-create-coupon  { idToken, offerTitle, discountType, discountAmount, singleUse }
-//  Public endpoint — authenticated via Firebase ID token.
-//  Creates a real WooCommerce coupon via REST API.
-//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY
-// ══════════════════════════════════════════════════════════════════════════
 async function handleWooCreateCoupon(request, env, CORS) {
   let body;
   try { body = await readJsonCapped(request, 32 * 1024); }
@@ -1611,27 +1424,21 @@ async function handleWooCreateCoupon(request, env, CORS) {
   const idToken = (body.idToken || '').trim();
   if (!idToken) return resp({ error: 'idToken required' }, 400, CORS);
 
-  const offerTitle = String(body.offerTitle || '').trim().slice(0, 100);
-  const discountType = ['percent', 'fixed_cart'].includes(body.discountType) ? body.discountType : 'percent';
-  // SEC-FIX: cap discount — percent max 50%, fixed_cart max 100€
-  const maxDiscount = discountType === 'percent' ? 50 : 100;
-  const discountAmount = Math.max(0, Math.min(parseFloat(body.discountAmount) || 0, maxDiscount));
-  const singleUse = !!body.singleUse;
+  const offerId = String(body.offerId || '').trim().slice(0, 128);
+  if (!offerId) return resp({ error: 'offerId required' }, 400, CORS);
 
-  if (discountAmount <= 0)
-    return resp({ error: 'discountAmount must be > 0' }, 400, CORS);
-
-  // SEC-FIX: rate limit coupon creation per IP
+  // Rate limit coupon creation per IP (idempotent replays are cheap; this
+  // caps offer-enumeration abuse).
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  { const _rl = await rateLimitOrBlock(env, ip, 'woo-coupon', 3, 3600, CORS, 'Too many coupon requests. Try again later.'); if (_rl) return _rl; }
+  { const _rl = await rateLimitOrBlock(env, ip, 'woo-coupon', 5, 3600, CORS, 'Too many coupon requests. Try again later.'); if (_rl) return _rl; }
 
   if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
-  if (!env.WOO_URL || !env.WOO_KEY || !env.WOO_SECRET)
-    return resp({ error: 'WooCommerce API not configured (WOO_URL, WOO_KEY, WOO_SECRET)' }, 503, CORS);
+  if (!_wooConfigured(env))
+    return resp({ error: 'WooCommerce API not configured (needs WOO_KEY + WOO_SECRET; base from WOO_SITE_URL or WOO_URL)' }, 503, CORS);
 
   try {
-    // 1. Verify Firebase ID token → get caller UID + email
+    // 1. Verify Firebase ID token → caller UID
     const verifyRes = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
@@ -1640,83 +1447,150 @@ async function handleWooCreateCoupon(request, env, CORS) {
     const callerUid = verifyData?.users?.[0]?.localId;
     if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
 
-    // 2. Look up customer email from Firestore
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
     const projectId = env.FCM_PROJECT_ID;
     const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
     const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
 
+    // 2. Customer → email
     const custRes = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
     if (!custRes.ok) return resp({ error: 'Customer not found' }, 404, CORS);
     const custDoc = await custRes.json();
     const email = (custDoc.fields?.email?.stringValue || '').trim().toLowerCase();
     if (!email) return resp({ error: 'Customer has no email' }, 400, CORS);
 
-    // 3. Create WooCommerce coupon
-    const rnd = Array.from(crypto.getRandomValues(new Uint8Array(4)))
-      .map(b => b.toString(36)).join('').toUpperCase().slice(0, 6);
-    const code = 'IPEAR-' + rnd;
+    // 3. Load the OFFER — AUTHORITATIVE source of discount type/amount/expiry.
+    //    The client's values are never trusted.
+    const offerRes = await fetch(`${fsBase}/ipear_offers/${encodeURIComponent(offerId)}`, { headers: fsHeaders });
+    if (!offerRes.ok) {
+      await _logWorkerSecurityEvent(fsBase, fsHeaders, 'coupon_offer_not_found', { route: 'woo-create-coupon', offerId, customerId: callerUid, result: 'deny' });
+      return resp({ error: 'Offer not found' }, 404, CORS);
+    }
+    const offerDoc = await offerRes.json();
+    const of = offerDoc.fields || {};
+    const offerActive    = of.active?.booleanValue === true;
+    const offerTitle     = (of.title?.stringValue || '').slice(0, 100);
+    const dType          = of.eshopDiscountType?.stringValue || '';
+    const dAmtRaw        = Number(of.eshopDiscountAmount?.doubleValue ?? of.eshopDiscountAmount?.integerValue ?? 0);
+    const offerSingleUse = of.singleUse?.booleanValue === true;
+    const endDateStr     = of.endDate?.stringValue || '';
 
-    const expiry = new Date();
-    expiry.setDate(expiry.getDate() + 30);
-    const expiryStr = expiry.toISOString().split('T')[0];
+    if (!offerActive) return resp({ error: 'Offer not active' }, 403, CORS);
+    if (!['percent', 'fixed_cart'].includes(dType) || !(dAmtRaw > 0))
+      return resp({ error: 'Offer has no e-shop coupon' }, 400, CORS);
 
-    const wooBase = env.WOO_URL.replace(/\/+$/, '');
+    // Coupon must not outlive the offer; reject an already-expired offer.
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (endDateStr && endDateStr < todayStr)
+      return resp({ error: 'Offer expired' }, 410, CORS);
+    const plus30 = new Date(); plus30.setDate(plus30.getDate() + 30);
+    let expiryStr = plus30.toISOString().split('T')[0];
+    if (endDateStr && endDateStr < expiryStr) expiryStr = endDateStr;
+
+    // Hard safety cap (defence in depth): percent ≤ 50, fixed ≤ €100.
+    const cap = dType === 'percent' ? 50 : 100;
+    let discountAmount = dAmtRaw;
+    if (discountAmount > cap) {
+      await _logWorkerSecurityEvent(fsBase, fsHeaders, 'coupon_discount_capped', { route: 'woo-create-coupon', offerId, customerId: callerUid, requested: dAmtRaw, cap, result: 'clamp' });
+      discountAmount = cap;
+    }
+
+    // 4. Idempotent per (offer, customer): deterministic redemption doc + code.
+    const redemptionId = `eshop__${offerId}__${callerUid}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 1400);
+    const code = await _couponCode('IPEAR-', [offerId, callerUid], env);
+
+    // Fast replay — already created → return the stored coupon (no 2nd coupon).
+    const existRes = await fetch(`${fsBase}/ipear_offer_redemptions/${redemptionId}`, { headers: fsHeaders });
+    if (existRes.ok) {
+      const ex = await existRes.json();
+      if (ex.fields?.status?.stringValue === 'created' && ex.fields?.code?.stringValue) {
+        return resp({
+          ok: true, replay: true, code: ex.fields.code.stringValue,
+          discountType: dType, discountAmount, expiresAt: ex.fields.expiresAt?.stringValue || expiryStr,
+        }, 200, CORS);
+      }
+    }
+
+    // Reserve (deterministic id → idempotent write, survives retries).
+    const baseFields = {
+      code:           { stringValue: code },
+      offerId:        { stringValue: offerId },
+      offerTitle:     { stringValue: offerTitle },
+      customerId:     { stringValue: callerUid },
+      customerUid:    { stringValue: callerUid },
+      customerEmail:  { stringValue: email },
+      discountType:   { stringValue: dType },
+      discountAmount: { doubleValue: discountAmount },
+      channel:        { stringValue: 'eshop' },
+      used:           { booleanValue: false },
+      singleUse:      { booleanValue: offerSingleUse },
+      createdAt:      { stringValue: new Date().toISOString() },
+      expiresAt:      { stringValue: expiryStr },
+    };
+    await fetch(`${fsBase}/ipear_offer_redemptions/${redemptionId}`, {
+      method: 'PATCH', headers: fsHeaders,
+      body: JSON.stringify({ fields: { ...baseFields, status: { stringValue: 'creating' } } }),
+    });
+
+    // 5. Create the Woo coupon with the DETERMINISTIC code. Unique-code
+    //    constraint makes concurrent/retry/lost-response creation safe.
+    const wooBase = _wooBaseUrl(env);
     const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
-
     const couponPayload = {
       code,
-      discount_type: discountType,
-      amount: String(discountAmount),
-      individual_use: true,
-      usage_limit: singleUse ? 1 : 0,
-      email_restrictions: [email],
-      date_expires: expiryStr,
-      description: 'iPear Loyalty: ' + offerTitle,
+      discount_type:       dType,
+      amount:              String(discountAmount),
+      individual_use:      true,
+      usage_limit:         1,
+      usage_limit_per_user: 1,
+      email_restrictions:  [email],
+      date_expires:        expiryStr,
+      description:         'iPear Loyalty: ' + offerTitle,
     };
-
     const wooRes = await fetch(wooBase + '/wp-json/wc/v3/coupons', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Basic ' + wooAuth,
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + wooAuth },
       body: JSON.stringify(couponPayload),
     });
 
-    if (!wooRes.ok) {
+    let wooCoupon = null;
+    if (wooRes.ok) {
+      wooCoupon = await wooRes.json();
+    } else {
+      // Recovery: code already exists (lost response / concurrent create) →
+      // fetch the existing coupon by code so we return the same one, idempotently.
       const errBody = await wooRes.text();
-      console.error('[woo-create-coupon] WooCommerce API error:', wooRes.status, errBody);
-      return resp({ error: 'WooCommerce API error: ' + wooRes.status }, 502, CORS);
+      if (wooRes.status === 400 || /already exists|code_exists|term_exists|invalid_coupon/i.test(errBody)) {
+        const getRes = await fetch(`${wooBase}/wp-json/wc/v3/coupons?code=${encodeURIComponent(code)}`, { headers: { 'Authorization': 'Basic ' + wooAuth } });
+        if (getRes.ok) {
+          const arr = await getRes.json();
+          wooCoupon = Array.isArray(arr) ? arr.find(c => String(c.code || '').toLowerCase() === code.toLowerCase()) : null;
+        }
+      }
+      if (!wooCoupon) {
+        console.error('[woo-create-coupon] WooCommerce API error:', wooRes.status, errBody);
+        // Leave the reservation in 'creating' so a later retry recovers it.
+        return resp({ error: 'WooCommerce API error: ' + wooRes.status }, 502, CORS);
+      }
     }
 
-    const wooCoupon = await wooRes.json();
-
-    // 4. Log redemption in Firestore
-    const redemptionDoc = {
-      fields: {
-        code:           { stringValue: wooCoupon.code || code },
-        offerId:        { stringValue: offerTitle },
-        offerTitle:     { stringValue: offerTitle },
-        customerId:     { stringValue: callerUid },
-        customerEmail:  { stringValue: email },
-        discountType:   { stringValue: discountType },
-        discountAmount: { doubleValue: discountAmount },
-        channel:        { stringValue: 'eshop' },
-        status:         { stringValue: 'created' },
-        used:           { booleanValue: false },
-        createdAt:      { stringValue: new Date().toISOString() },
-        expiresAt:      { stringValue: expiryStr },
-      }
-    };
-    await fetch(`${fsBase}/ipear_offer_redemptions`, {
-      method: 'POST', headers: fsHeaders, body: JSON.stringify(redemptionDoc),
+    // 6. Mark created (idempotent; deterministic id).
+    await fetch(`${fsBase}/ipear_offer_redemptions/${redemptionId}`, {
+      method: 'PATCH', headers: fsHeaders,
+      body: JSON.stringify({ fields: {
+        ...baseFields,
+        code:              { stringValue: wooCoupon.code || code },
+        status:            { stringValue: 'created' },
+        wooCouponId:       { integerValue: String(wooCoupon.id || 0) },
+        usageLimit:        { integerValue: '1' },
+        usageLimitPerUser: { integerValue: '1' },
+      } }),
     });
 
     return resp({
       ok: true,
       code: wooCoupon.code || code,
-      discountType,
+      discountType: dType,
       discountAmount,
       expiresAt: expiryStr,
     }, 200, CORS);
@@ -1728,10 +1602,314 @@ async function handleWooCreateCoupon(request, env, CORS) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+//  POST /woo-reward-coupon  { idToken, rewardId, idempotencyKey }
+//  Customer-authenticated (Firebase ID token). POINTS-BASED e-shop reward:
+//  the customer SPENDS Loyalty points for a WooCommerce coupon. Everything
+//  authoritative (cost, value, eligibility, balance, identity) is read
+//  server-side from ipear_rewards + ipear_customers — never from the client.
+//
+//  Explicit state machine (Firestore and Woo cannot share one atomic txn):
+//    reserve/charge (atomic: points-=cost + immutable redeem tx + redemption
+//      'charged', idempotent via deterministic ledger id with exists:false)
+//    → create Woo coupon (deterministic code; Woo unique-code = retry/concurrency
+//      anchor) → finalize 'created'
+//    → on definitive Woo failure: COMPENSATE (atomic: points+=cost + immutable
+//      reversal tx + redemption 'compensated'). Never points-lost+no-coupon;
+//      never coupon+no-charge. All ledger rows immutable (deterministic ids).
+//  Requires env: WOO_SITE_URL (or WOO_URL alias), WOO_KEY, WOO_SECRET, FIREBASE_API_KEY, FCM_*,
+//  COUPON_HMAC_KEY (falls back to WOO_SECRET until provisioned).
+// ══════════════════════════════════════════════════════════════════════════
+async function handleWooRewardCoupon(request, env, CORS) {
+  let body;
+  try { body = await readJsonCapped(request, 32 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+
+  const idToken = (body.idToken || '').trim();
+  if (!idToken) return resp({ error: 'idToken required' }, 400, CORS);
+  const rewardId = String(body.rewardId || '').trim().slice(0, 128);
+  if (!rewardId) return resp({ error: 'rewardId required' }, 400, CORS);
+  // idempotencyKey is OPTIONAL and NOT used for financial correctness — the
+  // server is authoritative via the per-(customer,reward) "open redemption"
+  // pointer below. It is accepted only for log correlation.
+
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  { const _rl = await rateLimitOrBlock(env, ip, 'woo-reward', 10, 3600, CORS, 'Too many redemption requests. Try again later.'); if (_rl) return _rl; }
+
+  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
+    return resp({ error: 'Server not configured' }, 503, CORS);
+  if (!_wooConfigured(env))
+    return resp({ error: 'WooCommerce API not configured (needs WOO_KEY + WOO_SECRET; base from WOO_SITE_URL or WOO_URL)' }, 503, CORS);
+
+  try {
+    // 1. Verify Firebase ID token → caller UID
+    const verifyRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
+    );
+    const verifyData = await verifyRes.json();
+    const callerUid = verifyData?.users?.[0]?.localId;
+    if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
+
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId = env.FCM_PROJECT_ID;
+    const fsBase    = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+    const docBase   = `projects/${projectId}/databases/(default)/documents`;
+    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+
+    // 2. Load reward (AUTHORITATIVE cost / value / eligibility)
+    const rewardRes = await fetch(`${fsBase}/ipear_rewards/${encodeURIComponent(rewardId)}`, { headers: fsHeaders });
+    if (!rewardRes.ok) return resp({ error: 'Reward not found' }, 404, CORS);
+    const rf = (await rewardRes.json()).fields || {};
+    if (rf.isActive?.booleanValue !== true) return resp({ error: 'Reward not active' }, 403, CORS);
+    if (rf.eshopEligible?.booleanValue !== true) return resp({ error: 'Reward not available as e-shop coupon' }, 403, CORS);
+    const cost     = Math.floor(Number(rf.cost?.integerValue ?? rf.cost?.doubleValue ?? 0));
+    const discount = Number(rf.discount?.doubleValue ?? rf.discount?.integerValue ?? 0);
+    const rewardTitle = (rf.title?.stringValue || 'Reward').slice(0, 100);
+    if (!(cost > 0) || !(discount > 0)) return resp({ error: 'Reward misconfigured' }, 400, CORS);
+
+    const nowIso = new Date().toISOString();
+    const plus30 = new Date(); plus30.setDate(plus30.getDate() + 30);
+    const expiryStr = plus30.toISOString().split('T')[0];
+
+    // ── SERVER-AUTHORITATIVE "open redemption" pointer ──────────────────────
+    //  One active redemption at a time per (customer, reward). Resolution does
+    //  NOT depend on the client: a key-less retry recovers the open/recent
+    //  redemption from here; only a terminal (completed-past-window /
+    //  compensated / aborted) state lets a genuinely new redemption start.
+    const pointerId   = `${rewardId}__${callerUid}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 1400);
+    const pointerUrl  = `${fsBase}/ipear_reward_redemption_active/${pointerId}`;
+    const pointerName = `${docBase}/ipear_reward_redemption_active/${pointerId}`;
+    const redIdForGen = (g) => `rwdcpn__${rewardId}__${callerUid}__g${g}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 1400);
+
+    const pSnap = await fetch(pointerUrl, { headers: fsHeaders });
+    let pExists = false, pUpdateTime = null, pGen = 0, pStatus = '', pRedId = '';
+    if (pSnap.ok) {
+      const pj = await pSnap.json(); const pfx = pj.fields || {};
+      pExists = true; pUpdateTime = pj.updateTime;
+      pGen = Math.floor(Number(pfx.gen?.integerValue ?? pfx.gen?.doubleValue ?? 0));
+      pStatus = pfx.status?.stringValue || '';
+      pRedId = pfx.redemptionId?.stringValue || '';
+    }
+
+    // Explicit "redeem again" intent — the ONLY thing that authorizes a new
+    // charge when a COMPLETED redemption already exists. Validated against server
+    // state below (never a bare client boolean). Elapsed time never authorizes a
+    // new deduction.
+    const newGen = body.newGeneration === true;
+    let gen, redemptionId, mode;
+    if (!pExists) {
+      // First-ever redemption of this reward by this customer = implicit first intent.
+      gen = 1; redemptionId = redIdForGen(gen); mode = 'new';
+    } else if (pStatus === 'open') {
+      // In-flight → resume (recover), regardless of any client flag.
+      gen = pGen; redemptionId = pRedId || redIdForGen(gen); mode = 'resume';
+    } else if (pStatus === 'completed') {
+      if (newGen) {
+        // Explicit new generation: previous is terminal-completed + no in-flight
+        // (status==='completed' proves both). Atomic CAS below guards concurrency.
+        gen = pGen + 1; redemptionId = redIdForGen(gen); mode = 'new';
+      } else {
+        // DEFAULT → ALWAYS replay the existing coupon. No time window, ever.
+        const rr = await fetch(`${fsBase}/ipear_offer_redemptions/${pRedId}`, { headers: fsHeaders });
+        if (rr.ok) {
+          const rx = (await rr.json()).fields || {};
+          return resp({ ok: true, replay: true, code: rx.code?.stringValue || '', discountType: 'fixed_cart',
+            discountAmount: Number(rx.discountAmount?.doubleValue ?? rx.discountAmount?.integerValue ?? discount),
+            pointsSpent: Math.floor(Number(rx.pointsSpent?.integerValue ?? rx.pointsSpent?.doubleValue ?? cost)),
+            expiresAt: rx.expiresAt?.stringValue || expiryStr, canRedeemAgain: true }, 200, CORS);
+        }
+        // Completed pointer but redemption doc missing (shouldn't happen) → next gen.
+        gen = pGen + 1; redemptionId = redIdForGen(gen); mode = 'new';
+      }
+    } else {
+      // Terminal with NO coupon delivered (compensated → already refunded, or
+      // aborted → never charged). A retry here cannot double-charge, so charging
+      // a fresh generation is correct.
+      gen = pGen + 1; redemptionId = redIdForGen(gen); mode = 'new';
+    }
+
+    const ledgerId     = `rwdcpn_sub__${redemptionId}`.slice(0, 1400);
+    const compLedgerId = `rwdcpn_comp__${redemptionId}`.slice(0, 1400);
+    const code         = await _couponCode('IPEAR-R', [rewardId, callerUid, 'g' + gen], env);
+    const redRef       = `${fsBase}/ipear_offer_redemptions/${redemptionId}`;
+    const redName      = `${docBase}/ipear_offer_redemptions/${redemptionId}`;
+    const custDocName  = `${docBase}/ipear_customers/${callerUid}`;
+
+    const setPointer = async (fields, precondition) => {
+      const body = { writes: [{ update: { name: pointerName, fields: wrapFields(fields) }, ...(precondition ? { currentDocument: precondition } : {}) } ] };
+      return fetch(`${fsBase}:commit`, { method: 'POST', headers: fsHeaders, body: JSON.stringify(body) });
+    };
+
+    // For a NEW redemption: pre-check balance, then CAS the pointer to 'open'.
+    if (mode === 'new') {
+      const c0 = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
+      if (!c0.ok) return resp({ error: 'Customer not found' }, 404, CORS);
+      const c0f = (await c0.json()).fields || {};
+      if (c0f.blocked?.booleanValue === true) return resp({ error: 'Account blocked' }, 403, CORS);
+      if (!((c0f.email?.stringValue || '').trim())) return resp({ error: 'Customer has no email' }, 400, CORS);
+      const bal0 = Math.floor(Number(c0f.points?.integerValue ?? c0f.points?.doubleValue ?? 0));
+      if (bal0 < cost) {
+        await _logWorkerSecurityEvent(fsBase, fsHeaders, 'reward_insufficient_balance', { route: 'woo-reward-coupon', rewardId, customerId: callerUid, cost, balance: bal0, result: 'deny' });
+        return resp({ error: 'insufficient-points', reason: 'not enough points', balance: bal0, cost }, 409, CORS);
+      }
+      const casRes = await setPointer(
+        { gen, redemptionId, status: 'open', rewardId, customerUid: callerUid, openedAt: nowIso },
+        pExists ? { updateTime: pUpdateTime } : { exists: false }
+      );
+      if (!casRes.ok) {
+        // Lost the CAS to a concurrent request → recover its redemption.
+        const p2 = await fetch(pointerUrl, { headers: fsHeaders });
+        if (p2.ok) {
+          const p2f = (await p2.json()).fields || {};
+          if (p2f.status?.stringValue === 'open') { gen = Math.floor(Number(p2f.gen?.integerValue ?? 0)); redemptionId = p2f.redemptionId?.stringValue || redemptionId; mode = 'resume'; }
+          else return resp({ error: 'redemption-contention', reason: 'please retry' }, 409, CORS);
+        } else return resp({ error: 'redemption-contention', reason: 'please retry' }, 409, CORS);
+      }
+    }
+
+    // Recompute ids if the CAS-loss changed the generation.
+    const curLedgerId = `rwdcpn_sub__${redemptionId}`.slice(0, 1400);
+    const curCode     = await _couponCode('IPEAR-R', [rewardId, callerUid, 'g' + gen], env);
+    const curRedRef   = `${fsBase}/ipear_offer_redemptions/${redemptionId}`;
+    const curRedName  = `${docBase}/ipear_offer_redemptions/${redemptionId}`;
+    const curLedName  = `${docBase}/ipear_transactions/${curLedgerId}`;
+
+    // 4. CHARGE — atomic points deduction + immutable redeem tx. Idempotent via
+    //    the deterministic ledger doc (exists:false) + customer updateTime guard.
+    let newBalance = null;
+    const ledChk = await fetch(`${fsBase}/ipear_transactions/${curLedgerId}`, { headers: fsHeaders });
+    let charged = ledChk.ok;
+    if (!charged) {
+      let done = false;
+      for (let attempt = 0; attempt < 4 && !done; attempt++) {
+        const custRes = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
+        if (!custRes.ok) return resp({ error: 'Customer not found' }, 404, CORS);
+        const custJson = await custRes.json(); const cf = custJson.fields || {};
+        const email = (cf.email?.stringValue || '').trim().toLowerCase();
+        if (!email) return resp({ error: 'Customer has no email' }, 400, CORS);
+        if (cf.blocked?.booleanValue === true) return resp({ error: 'Account blocked' }, 403, CORS);
+        const points = Math.floor(Number(cf.points?.integerValue ?? cf.points?.doubleValue ?? 0));
+        if (points < cost) {
+          // Can't charge — close the just-opened redemption so a future attempt
+          // starts clean (never leaves a stuck 'open' pointer).
+          await setPointer({ gen, redemptionId, status: 'aborted', rewardId, customerUid: callerUid, abortedAt: nowIso });
+          await _logWorkerSecurityEvent(fsBase, fsHeaders, 'reward_insufficient_balance', { route: 'woo-reward-coupon', rewardId, customerId: callerUid, cost, balance: points, result: 'deny' });
+          return resp({ error: 'insufficient-points', reason: 'not enough points', balance: points, cost }, 409, CORS);
+        }
+        newBalance = points - cost;
+        const commitBody = { writes: [
+          { update: { name: custDocName, fields: { points: { integerValue: String(newBalance) } } },
+            updateMask: { fieldPaths: ['points'] }, currentDocument: { updateTime: custJson.updateTime } },
+          { update: { name: curLedName, fields: wrapFields({
+              customerId: callerUid, customerUid: callerUid, customerEmail: email,
+              customerName: cf.name?.stringValue || '', card: cf.card?.stringValue || '',
+              type: 'redeem', points: -cost, discount, label: rewardTitle,
+              category: '🎟️ Εξαργύρωση e-shop', method: 'eshop-reward',
+              rewardId, redemptionId, generation: gen, channel: 'reward-eshop',
+              balanceBefore: points, balanceAfter: newBalance, date: nowIso, source: 'reward-eshop/v1',
+            }) }, currentDocument: { exists: false } },
+          { update: { name: curRedName, fields: wrapFields({
+              code: curCode, rewardId, rewardTitle, generation: gen, customerId: callerUid, customerUid: callerUid,
+              customerEmail: email, discountType: 'fixed_cart', discountAmount: discount,
+              pointsSpent: cost, channel: 'reward-eshop', status: 'charged', used: false,
+              createdAt: nowIso, expiresAt: expiryStr,
+            }) } },
+        ] };
+        const commitRes = await fetch(`${fsBase}:commit`, { method: 'POST', headers: fsHeaders, body: JSON.stringify(commitBody) });
+        if (commitRes.ok) { done = true; charged = true; break; }
+        const ledRes = await fetch(`${fsBase}/ipear_transactions/${curLedgerId}`, { headers: fsHeaders });
+        if (ledRes.ok) { charged = true; done = true; break; } // charged by a concurrent request
+      }
+      if (!charged) return resp({ error: 'charge-contention', reason: 'please retry' }, 409, CORS);
+    }
+
+    // 5. CREATE the Woo coupon (deterministic code → retry/concurrency safe).
+    const cust2 = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
+    const email2 = ((await cust2.json()).fields?.email?.stringValue || '').trim().toLowerCase();
+    const wooBase = _wooBaseUrl(env);
+    const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
+    const couponPayload = {
+      code: curCode, discount_type: 'fixed_cart', amount: String(discount),
+      individual_use: true, usage_limit: 1, usage_limit_per_user: 1,
+      email_restrictions: email2 ? [email2] : [], date_expires: expiryStr,
+      description: 'iPear Reward: ' + rewardTitle,
+    };
+    const wooRes = await fetch(wooBase + '/wp-json/wc/v3/coupons', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Basic ' + wooAuth }, body: JSON.stringify(couponPayload),
+    });
+    let wooCoupon = null;
+    if (wooRes.ok) { wooCoupon = await wooRes.json(); }
+    else {
+      const errBody = await wooRes.text();
+      if (wooRes.status === 400 || /already exists|code_exists|term_exists|invalid_coupon/i.test(errBody)) {
+        const g = await fetch(`${wooBase}/wp-json/wc/v3/coupons?code=${encodeURIComponent(curCode)}`, { headers: { 'Authorization': 'Basic ' + wooAuth } });
+        if (g.ok) { const arr = await g.json(); wooCoupon = Array.isArray(arr) ? arr.find(c => String(c.code || '').toLowerCase() === curCode.toLowerCase()) : null; }
+      }
+      if (!wooCoupon) {
+        // 5b. COMPENSATE — refund points, immutable reversal tx, close redemption.
+        console.error('[woo-reward-coupon] Woo create failed, compensating:', wooRes.status, errBody);
+        const compName = `${docBase}/ipear_transactions/${compLedgerId}`;
+        for (let a = 0; a < 4; a++) {
+          const compExists = await fetch(`${fsBase}/ipear_transactions/${compLedgerId}`, { headers: fsHeaders });
+          if (compExists.ok) break; // already refunded (idempotent)
+          const cr = await fetch(`${fsBase}/ipear_customers/${callerUid}`, { headers: fsHeaders });
+          const cj = await cr.json(); const ff = cj.fields || {};
+          const pts = Math.floor(Number(ff.points?.integerValue ?? ff.points?.doubleValue ?? 0));
+          const back = pts + cost;
+          const cBody = { writes: [
+            { update: { name: custDocName, fields: { points: { integerValue: String(back) } } }, updateMask: { fieldPaths: ['points'] }, currentDocument: { updateTime: cj.updateTime } },
+            { update: { name: compName, fields: wrapFields({
+                customerId: callerUid, customerUid: callerUid, customerEmail: email2,
+                type: 'add', points: cost, discount: 0, label: rewardTitle,
+                category: '↩︎ Επιστροφή πόντων εξαργύρωσης', method: 'eshop-reward-compensation',
+                rewardId, redemptionId, generation: gen, channel: 'reward-eshop',
+                balanceBefore: pts, balanceAfter: back, date: new Date().toISOString(), source: 'reward-eshop/v1',
+              }) }, currentDocument: { exists: false } },
+            { update: { name: curRedName, fields: wrapFields({ status: 'compensated', compensatedAt: new Date().toISOString() }) }, updateMask: { fieldPaths: ['status', 'compensatedAt'] } },
+          ] };
+          const cRes = await fetch(`${fsBase}:commit`, { method: 'POST', headers: fsHeaders, body: JSON.stringify(cBody) });
+          if (cRes.ok) break;
+        }
+        await setPointer({ gen, redemptionId, status: 'compensated', rewardId, customerUid: callerUid, compensatedAt: new Date().toISOString() });
+        await _logWorkerSecurityEvent(fsBase, fsHeaders, 'reward_woo_failed_compensated', { route: 'woo-reward-coupon', rewardId, customerId: callerUid, cost, result: 'compensated' });
+        // Phase 6 — owner alert on a FINANCIAL anomaly: the points charge was
+        // auto-refunded because the Woo coupon could not be created (likely a
+        // WooCommerce/API outage). Best-effort, non-blocking (matches the
+        // referral-abuse alert pattern); failures never affect the response.
+        sendSecurityAlert(env,
+          `\u{1F3AB} Reward redemption auto-refunded (Woo coupon creation failed)\n\n`
+          + `Reward: ${rewardId}\n`
+          + `Customer UID: ${callerUid}\n`
+          + `Points charged then refunded: ${cost}\n`
+          + `Generation: ${gen}\n\n`
+          + `The customer's points were restored automatically. Repeated alerts indicate a WooCommerce REST API outage affecting e-shop redemptions.`
+        ).catch(() => {});
+        return resp({ error: 'coupon-unavailable', reason: 'points refunded; please try again' }, 502, CORS);
+      }
+    }
+
+    // 6. FINALIZE — mark created (idempotent) + close the pointer as completed.
+    await fetch(curRedRef, { method: 'PATCH', headers: fsHeaders, body: JSON.stringify({ fields: wrapFields({
+      code: wooCoupon.code || curCode, rewardId, rewardTitle, generation: gen, customerId: callerUid, customerUid: callerUid,
+      customerEmail: email2, discountType: 'fixed_cart', discountAmount: discount, pointsSpent: cost,
+      channel: 'reward-eshop', status: 'created', used: false,
+      wooCouponId: Number(wooCoupon.id || 0), createdAt: nowIso, expiresAt: expiryStr,
+    }) }) });
+    await setPointer({ gen, redemptionId, status: 'completed', rewardId, customerUid: callerUid, completedAt: new Date().toISOString() });
+
+    return resp({ ok: true, code: wooCoupon.code || curCode, discountType: 'fixed_cart', discountAmount: discount, pointsSpent: cost, newBalance, expiresAt: expiryStr, canRedeemAgain: true }, 200, CORS);
+
+  } catch (e) {
+    console.error('[woo-reward-coupon]', e.message, e.stack);
+    return resp({ error: 'Internal error' }, 500, CORS);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 //  POST /woo-sync-tier  { idToken, tier, totalPoints }
 //  Public endpoint — authenticated via Firebase ID token.
 //  Updates WooCommerce user meta with VIP tier.
-//  Requires env: WOO_URL, WOO_KEY, WOO_SECRET, FIREBASE_API_KEY
+//  Requires env: WOO_SITE_URL (or WOO_URL alias), WOO_KEY, WOO_SECRET, FIREBASE_API_KEY
 // ══════════════════════════════════════════════════════════════════════════
 async function handleWooSyncTier(request, env, CORS) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -1748,7 +1926,7 @@ async function handleWooSyncTier(request, env, CORS) {
 
   if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
     return resp({ error: 'Server not configured' }, 503, CORS);
-  if (!env.WOO_URL || !env.WOO_KEY || !env.WOO_SECRET)
+  if (!_wooConfigured(env))
     return resp({ error: 'WooCommerce API not configured' }, 503, CORS);
 
   try {
@@ -1782,7 +1960,7 @@ async function handleWooSyncTier(request, env, CORS) {
                : 'bronze';
 
     // 3. Find WooCommerce customer by email
-    const wooBase = env.WOO_URL.replace(/\/+$/, '');
+    const wooBase = _wooBaseUrl(env);
     const wooAuth = btoa(env.WOO_KEY + ':' + env.WOO_SECRET);
 
     const wooCustRes = await fetch(wooBase + '/wp-json/wc/v3/customers?email=' + encodeURIComponent(email) + '&per_page=1', {
@@ -1826,69 +2004,68 @@ async function handleWooSyncTier(request, env, CORS) {
   }
 }
 
-async function handleRedeemAttempt(request, env, CORS) {
-  if (!env.RATE_LIMIT_KV) {
-    return resp({ error: 'Server not configured for rate-limit storage' }, 503, CORS);
+// Stage 3F: handleRedeemAttempt (/admin/redeem-attempt) — an orphaned redemption
+// brute-force guard with no active caller in any frontend — was REMOVED along
+// with its exclusively-used KV rate-limit helpers. The route returns 410.
+
+// ══════════════════════════════════════════════════════════════════════════
+//  DELETE AUTH USER — owner-authenticated via /admin/v2/delete-auth-user
+//  (Firebase ID token + admin:true + OWNER_UID + App Check). The legacy
+//  ADMIN_SECRET route was retired in Stage 3D/3F.
+//
+//  Διαγράφει το Firebase Auth account του χρήστη βάσει UID + anonymizes any
+//  ipear_redemption_requests identifiers. Called by the admin delete cascade.
+// ══════════════════════════════════════════════════════════════════════════
+// GDPR Art.17 — anonymize personal identifiers left in ipear_redemption_requests
+// after a customer is deleted. This collection denies ALL client writes in
+// firestore.rules ("allow create, update, delete: if false"), so the admin app's
+// delete cascade cannot touch it — anonymization MUST happen server-side here,
+// with the service-account token. Business/financial history is preserved
+// (rewardCost, rewardLabel, status, ledgerId, points, timestamps, store/staff
+// uids); only the deleted customer's own identifiers are scrubbed. Best-effort:
+// never blocks the Auth deletion.
+async function _anonymizeRedemptionRequestsForUid(uid, accessToken, projectId) {
+  if (!uid || !projectId) return { anonymized: 0 };
+  const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+  const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
+  const docNames = new Set();
+  // redemption_requests carries the customer's uid in BOTH customerUid and
+  // customerId; query each so legacy rows keyed on either are caught.
+  for (const field of ['customerUid', 'customerId']) {
+    const q = await fetch(`${fsBase}:runQuery`, {
+      method: 'POST', headers: fsHeaders,
+      body: JSON.stringify({ structuredQuery: {
+        from: [{ collectionId: 'ipear_redemption_requests' }],
+        where: { fieldFilter: { field: { fieldPath: field }, op: 'EQUAL', value: { stringValue: uid } } },
+        limit: 500,
+      }})
+    });
+    if (!q.ok) continue;
+    const rows = await q.json();
+    for (const r of rows) { if (r.document && r.document.name) docNames.add(r.document.name); }
   }
-
-  let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const action = String(body.action || '').trim(); // check | fail | success
-  if (!['check', 'fail', 'success'].includes(action)) {
-    return resp({ error: 'action must be check|fail|success' }, 400, CORS);
-  }
-
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const sessionId = String(body.sessionId || '').trim().slice(0, 120);
-  const source = String(body.source || 'unknown').trim().slice(0, 40);
-  const actorUid = String(body.actorUid || '').trim().slice(0, 120);
-  const key = makeRedeemRateKey(source, actorUid, sessionId, ip);
-  const failKey = makeFailKey(key);
-  const blockKey = makeBlockKey(key);
-
-  if (await isRedeemBlocked(env, blockKey)) {
-    return resp({ error: 'Too many failed redemption attempts', retryAfter: REDEEM_BLOCK_TTL_SECONDS }, 429, CORS);
-  }
-
-  if (action === 'check') {
-    return resp({ ok: true, blocked: false }, 200, CORS);
-  }
-
-  if (action === 'success') {
-    await clearRedeemRateLimit(env, failKey, blockKey);
-    return resp({ ok: true, reset: true }, 200, CORS);
-  }
-
-  const state = await getRedeemFailState(env, failKey);
-  const fails = state.fails + 1;
-
-  if (fails >= REDEEM_FAIL_LIMIT) {
-    await env.RATE_LIMIT_KV.put(blockKey, '1', { expirationTtl: REDEEM_BLOCK_TTL_SECONDS });
-    await env.RATE_LIMIT_KV.delete(failKey);
-    // Send security alert email to admin
-    sendSecurityAlert(env, `Brute-force εξαργύρωσης blocked — IP: ${ip}, source: ${source}, actor: ${actorUid || 'anon'}`).catch(e => console.warn('[alert]', e.message));
-    return resp({ error: 'Too many failed redemption attempts', retryAfter: REDEEM_BLOCK_TTL_SECONDS }, 429, CORS);
-  }
-
-  await saveRedeemFailState(env, failKey, {
-    fails,
-    firstFailAt: state.firstFailAt || Date.now(),
+  if (!docNames.size) return { anonymized: 0 };
+  const nowIso = new Date().toISOString();
+  const writes = [...docNames].map(name => ({
+    update: {
+      name,
+      fields: {
+        customerId:    { stringValue: '[DELETED]' },
+        customerUid:   { stringValue: '[DELETED]' },
+        _anonymizedAt: { stringValue: nowIso },
+      }
+    },
+    updateMask: { fieldPaths: ['customerId', 'customerUid', '_anonymizedAt'] },
+    currentDocument: { exists: true },
+  }));
+  const commitRes = await fetch(`${fsBase}:commit`, {
+    method: 'POST', headers: fsHeaders,
+    body: JSON.stringify({ writes }),
   });
-
-  return resp({ ok: true, fails, remaining: REDEEM_FAIL_LIMIT - fails }, 200, CORS);
+  if (!commitRes.ok) throw new Error('anon commit failed: ' + commitRes.status + ' ' + await commitRes.text());
+  return { anonymized: writes.length };
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-//  DELETE AUTH USER (Admin μόνο — requires ADMIN_SECRET)
-//
-//  POST /admin/delete-auth-user  { uid: "firebase_uid" }
-//
-//  Διαγράφει το Firebase Auth account του χρήστη βάσει UID.
-//  Καλείται αυτόματα όταν ο admin διαγράφει customer από το
-//  admin panel, ώστε ο customer να μπορεί να ξαναεγγραφεί με το ίδιο email/phone.
-// ══════════════════════════════════════════════════════════════════════════
 async function handleDeleteAuthUser(request, env, CORS) {
   let body;
   try { body = await readJsonCapped(request, 32 * 1024); }
@@ -1909,38 +2086,89 @@ async function handleDeleteAuthUser(request, env, CORS) {
   try {
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
 
-    // If only an email was supplied (or to double-check after a uid delete),
-    // resolve email → localId via Identity Toolkit lookup. This handles legacy
-    // / pre-migration customers whose Firestore record never stored a uid.
-    if (!uid && email) {
-      const lookupRes = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+    async function _deleteByUid(localId) {
+      const r = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-        body: JSON.stringify({ email: [email] })
+        body: JSON.stringify({ localId })
       });
-      if (!lookupRes.ok) {
-        console.error('[delete-auth-user] email lookup failed:', lookupRes.status);
-        return resp({ error: 'Lookup failed' }, 500, CORS);
-      }
-      const lookup = await lookupRes.json();
-      const found = (lookup?.users && lookup.users[0]) || null;
-      if (!found) return resp({ success: true, notFound: true }, 200, CORS);
-      uid = found.localId;
+      if (r.ok) return { ok: true };
+      const err = await r.json().catch(() => ({}));
+      const code = err?.error?.message || 'UNKNOWN';
+      return { ok: false, code };
     }
 
-    const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-      body: JSON.stringify({ localId: uid })
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const code = err?.error?.message || 'UNKNOWN';
-      if (code === 'USER_NOT_FOUND') return resp({ success: true, notFound: true }, 200, CORS);
-      console.error('[delete-auth-user]', code);
-      return resp({ error: 'Failed to delete auth user: ' + code }, 500, CORS);
+    async function _lookupByEmail(e) {
+      const r = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+        body: JSON.stringify({ email: [e] })
+      });
+      if (!r.ok) return { ok: false, status: r.status };
+      const data = await r.json();
+      return { ok: true, uid: data?.users?.[0]?.localId || null };
     }
-    return resp({ success: true, uid }, 200, CORS);
+
+    // ── Strategy: try uid first (fast path). If uid is missing OR the uid
+    //    delete returns USER_NOT_FOUND, fall back to email lookup so we
+    //    never leave an orphan Auth account behind. Previously the handler
+    //    treated USER_NOT_FOUND on a stale/bad uid as "success" and returned
+    //    — with the real Auth-under-email surviving. Root cause of
+    //    admin-side "delete then cannot re-register" incidents.
+
+    let deletedUid = null;
+
+    if (uid) {
+      const first = await _deleteByUid(uid);
+      if (first.ok) {
+        deletedUid = uid;
+      } else if (first.code !== 'USER_NOT_FOUND') {
+        console.error('[delete-auth-user] uid delete failed:', first.code);
+        return resp({ error: 'Failed to delete auth user: ' + first.code }, 500, CORS);
+      }
+      // If USER_NOT_FOUND, fall through to the email path below.
+    }
+
+    // Email fallback — runs when: no uid was sent, OR uid delete returned
+    // USER_NOT_FOUND. Resolves email → real Auth uid → deletes.
+    if (!deletedUid && email) {
+      const lookup = await _lookupByEmail(email);
+      if (!lookup.ok) {
+        console.error('[delete-auth-user] email lookup failed:', lookup.status);
+        return resp({ error: 'Lookup failed' }, 500, CORS);
+      }
+      if (!lookup.uid) {
+        // No Auth account under either the uid or the email — truly nothing to delete.
+        return resp({ success: true, notFound: true }, 200, CORS);
+      }
+      const second = await _deleteByUid(lookup.uid);
+      if (!second.ok) {
+        if (second.code === 'USER_NOT_FOUND') {
+          // Raced with another deletion. Still "clean" for our purposes.
+          return resp({ success: true, notFound: true }, 200, CORS);
+        }
+        console.error('[delete-auth-user] email-fallback delete failed:', second.code);
+        return resp({ error: 'Failed to delete auth user: ' + second.code }, 500, CORS);
+      }
+      deletedUid = lookup.uid;
+      console.log('[delete-auth-user] email fallback resolved uid=' + lookup.uid + ' for ' + email);
+    }
+
+    // GDPR Art.17: scrub the deleted customer's identifiers from
+    // ipear_redemption_requests (client/admin cannot — rules deny writes there).
+    // Best-effort: a failure is logged but never fails the deletion, and the
+    // customer's Auth + other docs are already gone.
+    if (deletedUid) {
+      try {
+        const anon = await _anonymizeRedemptionRequestsForUid(deletedUid, accessToken, env.FCM_PROJECT_ID);
+        if (anon.anonymized) console.log('[delete-auth-user] anonymized redemption_requests x' + anon.anonymized + ' for uid=' + deletedUid);
+      } catch (e) {
+        console.error('[delete-auth-user] redemption_requests anonymization failed (non-fatal):', e.message);
+      }
+    }
+
+    if (!deletedUid) return resp({ success: true, notFound: true }, 200, CORS);
+    return resp({ success: true, uid: deletedUid }, 200, CORS);
   } catch(e) {
     console.error('[delete-auth-user]', e.message);
     return resp({ error: 'Internal error: ' + e.message }, 500, CORS);
@@ -1948,98 +2176,23 @@ async function handleDeleteAuthUser(request, env, CORS) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  CREATE / RESET ADMIN OR TABLET ACCOUNT
+//  CREATE / RESET ADMIN OR TABLET ACCOUNT — RETIRED (ADMIN FORTRESS Stage 3D)
 //
-//  POST /admin/create-admin-user
-//  Body: { email, password, storeid? }
+//  The runtime admin-minting endpoint (POST /admin/create-admin-user) has been
+//  RETIRED unconditionally: the router returns 410 "endpoint-retired" with no
+//  rollback switch, and the handler implementation has been REMOVED so no code
+//  path — not even in rollback mode — can mint or reset a loyalty admin over
+//  HTTP (3D.2: "NO RUNTIME HTTP ENDPOINT CAN MINT A NEW LOYALTY ADMIN").
 //
-//  Idempotent: if email already exists, updates the password instead of erroring.
-//  Always (re)writes the ipear_admins/{uid} doc so the user has admin rights.
-//  Requires the same ADMIN_SECRET as every other /admin/* endpoint.
+//  If admin bootstrap/recovery is ever required, it is a controlled, out-of-band
+//  operator procedure using Firebase Auth + Firestore admin tooling (set the
+//  password in the Firebase console / Admin SDK, then write ipear_admins/{uid}
+//  and the admin:true custom claim). It must never be re-exposed as a public
+//  runtime route.
 // ══════════════════════════════════════════════════════════════════════════
-async function handleCreateAdminUser(request, env, CORS) {
-  let body;
-  try { body = await readJsonCapped(request, 32 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const email    = (body.email    || '').trim().toLowerCase();
-  const password = body.password  || '';
-  const storeid  = (body.storeid  || '').trim();
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)
-    return resp({ error: 'invalid email' }, 400, CORS);
-  if (typeof password !== 'string' || password.length < 6 || password.length > 128)
-    return resp({ error: 'password must be 6-128 chars' }, 400, CORS);
-
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'Server not configured' }, 503, CORS);
-
-  try {
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    let uid;
-    let created = false;
-
-    // 1. Create the Auth user (idempotent — falls back to lookup+password-update if it exists)
-    const signupRes = await fetch(`https://identitytoolkit.googleapis.com/v1/projects/${projectId}/accounts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-      body: JSON.stringify({ email, password, emailVerified: true })
-    });
-
-    if (signupRes.ok) {
-      uid = (await signupRes.json()).localId;
-      created = true;
-    } else {
-      const errBody = await signupRes.json().catch(() => ({}));
-      const code = errBody?.error?.message || '';
-      if (code === 'EMAIL_EXISTS' || code === 'DUPLICATE_EMAIL') {
-        // Already exists — look up the UID and force-update the password
-        const lookupRes = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-          body: JSON.stringify({ email: [email] })
-        });
-        if (!lookupRes.ok) return resp({ error: 'Email exists but lookup failed: ' + lookupRes.status }, 500, CORS);
-        const lookup = await lookupRes.json();
-        const existing = lookup?.users?.[0];
-        if (!existing?.localId) return resp({ error: 'Email exists but no UID returned' }, 500, CORS);
-        uid = existing.localId;
-        const updateRes = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-          body: JSON.stringify({ localId: uid, password })
-        });
-        if (!updateRes.ok) {
-          const updErr = await updateRes.json().catch(() => ({}));
-          return resp({ error: 'Failed to update password: ' + (updErr?.error?.message || updateRes.status) }, 500, CORS);
-        }
-      } else {
-        return resp({ error: 'Auth user creation failed: ' + code }, 500, CORS);
-      }
-    }
-
-    // 2. (Re)write the ipear_admins/{uid} doc so this user has admin privileges
-    const adminWriteRes = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_admins/${uid}`,
-      {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
-        body: JSON.stringify({ fields: { storeid: { stringValue: storeid } } })
-      }
-    );
-    if (!adminWriteRes.ok) {
-      const errText = await adminWriteRes.text();
-      console.error('[create-admin-user] Firestore write failed:', errText);
-      return resp({ error: 'Auth user ready but ipear_admins write failed', uid }, 500, CORS);
-    }
-
-    return resp({ success: true, uid, email, created, storeid }, 200, CORS);
-  } catch(e) {
-    console.error('[create-admin-user]', e.message);
-    return resp({ error: 'Internal error: ' + e.message }, 500, CORS);
-  }
-}
+//  (Implementation deleted in Stage 3D. The former body created/looked-up a
+//   Firebase Auth user via Identity Toolkit signUp/accounts:update and wrote
+//   ipear_admins/{uid}. The route now returns 410 in the main router.)
 
 // ══════════════════════════════════════════════════════════════════════════
 //  SMS HANDLER (Brevo Transactional SMS)
@@ -2191,7 +2344,7 @@ async function handleEmail(request, env, CORS) {
   const chunks = chunkArray(valid, 900);
   let sent = 0, failed = 0;
 
-  // Body is already gated by ADMIN_SECRET (the bearer check upstream), so
+  // Body is already gated by owner auth (requireOwner upstream on /admin/v2/*), so
   // raw HTML from the caller is acceptable. Falls back to the legacy
   // text→wrapped path when only `message` is provided.
   const finalHtml = (htmlContent && htmlContent.trim()) ? htmlContent : buildHtmlEmail(message);
@@ -2240,324 +2393,6 @@ async function handleEmail(request, env, CORS) {
   }
 
   return resp({ success: true, sent, failed, total: valid.length }, 200, CORS);
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-//  PUSH HANDLER (FCM V1 API)
-// ══════════════════════════════════════════════════════════════════════════
-
-async function handlePush(request, env, CORS) {
-  // Dual auth modes:
-  //   ADMIN_SECRET → broadcast: caller passes a `tokens` array, we push to all
-  //                  (marketing blasts from the admin dashboard).
-  //   idToken      → self-push: caller passes their Firebase ID token; we
-  //                  resolve their UID, look up their own fcmToken from
-  //                  Firestore, and push only to that. The body's `tokens`
-  //                  array is IGNORED in this branch so a logged-in customer
-  //                  can't aim the push at anyone else.
-  // The SPA's "🔔 enabled" confirmation push uses the idToken branch.
-  let body;
-  try { body = await readJsonCapped(request, 2 * 1024 * 1024); }
-  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
-
-  const authHeader = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  const isAdmin = !!authHeader && env.ADMIN_SECRET && (await timingSafeEqual(authHeader, env.ADMIN_SECRET));
-
-  let { tokens, title, message } = body;
-
-  if (!title?.trim())
-    return resp({ error: 'title is required' }, 400, CORS);
-
-  if (!isAdmin) {
-    // Non-admin caller MUST present a valid idToken AND the only token we
-    // accept to push to is the one stored on their own customer doc.
-    const idToken = (body.idToken || '').trim();
-    if (!idToken) return resp({ error: 'Unauthorized' }, 401, CORS);
-    if (!env.FIREBASE_API_KEY) return resp({ error: 'Server not configured' }, 503, CORS);
-
-    let callerUid;
-    try {
-      const vRes = await fetch(
-        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
-      );
-      const vData = await vRes.json();
-      callerUid = vData?.users?.[0]?.localId;
-      if (!callerUid) return resp({ error: 'Invalid token' }, 401, CORS);
-    } catch (e) {
-      console.error('[push] idToken verify failed:', e.message);
-      return resp({ error: 'Token verification failed' }, 401, CORS);
-    }
-
-    // Look up the caller's own fcmToken — this is the ONLY destination
-    // self-push can target.
-    try {
-      const fsAccessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-      const projectId = env.FCM_PROJECT_ID;
-      const custRes = await fetch(
-        `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_customers/${callerUid}`,
-        { headers: { 'Authorization': 'Bearer ' + fsAccessToken } }
-      );
-      if (!custRes.ok) return resp({ error: 'Customer not found' }, 404, CORS);
-      const cust = await custRes.json();
-      const ownToken = cust.fields?.fcmToken?.stringValue || '';
-      if (!ownToken) return resp({ error: 'No fcmToken on file' }, 400, CORS);
-      tokens = [ownToken];
-    } catch (e) {
-      console.error('[push] self-push lookup failed:', e.message);
-      return resp({ error: 'Lookup failed' }, 500, CORS);
-    }
-  }
-
-  if (!Array.isArray(tokens) || !tokens.length)
-    return resp({ error: 'tokens array is required' }, 400, CORS);
-  if (tokens.length > MAX_TOKENS)
-    return resp({ error: `Too many tokens (max ${MAX_TOKENS})` }, 400, CORS);
-
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY)
-    return resp({ error: 'FCM credentials not configured' }, 500, CORS);
-  if (!env.FCM_PROJECT_ID)
-    return resp({ error: 'FCM_PROJECT_ID env var is required' }, 500, CORS);
-
-  let accessToken;
-  try {
-    accessToken = await getFCMAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-  } catch(e) {
-    console.error('[FCM auth]', e.message);
-    return resp({ error: 'FCM auth failed' }, 500, CORS);
-  }
-
-  const fcmUrl = `https://fcm.googleapis.com/v1/projects/${env.FCM_PROJECT_ID}/messages:send`;
-  let sent = 0, failed = 0;
-
-  // Send in parallel batches of 10, using shared chunkArray helper
-  for (const chunk of chunkArray(tokens, 10)) {
-    const results = await Promise.allSettled(
-      chunk.map(token => sendSinglePush(fcmUrl, accessToken, token, title, message || '', env.APP_URL))
-    );
-    results.forEach(r => {
-      if (r.status === 'fulfilled' && r.value === true) sent++;
-      else { failed++; console.warn('[FCM] delivery failed for token in batch'); }
-    });
-  }
-
-  console.log(`[push] total=${tokens.length} sent=${sent} failed=${failed}`);
-  return resp({ success: true, sent, failed, total: tokens.length }, 200, CORS);
-}
-
-// ── DEBUG endpoint: test push delivery with full FCM response ──────────────
-async function handlePushDebug(request, env, CORS) {
-  if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID)
-    return resp({ error: 'FCM not configured' }, 503, CORS);
-
-  let _debugBody;
-  try { _debugBody = await readJsonCapped(request, 8 * 1024); } catch { _debugBody = {}; }
-
-  try {
-    // Use getAuthAccessToken (has Firestore scope) not getFCMAccessToken (FCM only)
-    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const projectId = env.FCM_PROJECT_ID;
-    const fsBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-    const fsHeaders = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken };
-
-    // Fetch all customers with fcmToken
-    const queryRes = await fetch(`${fsBase}:runQuery`, {
-      method: 'POST', headers: fsHeaders,
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: 'ipear_customers' }],
-          select: { fields: [{ fieldPath: 'name' }, { fieldPath: 'fcmToken' }, { fieldPath: 'fcmUpdatedAt' }, { fieldPath: 'email' }] }
-        }
-      })
-    });
-    const queryStatus = queryRes.status;
-    const results = await queryRes.json();
-
-    // Also try direct list
-    const listRes = await fetch(`${fsBase}/ipear_customers?pageSize=5`, { headers: fsHeaders });
-    const listData = await listRes.json();
-    const listCount = listData.documents ? listData.documents.length : 0;
-    const listError = listData.error ? listData.error.message : null;
-    const customers = [];
-    if (Array.isArray(results)) {
-      for (const item of results) {
-        if (!item.document) continue;
-        const f = item.document.fields || {};
-        const token = f.fcmToken?.stringValue || '';
-        customers.push({
-          name: f.name?.stringValue || '—',
-          email: f.email?.stringValue || '',
-          hasToken: !!token,
-          tokenPrefix: token ? token.slice(0, 30) + '...' : '',
-          tokenLength: token.length,
-          fcmUpdatedAt: f.fcmUpdatedAt?.stringValue || '',
-        });
-      }
-    }
-
-    const withTokens = customers.filter(c => c.hasToken);
-
-    // Test send to specific customer (by name) or first with token
-    const sendToName = (_debugBody.sendToName || '').toLowerCase();
-
-    let testResult = null;
-    if (withTokens.length > 0) {
-      const targetDoc = sendToName
-        ? results.find(r => (r.document?.fields?.name?.stringValue || '').toLowerCase().includes(sendToName) && r.document?.fields?.fcmToken?.stringValue)
-        : results.find(r => r.document?.fields?.fcmToken?.stringValue);
-      const firstToken = targetDoc?.document?.fields?.fcmToken?.stringValue;
-      const targetName = targetDoc?.document?.fields?.name?.stringValue || '?';
-      if (firstToken) {
-        const fcmUrl = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
-        const fcmRes = await fetch(fcmUrl, {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: {
-              token: firstToken,
-              notification: { title: '🍐 Debug Test', body: 'Push notification debug — ' + new Date().toLocaleTimeString() },
-              webpush: {
-                headers: { Urgency: 'high' },
-                notification: { icon: 'https://ipear-loyalty.pages.dev/icon-192.png' },
-                fcm_options: { link: 'https://ipear-loyalty.pages.dev/customer.html' },
-              },
-            }
-          }),
-        });
-        const fcmBody = await fcmRes.json().catch(() => ({}));
-        testResult = {
-          sentTo: targetName,
-          httpStatus: fcmRes.status,
-          ok: fcmRes.ok,
-          response: fcmBody,
-          tokenUsed: firstToken.slice(0, 30) + '...',
-        };
-      }
-    }
-
-    return resp({
-      debug: { queryStatus, queryResultCount: Array.isArray(results) ? results.length : 0, listCount, listError, firstQueryItem: Array.isArray(results) ? JSON.stringify(results[0]).slice(0, 200) : null },
-      totalCustomers: customers.length,
-      withFcmToken: withTokens.length,
-      withoutToken: customers.length - withTokens.length,
-      customers: customers.map(c => ({ name: c.name, hasToken: c.hasToken, tokenLength: c.tokenLength, updatedAt: c.fcmUpdatedAt })),
-      testPushResult: testResult,
-    }, 200, CORS);
-
-  } catch(e) {
-    console.error('[push-debug] error:', e.message, e.stack);
-    return resp({ error: 'Internal error' }, 500, CORS);
-  }
-}
-
-async function sendSinglePush(fcmUrl, accessToken, token, title, body, appUrl) {
-  const baseUrl = appUrl || 'https://ipear-loyalty.pages.dev';
-  try {
-    const res = await fetch(fcmUrl, {
-      method:  'POST',
-      headers: {
-        'Authorization': 'Bearer ' + accessToken,
-        'Content-Type':  'application/json',
-      },
-      body: JSON.stringify({
-        message: {
-          token,
-          notification: { title, body },
-          webpush: {
-            headers: { Urgency: 'high' },
-            notification: {
-              icon:  baseUrl + '/icon-192.png',
-              badge: baseUrl + '/icon-192.png',
-              requireInteraction: false,
-            },
-            fcm_options: { link: baseUrl + '/customer.html' },
-          },
-          data: { url: '/customer.html', tag: 'ipear-push' },
-        }
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const code = err?.error?.details?.[0]?.errorCode || err?.error?.message || res.status;
-      console.error('[FCM] send failed:', code, 'token:', token.slice(0, 20) + '...');
-      return false;
-    }
-    console.log('[FCM] ✅ sent to token:', token.slice(0, 20) + '...');
-    return true;
-  } catch(e) {
-    console.error('[FCM] exception:', e.message);
-    return false;
-  }
-}
-
-// ── FCM Service Account JWT + OAuth2 ────────────────────────────────────
-
-async function getFCMAccessToken(clientEmail, privateKeyPem) {
-  const jwt = await createJWT(clientEmail, privateKeyPem,
-    'https://www.googleapis.com/auth/firebase.messaging');
-
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body:    new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion:  jwt,
-    }),
-  });
-
-  const data = await res.json();
-  if (!data.access_token) throw new Error(data.error_description || JSON.stringify(data));
-  return data.access_token;
-}
-
-async function createJWT(clientEmail, privateKeyPem, scope) {
-  const pem = privateKeyPem
-    .replace(/^["'\s]+|["'\s]+$/g, '')   // strip surrounding quotes / whitespace
-    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
-    .replace(/-----END PRIVATE KEY-----/g, '')
-    .replace(/\\n/g, '')              // literal \n from JSON-escaped strings
-    .replace(/\n/g, '')               // actual newline characters
-    .replace(/\r/g, '')               // carriage returns
-    .replace(/\s/g, '')               // any remaining whitespace
-    .replace(/[^A-Za-z0-9+/=]/g, ''); // keep ONLY valid base64 characters
-
-  const binaryKey = Uint8Array.from(atob(pem), c => c.charCodeAt(0));
-
-  const key = await crypto.subtle.importKey(
-    'pkcs8',
-    binaryKey.buffer,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const now = Math.floor(Date.now() / 1000);
-
-  const b64url = obj =>
-    btoa(JSON.stringify(obj))
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-  const header  = b64url({ alg: 'RS256', typ: 'JWT' });
-  const payload = b64url({
-    iss:   clientEmail,
-    scope: scope || 'https://www.googleapis.com/auth/firebase.messaging',
-    aud:   'https://oauth2.googleapis.com/token',
-    iat:   now,
-    exp:   now + 3600,
-  });
-
-  const sigInput = `${header}.${payload}`;
-  const sigBuf   = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
-    key,
-    new TextEncoder().encode(sigInput)
-  );
-
-  const sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-  return `${sigInput}.${sig}`;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2621,19 +2456,31 @@ async function handleResetPassword(request, env, CORS) {
           requestType: 'PASSWORD_RESET',
           email,
           returnOobLink: true,
+          // L2.4-A: authorized continue URL. Firebase validates continueUrl
+          // against Authorized Domains configured in Firebase Console
+          // (loyalty.ipear.gr must be present). Only allow-listed https
+          // origins the client explicitly requested; ignore anything else.
+          continueUrl: _safeContinueUrl(body.continueUrl, 'reset'),
         }),
       }
     );
 
+    // L2.4-A: fully-neutral response. ANY branch that does not deliver an
+    // email must return the identical {success:true, message:...} body so
+    // an attacker with a raw HTTP client cannot differentiate hit/miss/
+    // Brevo-failure/EMAIL_NOT_FOUND. Previously, EMAIL_NOT_FOUND was
+    // neutralised but "no oobLink" and "Invalid reset link" leaked via
+    // HTTP 500 responses. Firebase Email Enumeration Protection returns
+    // HTTP 200 with no oobLink for unknown addresses — a distinguishable
+    // enumeration channel until fully collapsed here.
+    const NEUTRAL_RESET_BODY = { success: true, message: 'If the email exists, a reset link was sent.' };
+
     if (!fbRes.ok) {
       const err = await fbRes.json().catch(() => ({}));
       const code = err?.error?.message || 'UNKNOWN';
-      console.error('[Firebase Admin reset] status:', fbRes.status, 'code:', code, 'full:', JSON.stringify(err));
-      // Don't reveal whether the email exists (security best practice)
-      if (code === 'EMAIL_NOT_FOUND' || code.includes('EMAIL_NOT_FOUND')) {
-        return resp({ success: true, message: 'If the email exists, a reset link was sent.' }, 200, CORS);
-      }
-      return resp({ error: 'Failed to generate reset link' }, 500, CORS);
+      // Log only status + code label — never the request payload or email.
+      console.error('[Firebase Admin reset] status:', fbRes.status, 'code:', code);
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
     const fbData = await fbRes.json();
@@ -2641,7 +2488,7 @@ async function handleResetPassword(request, env, CORS) {
 
     if (!resetLink) {
       console.error('[Firebase Admin reset] No oobLink in response');
-      return resp({ error: 'No reset link generated' }, 500, CORS);
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
     // Validate the reset link is a legitimate HTTPS URL before embedding in email
@@ -2651,8 +2498,8 @@ async function handleResetPassword(request, env, CORS) {
       if (parsed.protocol !== 'https:') throw new Error('not https');
       safeResetLink = resetLink;
     } catch(_) {
-      console.error('[Firebase Admin reset] Invalid or non-HTTPS oobLink');
-      return resp({ error: 'Invalid reset link generated' }, 500, CORS);
+      console.error('[Firebase Admin reset] Invalid or non-HTTPS oobLink shape');
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
     // Step 3: Send branded email via Brevo
@@ -2678,17 +2525,22 @@ async function handleResetPassword(request, env, CORS) {
     });
 
     if (!brevoRes.ok) {
-      const err = await brevoRes.json().catch(() => ({}));
-      console.error('[Brevo reset email]', brevoRes.status, err?.message || '');
-      return resp({ error: 'Failed to send reset email' }, 500, CORS);
+      // L2.4-A: neutralised. Brevo delivery failure MUST NOT differ from
+      // hit/miss on the wire. Log status only; return neutral 200.
+      console.error('[Brevo reset email] status:', brevoRes.status);
+      return resp(NEUTRAL_RESET_BODY, 200, CORS);
     }
 
-    // Use same message whether email was found or not (prevents user enumeration)
-    return resp({ success: true, message: 'If the email exists, a reset link was sent.' }, 200, CORS);
+    // Same neutral message whether hit or miss.
+    return resp(NEUTRAL_RESET_BODY, 200, CORS);
 
   } catch(e) {
-    console.error('[reset-password] catch:', e.message, e.stack);
-    return resp({ error: 'Internal error' }, 500, CORS);
+    // L2.4-A: neutralised. Any unexpected internal exception returns the
+    // same 200 body — the outer error path was previously the last
+    // enumeration channel on this route. Log message only; no stack (may
+    // include email/oobLink fragments).
+    console.error('[reset-password] catch:', e?.message || 'unknown');
+    return resp({ success: true, message: 'If the email exists, a reset link was sent.' }, 200, CORS);
   }
 }
 
@@ -2825,6 +2677,89 @@ async function handleCheckRegistration(request, env, CORS) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  POST /check-referrer  { referrerCard: "IP-XXXXXX" }
+//
+//  Preflight existence check for a referral code. Called by submitRegister
+//  BEFORE /send-sms-otp so a customer who typed a valid-format but wrong
+//  card gets told immediately, instead of losing the +100 bonus silently
+//  via /process-referral's `invalid-referrer` branch (which locks the queue
+//  and never re-triggers).
+//
+//  Returns:
+//    { valid: true,  cap: false } → referrer exists, under cap
+//    { valid: true,  cap: true  } → referrer exists but at MAX_REFERRALS
+//    { valid: false }             → no such card (or referrer blocked)
+//    { valid: true,  degraded: true } → worker can't verify → fail OPEN
+//                                       so a config outage never blocks signup
+//  Rate-limited via the same /64 IPv6-collapsing bucket as check-registration.
+// ═══════════════════════════════════════════════════════════════════════════
+async function handleCheckReferrer(request, env, CORS) {
+  const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+  pruneRateBuckets();
+  { const _rl = await rateLimitOrBlock(env, clientIP, 'checkref', CHECK_REG_RATE_MAX, 900, CORS); if (_rl) return _rl; }
+
+  let body;
+  try { body = await readJsonCapped(request, 4 * 1024); }
+  catch (e) { return resp({ error: e.message }, e.status || 400, CORS); }
+
+  const referrerCard = String(body.referrerCard || '').trim().toUpperCase();
+  if (!referrerCard) return resp({ error: 'referrerCard required' }, 400, CORS);
+  if (!/^IP-[A-Z0-9]{6}$/.test(referrerCard))
+    return resp({ error: 'Invalid card format' }, 400, CORS);
+
+  // Constant-time-ish delay (150–400 ms) so timing does not leak existence.
+  const delay = new Promise(r => setTimeout(r, 150 + Math.random() * 250));
+
+  try {
+    if (!env.FCM_CLIENT_EMAIL || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID) {
+      // Config outage → fail OPEN so signup is never blocked by our infra.
+      // /process-referral remains the authoritative check downstream.
+      await delay;
+      return resp({ valid: true, degraded: true }, 200, CORS);
+    }
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const projectId   = env.FCM_PROJECT_ID;
+    const r = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+      body: JSON.stringify({
+        structuredQuery: {
+          from: [{ collectionId: 'ipear_customers' }],
+          where: { fieldFilter: { field: { fieldPath: 'card' }, op: 'EQUAL', value: { stringValue: referrerCard } } },
+          select: { fields: [{ fieldPath: 'referralCount' }, { fieldPath: 'blocked' }] },
+          limit: 1
+        }
+      })
+    });
+    if (!r.ok) {
+      await delay;
+      return resp({ valid: true, degraded: true }, 200, CORS);
+    }
+    const rows = await r.json();
+    let valid = false, cap = false, blocked = false;
+    for (const row of rows) {
+      if (row && row.document) {
+        valid = true;
+        const f = row.document.fields || {};
+        const refCount = Number(f.referralCount?.integerValue || 0);
+        cap = refCount >= MAX_REFERRALS_PER_USER;
+        blocked = f.blocked?.booleanValue === true;
+      }
+    }
+    // Treat blocked referrer as invalid — no bonus should ever originate
+    // from a blocked account, and telling the customer "cap reached" would
+    // leak that the account is disabled.
+    if (blocked) valid = false;
+    await delay;
+    return resp({ valid, cap }, 200, CORS);
+  } catch (e) {
+    console.error('[check-referrer] lookup failed:', e.message);
+    await delay;
+    return resp({ valid: true, degraded: true }, 200, CORS);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  POST /process-referral  { idToken: "firebase_id_token" }
 //  Public endpoint — authenticated via Firebase ID token (not ADMIN_SECRET).
 //  Called by customer.html after self-registration with a referral code.
@@ -2927,10 +2862,18 @@ async function handleProcessReferral(request, env, CORS) {
     const ncDocPath = `${fsBase}/ipear_customers/${newCustomerId}`;
 
     async function revertNewCustomerPoints(reason) {
-      // CRITICAL-2: hard-revert any points the client may have self-credited
-      // before the rules update. With the new rule, customer signups must
-      // start at points=0 — so this is a safety belt for legacy paths and any
-      // future regressions. Atomic R-M-W ensures we never go negative.
+      // BUGFIX 2026-07-30: this used to unconditionally subtract 100 pts to
+      // undo a legacy client-side self-credit. Post-CRITICAL-2 the Firestore
+      // rules enforce points==0 on customer create, so any balance seen here
+      // came from a LEGITIMATE parallel bonus (e.g. /send-welcome +50). The
+      // old code was silently zeroing the marketing bonus with no ledger row
+      // — that's the "Δημόκριτος 50→0" incident.
+      //
+      // New behavior: NEVER subtract on modern accounts. Only mark
+      // referralProcessed so the queue closes cleanly. Legacy accounts
+      // (curPts>=100 AND no marketingWelcomeProcessed flag — i.e. balance
+      // could only have come from the old self-credit) still get the -100
+      // strip, but that write is now paired with a ledger row for audit.
       try {
         const beginRes = await fetch(`${fsBase}:beginTransaction`, {
           method: 'POST', headers: fsHeaders, body: JSON.stringify({})
@@ -2944,28 +2887,63 @@ async function handleProcessReferral(request, env, CORS) {
         const f = ncDoc.fields || {};
         const curPts = Number(f.points?.integerValue || 0);
         const curTot = Number(f.totalPoints?.integerValue || 0);
-        const newPts = Math.max(0, curPts - 100);
-        const newTot = Math.max(0, curTot - 100);
+        const marketingOk = f.marketingWelcomeProcessed?.booleanValue === true;
+
+        // Only strip -100 for LEGACY accounts (created before the points==0 rule).
+        // Signature: curPts>=100 AND marketing bonus NOT yet processed.
+        // Any modern account (post-CRITICAL-2) fails one of these predicates,
+        // so no legit balance is ever touched here.
+        const isLegacySelfCredit = curPts >= 100 && !marketingOk;
+        const delta = isLegacySelfCredit ? -100 : 0;
+        const newPts = Math.max(0, curPts + delta);
+        const newTot = Math.max(0, curTot + delta);
+
+        const writes = [{
+          update: {
+            name: ncDoc.name,
+            fields: {
+              referralProcessed: { booleanValue: true },
+              ...(delta !== 0 ? {
+                points:      { integerValue: newPts },
+                totalPoints: { integerValue: newTot },
+              } : {}),
+            }
+          },
+          updateMask: {
+            fieldPaths: delta !== 0
+              ? ['points', 'totalPoints', 'referralProcessed']
+              : ['referralProcessed']
+          }
+        }];
 
         await fetch(`${fsBase}:commit`, {
           method: 'POST', headers: fsHeaders,
-          body: JSON.stringify({
-            transaction,
-            writes: [{
-              update: {
-                name: ncDoc.name,
-                fields: {
-                  ...ncDoc.fields,
-                  points:            { integerValue: newPts },
-                  totalPoints:       { integerValue: newTot },
-                  referralProcessed: { booleanValue: true },
-                }
-              },
-              updateMask: { fieldPaths: ['points', 'totalPoints', 'referralProcessed'] }
-            }]
-          })
+          body: JSON.stringify({ transaction, writes })
         });
-        console.log(`[process-referral] hard-revert (${reason}) for ${newCustomerId}: ${curPts}→${newPts}`);
+
+        // Ledger row — ONLY when we actually moved the balance.
+        // Missing ledger on a points change was one of the original symptoms.
+        if (delta !== 0) {
+          const nf = ncDoc.fields || {};
+          await fetch(`${fsBase}/ipear_transactions`, {
+            method: 'POST', headers: fsHeaders,
+            body: JSON.stringify({ fields: {
+              customerId:    { stringValue: newCustomerId },
+              customerUid:   { stringValue: nf.uid?.stringValue || newCustomerId },
+              customerEmail: { stringValue: nf.email?.stringValue || '' },
+              customerName:  { stringValue: nf.name?.stringValue || '' },
+              card:          { stringValue: nf.card?.stringValue || '' },
+              type:          { stringValue: 'subtract' },
+              points:        { integerValue: delta },
+              amount:        { doubleValue: 0 },
+              category:      { stringValue: '⚠️ Referral Reversal' },
+              note:          { stringValue: `Ακύρωση bonus παραπομπής (${reason})` },
+              date:          { stringValue: new Date().toISOString() }
+            }})
+          }).catch(e => console.error('[process-referral] revert TX log failed:', e.message));
+        }
+
+        console.log(`[process-referral] revert (${reason}) for ${newCustomerId}: ${curPts}→${newPts} (delta=${delta}, legacy=${isLegacySelfCredit})`);
       } catch (e) {
         console.error('[process-referral] revert error (' + reason + '):', e.message);
       }
@@ -3008,96 +2986,83 @@ async function handleProcessReferral(request, env, CORS) {
       return resp({ ok: true, reason: 'referral-limit-reached' }, 200, CORS);
     }
 
-    // 6. Award REFERRER +100 pts atomically
-    //    (SEC-FIX H-1: transaction prevents race condition on concurrent referrals)
+    // 6. Award REFERRER +100 pts + referralCount+1 atomically via increment.
+    //    Was R-M-W in a transaction — replaced with updateTransforms.increment
+    //    so parallel signups referring the same person cannot contend on the
+    //    referrer's doc. The MAX_REFERRALS_PER_USER cap is enforced above
+    //    (line ~3193) via the non-transactional read; the tiny window between
+    //    that check and this commit is acceptable — worst case a super-active
+    //    referrer briefly exceeds 5 (they still earn the pts, they just can't
+    //    initiate the next one).
     let referrerAwarded = false;
     {
-      const txBeginRes = await fetch(`${fsBase}:beginTransaction`, {
-        method: 'POST', headers: fsHeaders, body: JSON.stringify({})
+      const commitRes = await fetch(`${fsBase}:commit`, {
+        method: 'POST', headers: fsHeaders,
+        body: JSON.stringify({
+          writes: [{
+            update: { name: refDocPath, fields: {} },
+            updateMask: { fieldPaths: [] },
+            updateTransforms: [
+              { fieldPath: 'points',        increment: { integerValue: '100' } },
+              { fieldPath: 'totalPoints',   increment: { integerValue: '100' } },
+              { fieldPath: 'referralCount', increment: { integerValue: '1' } },
+            ],
+            currentDocument: { exists: true }
+          }]
+        })
       });
-      if (!txBeginRes.ok) {
-        console.error('[process-referral] referrer beginTransaction failed:', txBeginRes.status);
+      if (commitRes.ok) {
+        referrerAwarded = true;
       } else {
-        const { transaction: refTx } = await txBeginRes.json();
-        const refReadUrl = `https://firestore.googleapis.com/v1/${refDocPath}?transaction=${encodeURIComponent(refTx)}`;
-        const txRefReadRes = await fetch(refReadUrl, { headers: fsHeaders });
-        if (txRefReadRes.ok) {
-          const txRefDoc = await txRefReadRes.json();
-          const txRefFields = txRefDoc.fields || {};
-          const txRPts = Number(txRefFields.points?.integerValue || 0) + 100;
-          const txRTot = Number(txRefFields.totalPoints?.integerValue || 0) + 100;
-          const txRefCount = Number(txRefFields.referralCount?.integerValue || 0) + 1;
-          const commitRes = await fetch(`${fsBase}:commit`, {
-            method: 'POST', headers: fsHeaders,
-            body: JSON.stringify({
-              transaction: refTx,
-              writes: [{
-                update: {
-                  name: txRefDoc.name,
-                  fields: { ...txRefDoc.fields, points: { integerValue: txRPts }, totalPoints: { integerValue: txRTot }, referralCount: { integerValue: txRefCount } }
-                },
-                updateMask: { fieldPaths: ['points', 'totalPoints', 'referralCount'] }
-              }]
-            })
-          });
-          if (commitRes.ok) {
-            referrerAwarded = true;
-          } else {
-            console.error('[process-referral] referrer commit failed:', commitRes.status, await commitRes.text());
-          }
-        } else {
-          console.error('[process-referral] referrer tx read failed:', txRefReadRes.status);
-        }
+        console.error('[process-referral] referrer commit failed:', commitRes.status, await commitRes.text());
       }
     }
 
-    // 7. Award NEW CUSTOMER +100 pts atomically.
-    //    CRITICAL-2: customer can no longer self-credit at signup, so this
-    //    server-side credit is the only path. Idempotent via referralProcessed.
+    // 7. Award NEW CUSTOMER +100 pts atomically via increment + flag set.
+    //    Was R-M-W in a TX — replaced with a mask GET (for idempotency) + a
+    //    single commit combining `updateTransforms.increment` (for points) and
+    //    `update`+`updateMask` (for the referralProcessed flag). The parallel
+    //    /send-welcome call increments the same `points` field via its own
+    //    updateTransforms — commutative and non-contending, so both bonuses
+    //    land instead of one losing a Firestore TX contention race.
     let newCustomerAwarded = false;
     {
-      const txBeginRes = await fetch(`${fsBase}:beginTransaction`, {
-        method: 'POST', headers: fsHeaders, body: JSON.stringify({})
-      });
-      if (!txBeginRes.ok) {
-        console.error('[process-referral] new-customer beginTransaction failed:', txBeginRes.status);
+      const ncDocName = `projects/${projectId}/databases/(default)/documents/ipear_customers/${newCustomerId}`;
+      const ncFlagRes = await fetch(
+        `${ncDocPath}?mask.fieldPaths=referralProcessed`,
+        { headers: fsHeaders }
+      );
+      let ncAlreadyProcessed = false;
+      if (ncFlagRes.ok) {
+        const ncFlagDoc = await ncFlagRes.json();
+        ncAlreadyProcessed = ncFlagDoc.fields?.referralProcessed?.booleanValue === true;
       } else {
-        const { transaction: ncTx } = await txBeginRes.json();
-        const ncReadRes = await fetch(`${ncDocPath}?transaction=${encodeURIComponent(ncTx)}`, { headers: fsHeaders });
-        if (ncReadRes.ok) {
-          const ncDoc = await ncReadRes.json();
-          const ncFields = ncDoc.fields || {};
-          if (ncFields.referralProcessed?.booleanValue === true) {
-            console.log('[process-referral] new customer already processed, skipping credit');
-          } else {
-            const ncPts = Number(ncFields.points?.integerValue || 0) + 100;
-            const ncTot = Number(ncFields.totalPoints?.integerValue || 0) + 100;
-            const ncCommitRes = await fetch(`${fsBase}:commit`, {
-              method: 'POST', headers: fsHeaders,
-              body: JSON.stringify({
-                transaction: ncTx,
-                writes: [{
-                  update: {
-                    name: ncDoc.name,
-                    fields: {
-                      ...ncDoc.fields,
-                      points:            { integerValue: ncPts },
-                      totalPoints:       { integerValue: ncTot },
-                      referralProcessed: { booleanValue: true },
-                    }
-                  },
-                  updateMask: { fieldPaths: ['points', 'totalPoints', 'referralProcessed'] }
-                }]
-              })
-            });
-            if (ncCommitRes.ok) {
-              newCustomerAwarded = true;
-            } else {
-              console.error('[process-referral] new-customer commit failed:', ncCommitRes.status, await ncCommitRes.text());
-            }
-          }
+        console.error('[process-referral] new-customer flag GET failed:', ncFlagRes.status);
+      }
+      if (ncAlreadyProcessed) {
+        console.log('[process-referral] new customer already processed, skipping credit');
+      } else {
+        const ncCommitRes = await fetch(`${fsBase}:commit`, {
+          method: 'POST', headers: fsHeaders,
+          body: JSON.stringify({
+            writes: [{
+              update: {
+                name: ncDocName,
+                fields: { referralProcessed: { booleanValue: true } }
+              },
+              updateMask: { fieldPaths: ['referralProcessed'] },
+              updateTransforms: [
+                { fieldPath: 'points',      increment: { integerValue: '100' } },
+                { fieldPath: 'totalPoints', increment: { integerValue: '100' } },
+              ],
+              currentDocument: { exists: true }
+            }]
+          })
+        });
+        if (ncCommitRes.ok) {
+          newCustomerAwarded = true;
         } else {
-          console.error('[process-referral] new-customer tx read failed:', ncReadRes.status);
+          console.error('[process-referral] new-customer commit failed:', ncCommitRes.status, await ncCommitRes.text());
         }
       }
     }
@@ -3142,14 +3107,23 @@ async function handleProcessReferral(request, env, CORS) {
       if (!ncTxRes.ok) console.error('[process-referral] new-customer TX log failed:', ncTxRes.status);
     }
 
-    // 9. Mark queue done
-    await fetch(`${fsBase}/ipear_referral_queue/${callerUid}?updateMask.fieldPaths=processed&updateMask.fieldPaths=processedAt`, {
-      method: 'PATCH', headers: fsHeaders,
-      body: JSON.stringify({ fields: {
-        processed:   { booleanValue: true },
-        processedAt: { stringValue: new Date().toISOString() }
-      }})
-    });
+    // 9. Mark queue done — ONLY if we successfully credited the new customer.
+    //    Previously this fired unconditionally, so a failed credit (transient
+    //    5xx, contention on the old R-M-W path) permanently locked the queue
+    //    and blocked the client-side _retryPendingBonuses loop from ever
+    //    re-triggering the credit on next login. Now: if newCustomerAwarded
+    //    is false, the queue stays open and the retry loop can heal it.
+    if (newCustomerAwarded) {
+      await fetch(`${fsBase}/ipear_referral_queue/${callerUid}?updateMask.fieldPaths=processed&updateMask.fieldPaths=processedAt`, {
+        method: 'PATCH', headers: fsHeaders,
+        body: JSON.stringify({ fields: {
+          processed:   { booleanValue: true },
+          processedAt: { stringValue: new Date().toISOString() }
+        }})
+      });
+    } else {
+      console.warn('[process-referral] queue NOT marked processed — newCustomerAwarded=false, retry via _retryPendingBonuses on next login');
+    }
 
     // 10. Refresh the public leaderboard so the new customer (and the
     //     referrer's updated totalPoints) show up immediately.
@@ -3163,6 +3137,60 @@ async function handleProcessReferral(request, env, CORS) {
     console.error('[process-referral]', e.message, e.stack);
     return resp({ error: 'Processing failed' }, 500, CORS);
   }
+}
+
+// ── Service-account JWT signer (Firebase Admin SDK auth) ───────────────────
+// Signs an RS256 JWT with the service-account private key so getAuthAccessToken
+// can exchange it for an OAuth2 bearer token at oauth2.googleapis.com/token.
+// Used by every admin endpoint that touches Firestore, Firebase Auth, or FCM
+// scopes — NOT push-specific despite the FCM_* env var naming.
+async function createJWT(clientEmail, privateKeyPem, scope) {
+  const pem = privateKeyPem
+    .replace(/^["'\s]+|["'\s]+$/g, '')   // strip surrounding quotes / whitespace
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\\n/g, '')              // literal \n from JSON-escaped strings
+    .replace(/\n/g, '')               // actual newline characters
+    .replace(/\r/g, '')               // carriage returns
+    .replace(/\s/g, '')               // any remaining whitespace
+    .replace(/[^A-Za-z0-9+/=]/g, ''); // keep ONLY valid base64 characters
+
+  const binaryKey = Uint8Array.from(atob(pem), c => c.charCodeAt(0));
+
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    binaryKey.buffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const now = Math.floor(Date.now() / 1000);
+
+  const b64url = obj =>
+    btoa(JSON.stringify(obj))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const header  = b64url({ alg: 'RS256', typ: 'JWT' });
+  const payload = b64url({
+    iss:   clientEmail,
+    scope: scope || 'https://www.googleapis.com/auth/datastore',
+    aud:   'https://oauth2.googleapis.com/token',
+    iat:   now,
+    exp:   now + 3600,
+  });
+
+  const sigInput = `${header}.${payload}`;
+  const sigBuf   = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    key,
+    new TextEncoder().encode(sigInput)
+  );
+
+  const sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  return `${sigInput}.${sig}`;
 }
 
 // ── OAuth2 token with Identity Toolkit scope (for Auth Admin) ──────────────
@@ -3383,18 +3411,24 @@ async function handleClientError(request, env, CORS) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-//  DEEP HEALTH CHECK — /health-deep
-//  Pings Brevo API + Firestore to verify third-party connectivity.
-//  Requires ADMIN_SECRET so it can be called by Cloudflare cron or manually.
+//  DEEP HEALTH CHECK — _runHealthDeep()
+//  Pings Brevo API + Firestore to verify third-party connectivity. Invoked
+//  IN-PROCESS by the scheduled cron (no auth). The HTTP /health-deep route is
+//  retired (410) — see handleHealthDeep.
 // ══════════════════════════════════════════════════════════════════════════
 
-async function handleHealthDeep(request, env, CORS) {
-  // Auth: Bearer-only — no query string fallback (secrets must never travel in URLs)
-  const secret = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!env.ADMIN_SECRET || !(await timingSafeEqual(secret, env.ADMIN_SECRET))) {
-    return resp({ error: 'Unauthorized' }, 401, CORS);
-  }
+async function handleHealthDeep(_request, _env, CORS) {
+  const H = { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
+  // ── ADMIN FORTRESS Stage 3F — HTTP surface permanently retired ──
+  //  The deep-health probe runs IN-PROCESS from the cron via _runHealthDeep().
+  //  The HTTP route carries no auth of its own anymore (it used to accept
+  //  ADMIN_SECRET); it is retired UNCONDITIONALLY. No secret, no switch.
+  return resp({ error: 'endpoint-retired' }, 410, H);
+}
 
+// Stage 3D: auth-free, in-process deep-health probe. Returns { results, degraded }.
+// Callable directly by the cron (trusted) and by the rollback HTTP wrapper above.
+async function _runHealthDeep(env) {
   const results = { worker: 'ok', brevo: 'unknown', firestore: 'unknown', timestamp: new Date().toISOString() };
   const alerts = [];
 
@@ -3449,7 +3483,12 @@ async function handleHealthDeep(request, env, CORS) {
   try {
     const projectId = env.FCM_PROJECT_ID;
     const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
-    const fsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/ipear_config/maintenance`;
+    // Point the probe at the REAL maintenance-mode doc that the customer app
+    // subscribes to (main.js _startMaintenanceListener → settings/system).
+    // Previously we hit `ipear_config/maintenance` which doesn't exist in this
+    // project; the 404-tolerant check still marked Firestore "ok" but a real
+    // outage vs a stray-path 404 became indistinguishable in the alerts.
+    const fsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/settings/system`;
     const fsResp = await fetch(fsUrl, {
       headers: { 'Authorization': 'Bearer ' + accessToken },
       signal: AbortSignal.timeout(12000),
@@ -3480,7 +3519,7 @@ async function handleHealthDeep(request, env, CORS) {
     results.status = 'ok';
   }
 
-  return resp(results, alerts.length > 0 ? 503 : 200, { ...CORS, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
+  return { results, degraded: alerts.length > 0 };
 }
 
 // Caller contract: `detail` is PLAIN TEXT. Use `\n` for line breaks. Do NOT
@@ -3600,7 +3639,8 @@ async function _rebuildLeaderboard(fsBase, fsHeaders) {
 //  full-DB exfiltration over a single HTTPS request.
 //
 //  New behaviour:
-//    POST /admin/export-backup     (ADMIN_SECRET-gated)
+//    POST /admin/export-backup     (Stage 3B: /admin/v2/export-backup, Firebase
+//        owner auth + App Check; legacy ADMIN_SECRET variant retired in 3D)
 //        → uploads compact JSON to R2 under a random key
 //        → returns { downloadUrl, expiresAt, totalCustomers, key }
 //        → writes an audit_logs row with the calling IP + key
@@ -3609,15 +3649,16 @@ async function _rebuildLeaderboard(fsBase, fsHeaders) {
 //        → key+exp+sig query params; HMAC verified timing-safely
 //        → streams the R2 object body; 410 once expired
 //
-//  Reqs: env.BACKUP_R2 (R2 binding), env.ADMIN_SECRET (HMAC key).
-//  Setup (one-time, Cloudflare dashboard):
+//  Reqs: env.BACKUP_R2 (R2 binding), env.BACKUP_SIGNING_KEY (dedicated HMAC key
+//        — Stage 3D decoupled this from ADMIN_SECRET).
+//  Setup (one-time):
 //    1. R2 → Create bucket "ipear-backups"
 //    2. wrangler.toml: add the [[r2_buckets]] block (already templated)
-//    3. wrangler secret put ADMIN_SECRET (already set)
+//    3. wrangler secret put BACKUP_SIGNING_KEY
 //    4. Optional retention rule on R2: delete after 30 days
 // ══════════════════════════════════════════════════════════════════════════
 
-// HMAC-SHA-256 signing of "key:expEpochMs" using ADMIN_SECRET.
+// HMAC-SHA-256 signing of "key:expEpochMs" using BACKUP_SIGNING_KEY.
 // Returns lowercase hex. Use timingSafeHexEqual() to verify.
 async function _hmacHex(secret, message) {
   const enc = new TextEncoder();
@@ -3648,8 +3689,10 @@ async function handleExportBackup(request, env, CORS) {
              '([[r2_buckets]] binding="BACKUP_R2" bucket_name="ipear-backups").'
     }, 503, CORS);
   }
-  if (!env.ADMIN_SECRET) {
-    return resp({ error: 'ADMIN_SECRET not configured (required for signed-URL HMAC).' }, 503, CORS);
+  // Stage 3D: download-URL HMAC now uses a DEDICATED BACKUP_SIGNING_KEY, not
+  // ADMIN_SECRET — so a leaked ADMIN_SECRET can no longer forge backup links.
+  if (!env.BACKUP_SIGNING_KEY) {
+    return resp({ error: 'Service not configured' }, 503, CORS);
   }
 
   try {
@@ -3725,7 +3768,7 @@ async function handleExportBackup(request, env, CORS) {
     // ── Sign URL valid for 10 minutes ──
     const EXPIRY_MS = 10 * 60 * 1000;
     const expiresAtMs = Date.now() + EXPIRY_MS;
-    const sig = await _hmacHex(env.ADMIN_SECRET, `${key}:${expiresAtMs}`);
+    const sig = await _hmacHex(env.BACKUP_SIGNING_KEY, `${key}:${expiresAtMs}`);
     const downloadUrl = `${new URL(request.url).origin}/admin/export-download` +
       `?key=${encodeURIComponent(key)}&exp=${expiresAtMs}&sig=${sig}`;
 
@@ -3765,7 +3808,7 @@ async function handleExportBackup(request, env, CORS) {
 //  Routed in the PUBLIC section because the signature is the only credential.
 // ══════════════════════════════════════════════════════════════════════════
 async function handleExportDownload(request, env, CORS) {
-  if (!env.BACKUP_R2 || !env.ADMIN_SECRET) {
+  if (!env.BACKUP_R2 || !env.BACKUP_SIGNING_KEY) {
     return resp({ error: 'Service not configured' }, 503, CORS);
   }
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -3791,7 +3834,7 @@ async function handleExportDownload(request, env, CORS) {
   if (Date.now() > expMs) {
     return resp({ error: 'Signed URL expired' }, 410, CORS);
   }
-  const expected = await _hmacHex(env.ADMIN_SECRET, `${key}:${expMs}`);
+  const expected = await _hmacHex(env.BACKUP_SIGNING_KEY, `${key}:${expMs}`);
   if (!_timingSafeHexEqual(sig, expected)) {
     return resp({ error: 'Signature mismatch' }, 403, CORS);
   }
@@ -4057,6 +4100,246 @@ function buildHtmlEmail(message) {
       </td>
     </tr>
 
+  </table>
+  </td></tr>
+</table>
+</body>
+</html>`;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  L2.4-A · Continue-URL allowlist for Firebase-hosted action widgets.
+// ══════════════════════════════════════════════════════════════════════════
+function _safeContinueUrl(requested, purpose) {
+  const CANONICAL = {
+    reset:  'https://loyalty.ipear.gr/?resetOk=1',
+    verify: 'https://loyalty.ipear.gr/?verifyOk=1',
+  };
+  const fallback = CANONICAL[purpose] || CANONICAL.reset;
+  if (typeof requested !== 'string' || requested.length === 0) return fallback;
+  return requested === CANONICAL[purpose] ? requested : fallback;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  L2.4-A · POST /resend-verification (authenticated, server-authoritative)
+//
+//  Client contract:
+//    - Authorization: Bearer <firebase-id-token>    (header only; never body)
+//    - Body: {} (any content ignored)
+//    - Response: ALWAYS 200 { success: true, message: "…" } — neutral.
+//                Never reveals: account existence, already-verified state,
+//                Brevo delivery status, provider type, or Firebase error.
+//
+//  Server:
+//    - Verifies ID token via Identity Toolkit accounts:lookup helper.
+//    - Derives verifiedUid + verifiedEmail exclusively from the token.
+//    - Ignores any client-supplied uid/email.
+//    - Per-IP + per-uid + per-hashed-email rate limits (5/15min each).
+//    - Generates the link via Firebase Identity Toolkit accounts:sendOobCode
+//      with requestType: 'VERIFY_EMAIL' + returnOobLink: true — the SAME
+//      method the existing /reset-password uses for PASSWORD_RESET.
+//    - continueUrl restricted to _safeContinueUrl(_, 'verify').
+//    - Delivery via existing Brevo integration.
+//    - Never logs the oobLink, oobCode, ID token, or email plaintext.
+// ══════════════════════════════════════════════════════════════════════════
+async function handleResendVerification(request, env, CORS) {
+  const NEUTRAL_BODY = {
+    success: true,
+    message: 'If your account requires verification, a new email has been sent.',
+  };
+
+  const clientIP = request.headers.get('CF-Connecting-IP')
+    || request.headers.get('x-forwarded-for') || 'unknown';
+  pruneRateBuckets();
+  {
+    const _rl = await rateLimitOrBlock(
+      env, clientIP, 'verify', RATE_LIMIT_MAX_HITS, 900, CORS,
+      'Too many requests. Please try again later.'
+    );
+    if (_rl) return _rl;
+  }
+
+  if (!env.FIREBASE_API_KEY || !env.FCM_CLIENT_EMAIL
+      || !env.FCM_PRIVATE_KEY || !env.FCM_PROJECT_ID
+      || !env.BREVO_API_KEY) {
+    console.error('[resend-verification] server not fully configured');
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+
+  const authHeader = request.headers.get('Authorization') || '';
+  if (!/^Bearer\s+[A-Za-z0-9._~+/=-]+$/.test(authHeader)) {
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+  const idToken = authHeader.slice(7).trim();
+  if (!idToken || idToken.length > 4096) return resp(NEUTRAL_BODY, 200, CORS);
+
+  let verifiedUid, verifiedEmail, alreadyVerified;
+  try {
+    const verifyRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${env.FIREBASE_API_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }) }
+    );
+    const verifyData = await verifyRes.json();
+    const u = verifyData?.users?.[0];
+    if (!u?.localId || !u?.email) return resp(NEUTRAL_BODY, 200, CORS);
+    verifiedUid    = u.localId;
+    verifiedEmail  = String(u.email).trim().toLowerCase();
+    alreadyVerified = u.emailVerified === true;
+  } catch (_) {
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+
+  {
+    const _rl = await rateLimitOrBlock(
+      env, 't:uid:' + verifiedUid, 'verify', RATE_LIMIT_MAX_HITS, 900, CORS,
+      'Too many requests. Please try again later.'
+    );
+    if (_rl) return _rl;
+  }
+  {
+    const emailHash = await _sha256Hex(verifiedEmail);
+    const _rl = await rateLimitOrBlock(
+      env, 't:email:' + emailHash, 'verify', RATE_LIMIT_MAX_HITS, 900, CORS,
+      'Too many requests. Please try again later.'
+    );
+    if (_rl) return _rl;
+  }
+
+  if (alreadyVerified) {
+    return resp(NEUTRAL_BODY, 200, CORS);
+  }
+
+  try {
+    const accessToken = await getAuthAccessToken(env.FCM_CLIENT_EMAIL, env.FCM_PRIVATE_KEY);
+    const fbRes = await fetch(
+      'https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + accessToken,
+        },
+        body: JSON.stringify({
+          requestType: 'VERIFY_EMAIL',
+          idToken,
+          returnOobLink: true,
+          continueUrl: _safeContinueUrl(null, 'verify'),
+        }),
+      }
+    );
+    if (!fbRes.ok) {
+      console.error('[resend-verification] Firebase status:', fbRes.status);
+      return resp(NEUTRAL_BODY, 200, CORS);
+    }
+    const fbData = await fbRes.json();
+    const oobLink = fbData?.oobLink || '';
+    let safeLink;
+    try {
+      const parsed = new URL(oobLink);
+      if (parsed.protocol !== 'https:') throw new Error('not https');
+      safeLink = oobLink;
+    } catch (_) {
+      console.error('[resend-verification] invalid oobLink shape');
+      return resp(NEUTRAL_BODY, 200, CORS);
+    }
+
+    const htmlContent = buildVerificationEmail(verifiedEmail.split('@')[0], safeLink);
+    const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key':      env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept':       'application/json',
+      },
+      body: JSON.stringify({
+        sender: {
+          name:  env.SENDER_NAME  || 'iPear Loyalty',
+          email: (env.SENDER_EMAIL || '').trim(),
+        },
+        to: [{ email: verifiedEmail }],
+        subject: '✉️ Επαλήθευση Email — iPear Loyalty',
+        htmlContent,
+      }),
+    });
+    if (!brevoRes.ok) {
+      console.error('[resend-verification] Brevo status:', brevoRes.status);
+    }
+  } catch (e) {
+    console.error('[resend-verification] catch:', e?.message || 'unknown');
+  }
+
+  return resp(NEUTRAL_BODY, 200, CORS);
+}
+
+async function _sha256Hex(input) {
+  const bytes = new TextEncoder().encode(String(input));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const arr = new Uint8Array(digest);
+  let hex = '';
+  for (let i = 0; i < arr.length; i++) hex += arr[i].toString(16).padStart(2, '0');
+  return hex;
+}
+
+function buildVerificationEmail(name, verifyLink) {
+  const safeName = escHtml(name);
+  const safeHref = verifyLink.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  return `<!DOCTYPE html>
+<html lang="el">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Επαλήθευση Email — iPear Loyalty</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:40px 0">
+  <tr><td align="center">
+  <table width="600" cellpadding="0" cellspacing="0"
+         style="max-width:600px;width:100%;background:#ffffff;border-radius:22px;
+                overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.10)">
+    <tr>
+      <td style="background:linear-gradient(135deg,#6bb800 0%,#8ae900 100%);padding:40px 44px;text-align:center">
+        <div style="font-size:36px;font-weight:900;color:#0a0a0a;letter-spacing:-1.5px;line-height:1">
+          iPear<span style="color:#ffffff">Loyalty</span>
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:36px 44px 0;text-align:center">
+        <div style="display:inline-block;width:72px;height:72px;line-height:72px;
+                    font-size:36px;background:#f0ffe0;border-radius:50%;
+                    border:2px solid #8ae900;text-align:center">
+          ✉️
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:24px 44px 32px">
+        <h1 style="font-size:22px;font-weight:800;color:#0a0a0a;margin:0 0 8px;line-height:1.3;text-align:center">
+          Επαλήθευση Email
+        </h1>
+        <p style="font-size:15px;color:#666;line-height:1.7;margin:0 0 28px;text-align:center">
+          Γεια σου, <strong>${safeName}</strong>!<br>
+          Επιβεβαίωσε το email σου για να ολοκληρώσεις τη σύνδεση:
+        </p>
+        <p style="text-align:center;margin:0 0 28px">
+          <a href="${safeHref}"
+             style="display:inline-block;background:linear-gradient(135deg,#6bb800,#8ae900);
+                    color:#0a0a0a;text-decoration:none;font-weight:800;font-size:16px;
+                    padding:14px 32px;border-radius:14px">
+            ✅ Επιβεβαίωση
+          </a>
+        </p>
+        <p style="font-size:12px;color:#888;line-height:1.6;margin:0;text-align:center">
+          Αν δεν ζήτησες αυτό το email, μπορείς να το αγνοήσεις.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="background:#fafafa;padding:20px 44px;text-align:center;border-radius:0 0 22px 22px">
+        <p style="font-size:12px;color:#aaa;margin:0">© iPear Loyalty Program 🍐</p>
+      </td>
+    </tr>
   </table>
   </td></tr>
 </table>

@@ -116,6 +116,12 @@ export function tier(t) {
   return               {name:'Bronze',   icon:'🥉',cls:'bronze',   next:1000,  floor:0};
 }
 
+// Canonical tier floor for a given lifetime-points total. Mirrors tier().floor;
+// exported so callers (and the boundary test) share one source of truth.
+export function tierFloor(t) {
+  return tier(t).floor;
+}
+
 export function _applyTierColors(cls) {
   const tiers = ['bronze','silver','gold','diamond','platinum'];
   const els = [
@@ -212,7 +218,86 @@ export function escJs(s) {
   return JSON.stringify(String(s ?? '')).slice(1, -1);
 }
 
-// ════════════════════════════════════════
-//  TIER FLOOR (admin + tablet DRY)
-// ════════════════════════════════════════
-export function tierFloor(t) { return t>=10000?10000:t>=6000?6000:t>=3000?3000:t>=1000?1000:0; }
+// tierFloor removed — the `floor` field is now returned by tier() itself,
+// so callers use `tier(tot).floor` instead of duplicating the ladder.
+// ── Friendly error mapping (Admin + Tablet + Customer) ───────────────────────
+//  Maps raw Firebase / HTTP / network errors to a natural-Greek, operator-safe
+//  message. Technical detail stays in console/diagnostic logs (callers still
+//  logger.warn the raw error); only the UI toast uses this. Never throws.
+export function friendlyError(e) {
+  const raw = (e && (e.code || e.message)) ? String(e.code || e.message) : String(e ?? '');
+  const s = raw.toLowerCase();
+  // Permission / auth
+  if (s.includes('permission') || s.includes('insufficient') || s.includes('unauthenticated') ||
+      s.includes('unauthorized') || s.includes('forbidden') || s.includes('403') || s.includes('401') ||
+      s.includes('app-check') || s.includes('appcheck'))
+    return 'Δεν έχετε δικαίωμα για αυτή την ενέργεια.';
+  // Network / offline
+  if (s.includes('network') || s.includes('failed to fetch') || s.includes('offline') ||
+      s.includes('unavailable') || s.includes('load failed') || s.includes('err_'))
+    return 'Δεν ήταν δυνατή η σύνδεση. Δοκιμάστε ξανά.';
+  // Timeout / aborted
+  if (s.includes('timeout') || s.includes('timed out') || s.includes('deadline') || s.includes('abort'))
+    return 'Η ενέργεια άργησε περισσότερο από το αναμενόμενο. Δοκιμάστε ξανά.';
+  // Not found
+  if (s.includes('not-found') || s.includes('not found') || s.includes('404') || s.includes('no document'))
+    return 'Δεν βρέθηκε το στοιχείο.';
+  // Rate limit / exhausted
+  if (s.includes('resource-exhausted') || s.includes('too many') || s.includes('rate') || s.includes('429'))
+    return 'Πολλές προσπάθειες. Δοκιμάστε ξανά σε λίγο.';
+  // Already Greek (contains Greek letters) → trust the caller's message
+  if (/[Ͱ-Ͽ]/.test(raw)) return raw;
+  // Generic fallback — never leak a bare English/technical string
+  return 'Κάτι πήγε στραβά. Δοκιμάστε ξανά.';
+}
+
+// ── Offer validity (Europe/Athens business-day semantics) ────────────────────
+// Browser mirror of functions/lib/offer-credit.js#offerRuntimeStatus — the
+// server is the economic authority; this drives truthful Admin status display
+// and the customer active-offers filter. Date-only offer boundaries (YYYY-MM-DD)
+// are Greek business days: an offer ending 2026-09-30 is valid through all of
+// 30/09 Athens and expired from 00:00 Athens on 01/10. DST-safe via Intl.
+export function athensDateStr(ms) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Athens', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(ms));
+}
+
+export function toAthensDateStr(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+    const ms = Date.parse(t);
+    return Number.isFinite(ms) ? athensDateStr(ms) : null;
+  }
+  if (typeof v === 'number') {
+    return Number.isFinite(v) ? athensDateStr(v > 1e12 ? v : v * 1000) : null;
+  }
+  if (v && typeof v.toDate === 'function') {
+    try { return athensDateStr(v.toDate().getTime()); } catch (_) { return null; }
+  }
+  if (v && typeof v.toMillis === 'function') {
+    try { return athensDateStr(v.toMillis()); } catch (_) { return null; }
+  }
+  return null;
+}
+
+// returns 'inactive' | 'scheduled' | 'expired' | 'active'
+export function offerRuntimeStatus(offer, nowMs) {
+  if (!offer || typeof offer !== 'object' || offer.active !== true) return 'inactive';
+  const today = athensDateStr(typeof nowMs === 'number' ? nowMs : Date.now());
+  const start = toAthensDateStr(offer.startDate);
+  const end = toAthensDateStr(offer.endDate);
+  if (start && today < start) return 'scheduled';
+  if (end && today > end) return 'expired';
+  return 'active';
+}
+
+// Greek label for an offer runtime status (Admin display).
+export function offerStatusLabel(status) {
+  return status === 'active' ? 'Ενεργή'
+    : status === 'scheduled' ? 'Προγραμματισμένη'
+      : status === 'expired' ? 'Έληξε'
+        : 'Ανενεργή';
+}

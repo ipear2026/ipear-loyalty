@@ -7,11 +7,20 @@
 import { logger } from '../logger.js';
 import { toast } from './ui.js';
 import { publishLeaderboard } from './leaderboard.js';
+// ADMIN FORTRESS Stage 2 — birthday claims are credited server-side by the
+// validateBirthdayClaim Cloud Function (onDocumentCreated ipear_birthday_claims).
+// This browser processor is a redundant duplicate; retired when the flag is ON.
+import { isServerFinancialEnabled } from './financial-mutations.js';
 
 const DB = () => window._db;
 export const BDAY_BONUS_PTS = 50;
 
 export async function processBirthdayClaims() {
+  // ── ADMIN FORTRESS Stage 2 — retired to no-op (no browser financial write) ──
+  //    The validateBirthdayClaim CF is the sole authority (validates + credits
+  //    +50 + marks processed atomically). Running this browser duplicate would
+  //    be a second authority / double-credit risk and is blocked by the lock.
+  if (isServerFinancialEnabled()) return;
   const db = DB();
   if (!db) return;
   try {

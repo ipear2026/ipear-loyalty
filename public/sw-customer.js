@@ -1,37 +1,32 @@
 // ─── bump this version every deploy to bust the cache ───────────────────────
-const CACHE_VER = 'ipear-loyalty-20260619-v69';
+// v75 (2026-10-13): redemption UX fix — remove the 2s _REDEEM_COOLDOWN that
+// falsely blocked the channel-choice step ("Περίμενε λίγο") on BOTH in-store and
+// e-shop reward paths (same startRedemption() re-entered within 2s). Also forces
+// stale clients still holding a pre-retirement bundle (source of "endpoint-retired"
+// during redemption) to drop the cached index.html + old JS and fetch the clean
+// current build. Financial safety stays server-authoritative; client keeps only
+// the in-flight double-submit lock. No fetch-strategy change.
+// v74 (2026-10-08): customer UI deploy — natural-Greek transaction labels,
+// leaderboard infinite-spinner fix, and self-hosted canvas-confetti (public/
+// vendor/, replacing the CDN+SRI script). Bumping CACHE_VER forces returning
+// clients to drop the cached index.html + old bundle and fetch the new build.
+// v73 (2026-09-01): retire caches for all previously deployed asset
+// generations. Rationale: the 21:58 UTC "frozen approval" incident was
+// caused by stale admin tabs holding the pre-key-rotation `firebase-init-*`
+// chunk (App Check init skipped → `X-Firebase-AppCheck: MISSING` on every
+// callable). Bumping CACHE_VER forces the SW to delete the old cache on
+// activate; installs the new set on next visit. No change to fetch strategy.
+// v72 (2026-08-29): SHELL precache filenames corrected — customer.html was
+// served via 302 redirect (opaque cache.addAll failure on install), and
+// manifest-customer.json never existed in the vite build. Replaced with the
+// actual dist filenames (index.html, manifest.json). See tests/sw-precache.test.js.
+const CACHE_VER = 'ipear-loyalty-20261013-v75';
 
-// ═══ KILL SWITCH: Nuclear self-destruct for zombie PWA recovery ═════════════
-// If the Worker returns { nuke: true }, this SW wipes all caches and unregisters itself.
-// Trigger: set KV key "sw_kill" to "true" → GET /sw-kill returns { nuke: true }
-// This runs on every fetch so even a broken cached page triggers recovery.
-const _KILL_CHECK_URL = 'https://email-worker.ipear2026.workers.dev/sw-kill';
-let _killChecked = false;
-
-async function _checkKillSwitch() {
-  if (_killChecked) return false;
-  _killChecked = true;  // check once per SW lifecycle
-  try {
-    const res = await fetch(_KILL_CHECK_URL, { cache: 'no-store' });
-    if (!res.ok) return false;
-    const data = await res.json();
-    if (data.nuke) {
-      console.warn('[SW-KILL] ☠️ Kill switch activated — nuking all caches');
-      const keys = await caches.keys();
-      await Promise.all(keys.map(k => caches.delete(k)));
-      await self.registration.unregister();
-      const clients = await self.clients.matchAll();
-      clients.forEach(c => c.navigate(c.url));  // force hard reload
-      return true;
-    }
-  } catch(_) { /* network down — can't check, proceed normally */ }
-  return false;
-}
 const SHELL = [
-  'customer.html',
+  'index.html',
   'snd-success.mp3',
   'snd-error.mp3',
-  'manifest-customer.json',
+  'manifest.json',
   'icon-192.png',
   'icon-512.png',
   'fonts/zonapro-regular-webfont.woff2',
@@ -132,25 +127,22 @@ self.addEventListener('install', e => {
   );
 });
 
-// ── Activate: check kill switch, delete old caches, take control ────────────
+// ── Activate: delete old caches, take control ───────────────────────────────
 self.addEventListener('activate', e => {
   e.waitUntil(
-    _checkKillSwitch().then(nuked => {
-      if (nuked) return; // SW is dead, don't continue
-      return caches.keys()
-        .then(keys => Promise.all(
-          keys.filter(k => k !== CACHE_VER).map(k => caches.delete(k))
-        ))
-        .then(() => self.clients.claim())
-        .then(() => self.clients.matchAll({ type: 'window' }))
-        .then(clients => {
-          // Tell all open tabs a new SW is active.
-          // v46+ pages listen for this and reload; older pages ignore it.
-          clients.forEach(c => {
-            try { c.postMessage({ type: 'SW_UPDATED', version: CACHE_VER }); } catch(_) {}
-          });
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(k => k !== CACHE_VER).map(k => caches.delete(k))
+      ))
+      .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then(clients => {
+        // Tell all open tabs a new SW is active.
+        // v46+ pages listen for this and reload; older pages ignore it.
+        clients.forEach(c => {
+          try { c.postMessage({ type: 'SW_UPDATED', version: CACHE_VER }); } catch(_) {}
         });
-    })
+      })
   );
 });
 
@@ -226,40 +218,6 @@ self.addEventListener('message', e => {
   }
 });
 
-// ── FCM Push Notifications (handled in main SW for iOS Safari compatibility) ─
-// When a push message arrives while the app is in background/closed,
-// show a system notification.
-self.addEventListener('push', e => {
-  if (!e.data) return;
-  let payload;
-  try { payload = e.data.json(); } catch(_) { return; }
-
-  const notif = payload.notification || {};
-  const data  = payload.data || {};
-
-  const title = notif.title || data.title || 'iPear Loyalty';
-  const body  = notif.body  || data.body  || '';
-
-  e.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      icon:  '/icon-192.png',
-      badge: '/icon-192.png',
-      tag:   data.tag || 'ipear-push',
-      data:  data,
-    })
-  );
-});
-
-// ── Notification click → open customer app ──────────────────────────────────
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  const url = '/customer.html';
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-      const existing = list.find(c => c.url.includes('customer'));
-      if (existing) return existing.focus().catch(() => clients.openWindow(url));
-      return clients.openWindow(url);
-    })
-  );
-});
+// Push + notification-click handlers were removed when the app dropped push
+// notifications (2026-07-31). Everything above (shell cache, offline page,
+// SKIP_WAITING auto-update) stays — that's the core PWA offline UX.

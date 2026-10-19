@@ -17,14 +17,12 @@
 //       attributes with a small action vocabulary.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// 1. Service Worker registration
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', function () {
-    navigator.serviceWorker.register('sw.js').catch(function (e) {
-      console.warn('[sw] registration failed:', e.message);
-    });
-  });
-}
+// 1. Service Worker — intentionally NOT registered.
+//    The Admin is an internal owner tool with no offline/PWA need, and no
+//    `sw.js` is served for the /admin route, so the old registration always
+//    failed with a console warning ("registration failed: ... "). Removed to
+//    stop the dead loader. (No SW was ever successfully registered, so there is
+//    nothing to unregister on existing admin browsers.)
 
 // 2. Client-side error telemetry (fires once per page load)
 (function () {
@@ -77,7 +75,13 @@ if ('serviceWorker' in navigator) {
 // guarding for safety since admin-main.js loads as type=module — deferred).
 function _setBuildStamp() {
   var el = document.getElementById('build-stamp');
-  if (el) el.textContent = window.ADMIN_BUILD_TAG || 'unknown';
+  if (!el) return;
+  // The build tag is a developer/diagnostic value (not auto-bumped), so it is
+  // NOT shown in the owner UI — it only ever read "unknown"/stale. The element
+  // is kept in the DOM (hidden) and the tag stays available to client-error
+  // telemetry; it is never rendered as a visible badge.
+  el.textContent = '';
+  el.style.display = 'none';
 }
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _setBuildStamp);

@@ -52,33 +52,33 @@ service cloud.firestore {
       );
     }
 
-    // Admin = `admin: true` custom claim on the ID token (fast — no Firestore
-    // read) OR, transitionally, UID present in the `ipear_admins/{uid}`
-    // whitelist doc.
-    //
-    // MEDIUM-3: the claim is the primary path now. functions/index.js's
-    // syncAdminClaim trigger mirrors ipear_admins/{uid} create/delete into
-    // the claim, and backfillAdminClaims (callable) seeds existing admins.
-    // Until every admin has re-logged-in to pick up the new claim, the
-    // exists() fallback keeps the existing flow working. The fallback is
-    // safe to delete after the migration window (all admins re-authed).
+    // L2.3A HARDENING (2026-08-30):
+    // Admin is now ONLY the `admin: true` custom claim. The transitional
+    // ipear_admins/{uid} doc fallback and the hardcoded email allow-list
+    // (J-3 P0) are BOTH removed. All admins must have the claim before this
+    // ruleset is deployed — see deploy plan (extended syncAdminClaim
+    // provisions role+storeId claims; backfillAdminClaims backfills existing
+    // ipear_admins docs; refresh tokens are revoked so admins re-login and
+    // pick up the fresh token). Tablet users are covered by isTablet() below
+    // and get a strictly narrower rule set — they never satisfy isAdmin().
     function isAdmin() {
-      // Tri-path admin check:
-      //   (a) custom claim admin==true (canonical path post-syncAdminClaim)
-      //   (b) ipear_admins/{uid} doc exists (legacy whitelist, transitional)
-      //   (c) hardcoded email allow-list — rescue + E2E test admin path.
-      //       The kiosk-survival spec signs in as TEST_ADMIN_EMAIL (the
-      //       e2e@ipear.gr account today) and reads ipear_customers to
-      //       verify the auth survives the 4.7s validator window. That
-      //       account is NOT a real human admin, so we don't want it in
-      //       ipear_admins (would skew dashboards). The allow-list path
-      //       gates by email so the test passes without polluting prod
-      //       admin state.
-      return isAuth() && (
-        request.auth.token.admin == true ||
-        exists(/databases/$(database)/documents/ipear_admins/$(request.auth.uid)) ||
-        request.auth.token.email in ['admin@ipear.gr', 'tablet@ipear.gr', 'ipear2026@gmail.com', 'e2e@ipear.gr']
-      );
+      return isAuth() && request.auth.token.admin == true;
+    }
+
+    // L2.3A: tablet role — separate custom claim. Set by extended
+    // syncAdminClaim from ipear_admins.role == 'tablet'. Tablet claim also
+    // carries a canonical storeId (from ipear_admins.storeid). A tablet
+    // NEVER has admin==true; the two roles are mutually exclusive in the
+    // syncAdminClaim provisioning.
+    function isTablet() {
+      return isAuth() &&
+             request.auth.token.role == 'tablet' &&
+             request.auth.token.storeId is string &&
+             request.auth.token.storeId.size() > 0;
+    }
+
+    function tabletStoreId() {
+      return request.auth.token.storeId;
     }
 
     // Self-ownership of a customer doc (uid field OR matching email).
@@ -112,6 +112,18 @@ service cloud.firestore {
                ]);
     }
 
+    // ADMIN FORTRESS Stage 2 lock — the server-authoritative BALANCE/lifetime
+    // fields. Narrower than touchesFinancial(): the lock blocks the admin
+    // BROWSER from writing these (they flow only through the server callables /
+    // Admin SDK), while admin may still edit non-balance fields (blocked,
+    // suspicious, tier, name, etc.). referralCount/referralProcessed are now
+    // server-authoritative (referral unified on the Worker).
+    function touchesBalance() {
+      return request.resource.data.diff(resource.data)
+               .affectedKeys()
+               .hasAny(['points', 'totalPoints', 'referralCount', 'referralProcessed']);
+    }
+
     // One-time UID binding (legacy doc → uid path migration helper).
     // HIGH-1: requires a verified email — without this, an attacker could
     // register an unverified Firebase Auth account with a victim's email and
@@ -143,7 +155,9 @@ service cloud.firestore {
       // points=0, no migration) can land before the user clicks the email
       // verification link. Path B (the email-match clone of a legacy doc) is
       // gated by isVerifiedAuth() inside the branch — see CRITICAL-2 note.
-      allow create: if isAdmin() || (
+      allow create: if (isAdmin()
+          && request.resource.data.points == 0
+          && request.resource.data.totalPoints == 0) || (
         isAuth() &&
         customerId == request.auth.uid &&
         request.resource.data.uid   == request.auth.uid &&
@@ -172,7 +186,7 @@ service cloud.firestore {
             request.resource.data.keys().hasOnly([
               'uid','email','name','phone','card','points','totalPoints',
               'birthday','referredBy','blocked','referralProcessed',
-              'referralCount','fcmToken','marketingOptIn','marketingOptInAt',
+              'referralCount','marketingOptIn','marketingOptInAt',
               'termsAcceptedAt','createdAt'
             ]) &&
             request.resource.data.points == 0 &&
@@ -197,7 +211,7 @@ service cloud.firestore {
             request.resource.data.keys().hasOnly([
               'uid','email','name','phone','card','points','totalPoints',
               'birthday','referredBy','blocked','referralProcessed',
-              'referralCount','fcmToken','marketingOptIn','marketingOptInAt',
+              'referralCount','marketingOptIn','marketingOptInAt',
               'termsAcceptedAt','createdAt','_migratedFrom',
               'tier','notificationsEnabled','lastTierCheck','eshopCouponUsed'
             ]) &&
@@ -212,7 +226,12 @@ service cloud.firestore {
       );
 
       // UPDATE ── three controlled paths:
-      //   (1) Admin: anything goes (single source of truth for points/tier).
+      //   (1) Admin client: may update permitted NON-financial fields only
+      //       (tier, blocked, suspicious, name, …). Balances and lifetime
+      //       (points / totalPoints / referralCount / referralProcessed) are
+      //       server-only — the rule enforces `isAdmin() && !touchesBalance()`,
+      //       so the admin BROWSER cannot write them; they flow exclusively
+      //       through the server callables / Admin SDK (Admin Fortress Stage 2).
       //   (2) Customer self-update: any field EXCEPT financial/identity, AND
       //       all writable string fields must respect strict size caps.
       //       Customer-facing flows (FCM token, opt-in toggles, deletion
@@ -224,13 +243,12 @@ service cloud.firestore {
       // Any field absent from the update payload is unaffected by the cap;
       // any field present must be a string AND respect the limit.
       allow update: if
-        isAdmin()
+        (isAdmin() && !touchesBalance())
         ||
         (ownsCustomer(resource.data) && !touchesFinancial() &&
          (!('name'     in request.resource.data) || (request.resource.data.name     is string && request.resource.data.name.size()     <= 100)) &&
          (!('phone'    in request.resource.data) || (request.resource.data.phone    is string && request.resource.data.phone.size()    <= 20))  &&
-         (!('birthday' in request.resource.data) || (request.resource.data.birthday is string && request.resource.data.birthday.size() <= 10))  &&
-         (!('fcmToken' in request.resource.data) || (request.resource.data.fcmToken is string && request.resource.data.fcmToken.size() <= 500))
+         (!('birthday' in request.resource.data) || (request.resource.data.birthday is string && request.resource.data.birthday.size() <= 10))
         )
         ||
         (isAuth() &&
@@ -252,17 +270,28 @@ service cloud.firestore {
     match /ipear_transactions/{txId} {
       // READ ── admin sees all; customer sees only own transactions,
       // matched on customerUid OR customerId == auth.uid OR customerEmail.
-      allow read: if isAdmin() || (
-        isAuth() && (
-          resource.data.customerUid   == request.auth.uid ||
-          resource.data.customerId    == request.auth.uid ||
-          resource.data.customerEmail == request.auth.token.email
-        )
-      );
+      // SEC-M1: uid branches stay on isAuth() (uid is authoritative and its
+      // binding is already verified-email-gated via isUidBindOnly()). The
+      // customerEmail branch MUST require isVerifiedAuth() — otherwise an
+      // attacker who registers an unverified Firebase Auth account with a
+      // legacy customer's email (no Auth account of their own) could read that
+      // customer's entire point ledger. Email verification here is an
+      // ADDITIONAL condition on top of the email-ownership match, never a
+      // substitute for ownership. Consistent with ownsCustomer() / HIGH-1.
+      allow read: if isAdmin() ||
+        (isAuth() && (
+          resource.data.customerUid == request.auth.uid ||
+          resource.data.customerId  == request.auth.uid
+        )) ||
+        (isVerifiedAuth() &&
+          resource.data.customerEmail == request.auth.token.email);
 
       // WRITE ── admin only. The tablet/admin app authenticates as an
-      // admin UID before issuing any point credit/debit transaction.
-      allow create, update, delete: if isAdmin();
+      // ADMIN FORTRESS Stage 2 lock — the ledger is append-only + server-only.
+      // No client (incl. a valid admin session) may create/update/delete a
+      // transaction; the Cloud Functions service account (Admin SDK) bypasses
+      // rules and remains the sole writer. Reads unchanged (above).
+      allow create, update, delete: if false;
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -491,15 +520,6 @@ service cloud.firestore {
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    //  ipear_notifications — admin-pushed notifications
-    // ═════════════════════════════════════════════════════════════════════
-    match /ipear_notifications/{nId} {
-      allow read:  if isAdmin() ||
-        (isAuth() && resource.data.customerUid == request.auth.uid);
-      allow write: if isAdmin();
-    }
-
-    // ═════════════════════════════════════════════════════════════════════
     //  ipear_leaderboard — public leaderboard rows (read-only for customers)
     // ═════════════════════════════════════════════════════════════════════
     match /ipear_leaderboard/{docId} {
@@ -547,6 +567,19 @@ service cloud.firestore {
     // ═════════════════════════════════════════════════════════════════════
     //  audit_logs — immutable; only GDPR Art.17 anonymisation allowed
     // ═════════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════════
+    //  admin_audit — ADMIN FORTRESS Stage 0 immutable security log.
+    //  Written EXCLUSIVELY by Cloud Functions via the Admin SDK service account
+    //  (which bypasses these rules). Fully append-only from every client,
+    //  including an admin web token: no client create/update/delete is ever
+    //  permitted, so audit evidence cannot be forged or erased from the UI.
+    //  Admins may READ (for a future hardened audit view).
+    // ═════════════════════════════════════════════════════════════════════
+    match /admin_audit/{entryId} {
+      allow read:   if isAdmin();
+      allow create, update, delete: if false;
+    }
+
     match /audit_logs/{logId} {
       allow read:   if isAdmin();
       allow create: if isAdmin();
@@ -556,6 +589,56 @@ service cloud.firestore {
         request.resource.data.customerId  == '[DELETED]' &&
         request.resource.data.customerUid == '[DELETED]';
       allow delete: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_woo_events — Phase L1 authoritative WooCommerce credit/refund
+    //  ledger. Written EXCLUSIVELY by the Cloudflare Worker via service
+    //  account. Client access is fully denied until a dedicated hardened
+    //  admin UI exists. Opening `read: if isAdmin()` NOW would expose the
+    //  ledger to admin web tokens BEFORE a purpose-built view is in place;
+    //  when we later need admin visibility we add either a dedicated
+    //  hardened screen with claim-based auth, or a signed server-generated
+    //  view URL (like /admin/export-download), never a blanket admin read.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_woo_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  L2.3A: ipear_redemption_requests — tablet→admin approval queue.
+    //
+    //  Documents are written EXCLUSIVELY server-side by the admin SDK from
+    //  the createRedemptionRequest / approveRedemption / rejectRedemption
+    //  callable Cloud Functions. The tablet client never writes here;
+    //  the admin client never writes here either. This is the safety
+    //  keystone of the L2.3A approval flow.
+    //
+    //  Read policy:
+    //    • Admin (claim admin==true): read the entire queue.
+    //    • Tablet: read ONLY documents where BOTH
+    //         tabletActorUid == request.auth.uid   (own request only)
+    //         storeId       == request.auth.token.storeId  (own store)
+    //      i.e. one tablet CANNOT read another tablet's request even in the
+    //      same store, and CANNOT read any request from another store.
+    //
+    //  All state transitions (pending→approved / rejected / expired) go
+    //  through the callable functions, which perform:
+    //    • admin-claim auth check,
+    //    • deterministic-id idempotency (approveRedemption ledger id is a
+    //      pure function of requestId, so a retry is a no-op),
+    //    • atomic Firestore runTransaction over customer + redemption +
+    //      ledger + audit + request status.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_redemption_requests/{requestId} {
+      allow read: if isAdmin() ||
+        (isTablet() &&
+         resource.data.tabletActorUid == request.auth.uid &&
+         resource.data.storeId == tabletStoreId());
+
+      // Client writes fully denied. Only the admin SDK (via callable CFs)
+      // can create, update, or delete request documents.
+      allow create, update, delete: if false;
     }
 
     // ═════════════════════════════════════════════════════════════════════

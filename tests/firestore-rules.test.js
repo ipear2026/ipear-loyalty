@@ -167,7 +167,7 @@ describe('ipear_rewards: READ access', () => {
   it('ADMIN (whitelist) CAN read inactive draft rewards', async () => {
     await seedReward('reward-draft', { cost: 9000, discount: 50, isActive: false });
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(getDoc(doc(admin.firestore(), 'ipear_rewards', 'reward-draft')));
   });
 });
@@ -212,7 +212,7 @@ describe('ipear_rewards: WRITE access', () => {
 
   it('ADMIN (whitelist doc) CAN create a reward', async () => {
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(setDoc(
       doc(admin.firestore(), 'ipear_rewards', 'new-reward'),
       validRewardPayload
@@ -238,7 +238,7 @@ describe('ipear_rewards: WRITE access', () => {
   it('ADMIN CAN update an existing reward (toggle isActive)', async () => {
     await seedReward('reward-a', { cost: 1000, discount: 5, isActive: true });
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(setDoc(
       doc(admin.firestore(), 'ipear_rewards', 'reward-a'),
       { ...validRewardPayload, isActive: false }
@@ -248,7 +248,7 @@ describe('ipear_rewards: WRITE access', () => {
   it('ADMIN CAN delete a reward', async () => {
     await seedReward('reward-a', { cost: 1000, discount: 5, isActive: true });
     await seedAdminWhitelist('admin-uid');
-    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true });
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
     await assertSucceeds(deleteDoc(doc(admin.firestore(), 'ipear_rewards', 'reward-a')));
   });
 });
@@ -398,5 +398,119 @@ describe('ipear_redemptions: CREATE — hybrid rule', () => {
       collection(user.firestore(), 'ipear_redemptions'),
       redemptionPayload('broke-user') // 1000 pts but customer has 500
     ));
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+//  SEC-M1 — ipear_transactions: READ object-level authorization
+//
+//  The uid branches are authoritative (own-uid read is fine). The
+//  customerEmail branch MUST require verified auth (email_verified or a phone
+//  identity) so an UNVERIFIED account registered with a legacy customer's email
+//  cannot read that customer's point ledger.
+// ═════════════════════════════════════════════════════════════════════════
+describe('SEC-M1 — ipear_transactions READ authorization', () => {
+  const VICTIM_UID = 'victim-uid';
+  const VICTIM_EMAIL = 'victim@test.gr';
+
+  async function seedVictimTx() {
+    await seed('ipear_transactions/tx-victim-1', {
+      customerUid: VICTIM_UID,
+      customerId: VICTIM_UID,
+      customerEmail: VICTIM_EMAIL,
+      type: 'add',
+      points: 500,
+      date: new Date().toISOString(),
+    });
+  }
+
+  it('owner reads OWN transaction by uid (verified) → allowed', async () => {
+    await seedVictimTx();
+    const owner = testEnv.authenticatedContext(VICTIM_UID, { email: VICTIM_EMAIL, email_verified: true });
+    await assertSucceeds(getDoc(doc(owner.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('owner reads OWN transaction by uid even if UNVERIFIED → allowed (uid is authoritative)', async () => {
+    await seedVictimTx();
+    const owner = testEnv.authenticatedContext(VICTIM_UID, { email_verified: false });
+    await assertSucceeds(getDoc(doc(owner.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('owner reads OWN transaction via VERIFIED email match → allowed', async () => {
+    await seedVictimTx();
+    // Different uid, but verified email == the tx customerEmail.
+    const owner = testEnv.authenticatedContext('legacy-owner-uid', { email: VICTIM_EMAIL, email_verified: true });
+    await assertSucceeds(getDoc(doc(owner.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('ATTACK: UNVERIFIED account with the victim email reads victim tx → DENIED', async () => {
+    await seedVictimTx();
+    const attacker = testEnv.authenticatedContext('attacker-uid', { email: VICTIM_EMAIL, email_verified: false });
+    await assertFails(getDoc(doc(attacker.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('cross-customer read by a different verified user (different uid + email) → DENIED', async () => {
+    await seedVictimTx();
+    const other = testEnv.authenticatedContext('other-uid', { email: 'other@test.gr', email_verified: true });
+    await assertFails(getDoc(doc(other.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+
+  it('unauthenticated read → DENIED', async () => {
+    await seedVictimTx();
+    const anon = testEnv.unauthenticatedContext();
+    await assertFails(getDoc(doc(anon.firestore(), 'ipear_transactions', 'tx-victim-1')));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ADMIN FORTRESS Stage 0 — admin_audit immutable security log.
+//  Written ONLY by Cloud Functions via the Admin SDK (bypasses rules). No
+//  client — not even an admin web token — may create / overwrite / delete an
+//  entry; admins may read.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('admin_audit: append-only immutable security log', () => {
+  const seedEntry = () => seed('admin_audit/adj_ik_seed', {
+    action: 'admin_adjust', actorUid: 'owner-uid', amount: 10, success: true,
+  });
+
+  it('ADMIN can READ audit entries', async () => {
+    await seedAdminWhitelist('admin-uid');
+    await seedEntry();
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertSucceeds(getDoc(doc(admin.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('NON-ADMIN user cannot READ audit entries', async () => {
+    await seedEntry();
+    const user = testEnv.authenticatedContext('u1', { email_verified: true });
+    await assertFails(getDoc(doc(user.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('ADMIN cannot CREATE a new audit entry (append-only, server-only)', async () => {
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertFails(setDoc(doc(admin.firestore(), 'admin_audit', 'adj_new'), { action: 'forged' }));
+  });
+
+  it('ADMIN cannot overwrite an existing audit entry', async () => {
+    await seedEntry(); // seed BEFORE touching any auth context's firestore()
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertFails(setDoc(doc(admin.firestore(), 'admin_audit', 'adj_ik_seed'), { action: 'tampered' }));
+  });
+
+  it('ADMIN cannot DELETE an audit entry (evidence cannot be erased)', async () => {
+    await seedEntry();
+    const admin = testEnv.authenticatedContext('admin-uid', { email_verified: true, admin: true });
+    await assertFails(deleteDoc(doc(admin.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('unauthenticated cannot read', async () => {
+    await seedEntry();
+    const anon = testEnv.unauthenticatedContext();
+    await assertFails(getDoc(doc(anon.firestore(), 'admin_audit', 'adj_ik_seed')));
+  });
+
+  it('unauthenticated cannot write', async () => {
+    const anon = testEnv.unauthenticatedContext();
+    await assertFails(setDoc(doc(anon.firestore(), 'admin_audit', 'adj_x'), { a: 1 }));
   });
 });

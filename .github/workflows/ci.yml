@@ -30,6 +30,13 @@ jobs:
       - name: Install
         run: npm ci
 
+      # Unit tests import functions/index.js, whose deps live under
+      # functions/package.json — install them so the suite can resolve
+      # 'firebase-functions/v2/firestore' etc. (not a prod runtime dep of the
+      # customer bundle).
+      - name: Install Function deps
+        run: npm ci --prefix functions
+
       - name: Lint
         run: npm run lint
 
@@ -40,21 +47,41 @@ jobs:
         # rule gaps and shows up as its own failing step in the CI UI.
         run: node --check email-worker.js
 
-      - name: Unit tests
-        run: npm test
-
-      - name: Build (uses placeholder env → DEMO mode)
-        # IPEAR_ALLOW_PLACEHOLDER_ENV=1 tells scripts/validate-env.js (the
-        # `prebuild` hook) that placeholder Firebase config is acceptable
-        # here — this job's only purpose is to confirm the bundle compiles,
-        # not that it'd run in prod. The deploy:pages flow never sets this
-        # var, so a real `cp .env.example .env` → deploy slip is now a
-        # hard build-time failure (not a runtime DEMO regression).
+      # Build BEFORE the unit tests: the suite needs the placeholder .env (the
+      # App Check guard test) and dist/ (the sw-precache test).
+      # IPEAR_ALLOW_PLACEHOLDER_ENV=1 lets validate-env.js accept placeholder
+      # Firebase config here; the deploy:pages flow never sets it, so a real
+      # `.env` → deploy slip still hard-fails the build.
+      - name: Build (placeholder env → DEMO mode)
         env:
           IPEAR_ALLOW_PLACEHOLDER_ENV: '1'
         run: |
           cp .env.example .env
+          printf '\nVITE_APP_CHECK_DISABLED=0\n' >> .env
           npm run build
+
+      - name: Unit tests
+        run: npm test
+
+  # Customer production dependency audit — kept as its own STRICT, independent
+  # job (separated from the functional `customer` gate above). It is EXPECTED
+  # to be RED while the upstream chain firebase@10 → @firebase/firestore →
+  # @grpc/grpc-js ~1.9.0 has no patched release (no override/major upgrade is
+  # justified for the WIF migration). The gate is deliberately unweakened: no
+  # continue-on-error, no `|| true`, no severity reduction, no ignore list.
+  customer_audit:
+    name: Customer dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
 
       - name: Audit (production deps only)
         run: npm audit --omit=dev --audit-level=high
@@ -135,6 +162,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # Keyless GCP auth via Workload Identity Federation (no JSON key). The
+    # protected `ci-e2e` environment emits the OIDC `environment` claim that the
+    # WIF provider condition requires (repo + environment); only THIS job gets
+    # id-token:write + the environment, so customer/rules/functions stay
+    # credential-free.
+    environment: ci-e2e
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -145,6 +181,17 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      # Authenticate to Google Cloud without a long-lived key. Pinned to the
+      # exact immutable commit SHA of google-github-actions/auth v2.1.13.
+      - name: Authenticate to Google Cloud (keyless WIF)
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          project_id: loyalty-ipear
+          workload_identity_provider: projects/927652567960/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: ipear-loyalty-ci@loyalty-ipear.iam.gserviceaccount.com
+          create_credentials_file: true
+          export_environment_variables: true
 
       - name: Write real .env from secrets
         # The `customer` job builds in DEMO mode (cp .env.example .env). E2E
@@ -176,7 +223,7 @@ jobs:
         # spec exercises. Idempotent.
         env:
           TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
-          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # Credentials now come from WIF ADC (the auth step above) — no JSON key.
         run: npm run e2e:seed
 
       - name: Install Playwright browsers (chromium only)
@@ -191,7 +238,7 @@ jobs:
           # Golden-path customer flow
           TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
           TEST_PASS: ${{ secrets.E2E_TEST_PASS }}
-          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          # Credentials now come from WIF ADC (the auth step above) — no JSON key.
           # Kiosk-survival admin/tablet flow — separate account from the
           # customer above. MUST be admin via custom claim, ipear_admins doc,
           # OR email allow-list rescue (see firestore.rules → isAdmin()).

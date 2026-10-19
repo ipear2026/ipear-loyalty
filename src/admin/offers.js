@@ -1,12 +1,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  ADMIN — Offers CRUD + new-offer push notification flow
+//  ADMIN — Offers CRUD
 //  Renders the offers list, opens the create/edit modal (with image upload
-//  + compression to base64 ≤900px / 0.78 quality), toggles active state,
-//  and on new-offer creation prompts to broadcast a push via the Worker.
+//  + compression to base64 ≤900px / 0.78 quality), toggles active state.
 // ═══════════════════════════════════════════════════════════════════════════
-import { escHtml, escJs } from '../utils.js';
+import { escHtml, escJs, friendlyError, offerRuntimeStatus, offerStatusLabel } from '../utils.js';
 import { toast, closeM } from './ui.js';
-import { getWorkerSecret } from './worker-secret.js';
 import { authState } from './auth-state.js';
 
 const DB = () => window._db;
@@ -31,11 +29,19 @@ export async function loadOffers() {
       const o = d.data();
       const start = o.startDate ? new Date(o.startDate).toLocaleDateString('el-GR') : '—';
       const end = o.endDate ? new Date(o.endDate).toLocaleDateString('el-GR') : '—';
+      // Authoritative, date-aware status (Europe/Athens) — NOT just the toggle.
+      // An expired offer with active===true reads "Έληξε", never "Ενεργή".
+      const status = offerRuntimeStatus(o);
+      const statusLabel = offerStatusLabel(status);
+      const statusColor = status === 'active' ? '#2e7d32'
+        : status === 'scheduled' ? '#1565c0'
+          : status === 'expired' ? '#c62828'
+            : '#777';
       const safeImg =
         o.imageUrl && (o.imageUrl.startsWith('https://') || o.imageUrl.startsWith('data:image/'))
           ? o.imageUrl
           : '';
-      html += `<div class="offer-card" style="${o.active ? '' : 'opacity:.55'}">
+      html += `<div class="offer-card" style="${status === 'active' ? '' : 'opacity:.55'}">
         ${
           safeImg
             ? `<div style="width:54px;height:54px;border-radius:11px;flex-shrink:0;background:url('${encodeURI(safeImg).replace(/'/g, '%27').replace(/\(/g, '%28').replace(/\)/g, '%29')}') center/cover no-repeat"></div>`
@@ -48,7 +54,7 @@ export async function loadOffers() {
         </div>
         <div class="offer-actions">
           <div class="offer-toggle">
-            <span>${o.active ? 'Ενεργή' : 'Ανενεργή'}</span>
+            <span style="font-weight:800;color:${statusColor}">${statusLabel}</span>
             <div class="toggle-sw ${o.active ? 'on' : ''}" data-action="toggleOffer" data-arg="${escJs(d.id)}" data-arg2="${!!o.active}"></div>
           </div>
           <div style="display:flex;gap:6px">
@@ -220,7 +226,6 @@ export async function saveOffer() {
       updatedAt: new Date().toISOString(),
     };
     const editId = document.getElementById('offer-edit-id').value;
-    const isNew = !editId;
     if (editId) {
       await window._updateDoc(window._doc(DB(), 'ipear_offers', editId), data);
       toast('✅ Η προσφορά ενημερώθηκε!', 'success');
@@ -231,90 +236,11 @@ export async function saveOffer() {
     }
     closeM();
     loadOffers();
-
-    // Offer is new + active → ask admin if they want to push-notify all customers
-    if (isNew && data.active) {
-      _pendingOfferPush = { title: data.title, desc: data.description, emoji: data.emoji || '🎁' };
-      document.getElementById('offer-push-title').textContent = (data.emoji || '🎁') + ' ' + data.title;
-      document.getElementById('offer-push-body').textContent = data.description;
-      document.getElementById('offer-push-result').innerHTML = '';
-      document.getElementById('offer-push-send-btn').disabled = false;
-      document.getElementById('offer-push-send-btn').textContent = '🔔 Αποστολή';
-      document.getElementById('m-offer-push').classList.add('show');
-    }
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '✅ Αποθήκευση';
-  }
-}
-
-// ── Push notification for new offer ────────────────────────────────────────
-let _pendingOfferPush = null;
-let _offerPushBusy = false;
-
-export async function sendOfferPush() {
-  if (!_pendingOfferPush || _offerPushBusy) return;
-  _offerPushBusy = true;
-  const workerUrl = localStorage.getItem('ipear_worker_url');
-  const secret = getWorkerSecret();
-  if (!workerUrl || !secret) {
-    toast('⚠️ Ορίστε πρώτα τον Worker URL στις Ειδοποιήσεις!', 'error');
-    closeM();
-    _offerPushBusy = false;
-    return;
-  }
-
-  const btn = document.getElementById('offer-push-send-btn');
-  const res = document.getElementById('offer-push-result');
-  btn.disabled = true;
-  btn.textContent = '⏳ Αποστολή...';
-  res.innerHTML = '';
-
-  try {
-    const snap = await window._getDocs(window._col(DB(), 'ipear_customers'));
-    const tokens = [];
-    snap.forEach((d) => {
-      const t = d.data().fcmToken;
-      if (t) tokens.push(t);
-    });
-
-    if (!tokens.length) {
-      res.innerHTML =
-        '<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:9px;padding:12px;font-size:.84rem;color:#856404">⚠️ Κανένας πελάτης δεν έχει ενεργοποιήσει notifications ακόμα.</div>';
-      btn.disabled = false;
-      btn.textContent = '🔔 Αποστολή';
-      return;
-    }
-
-    const title = (_pendingOfferPush.emoji || '🎁') + ' ' + _pendingOfferPush.title;
-    const message = _pendingOfferPush.desc;
-
-    const pushUrl = workerUrl.replace(/\/$/, '') + '/push';
-    const r = await fetch(pushUrl, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + secret, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tokens, title, message }),
-    });
-    const data = await r.json().catch(() => ({}));
-
-    if (r.ok && data.success) {
-      res.innerHTML = `<div style="background:var(--green-pale);border:1px solid var(--green);border-radius:9px;padding:12px;font-size:.84rem;color:#3a6e00">
-        ✅ Push στάλθηκε σε <strong>${data.sent}</strong> συσκευές!
-      </div>`;
-      btn.textContent = '✅ Εστάλη!';
-      setTimeout(closeM, 2000);
-    } else {
-      throw new Error(data.error || 'Worker error ' + r.status);
-    }
-  } catch (e) {
-    res.innerHTML = `<div style="background:#f8d7da;border:1px solid #f5c2c7;border-radius:9px;padding:12px;font-size:.84rem;color:#842029">❌ ${escHtml(e.message)}</div>`;
-    btn.disabled = false;
-    btn.textContent = '🔔 Δοκίμασε ξανά';
-  } finally {
-    _pendingOfferPush = null;
-    _offerPushBusy = false;
   }
 }
 
@@ -330,7 +256,7 @@ export async function toggleOffer(id, current) {
     loadOffers();
     toast(current ? '⏸ Απενεργοποιήθηκε' : '▶️ Ενεργοποιήθηκε', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _toggleOfferBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;
@@ -349,7 +275,7 @@ export async function deleteOffer(id) {
     loadOffers();
     toast('🗑 Η προσφορά διαγράφηκε.', 'success');
   } catch (e) {
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     _deleteOfferBusy = false;
     if (clickedBtn) clickedBtn.disabled = false;

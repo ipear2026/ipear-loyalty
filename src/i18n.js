@@ -23,7 +23,7 @@
 //  Existing toasts that don't follow these rules were tightened in the
 //  delight-pass commit; new ones should follow from the start.
 // ═══════════════════════════════════════════════════════════════════════════
-export const _i18n = {
+const _i18n = {
   el: {
     welcome_back:  'Καλωσήρθες πίσω',
     good_morning:  'Καλημέρα',
@@ -65,5 +65,5 @@ export const _i18n = {
     sec_all:       'All →',
   }
 };
-export const _lang = (navigator.language || 'el').startsWith('en') ? 'en' : 'el';
+const _lang = (navigator.language || 'el').startsWith('en') ? 'en' : 'el';
 export function _t(key) { return (_i18n[_lang] || _i18n.el)[key] || _i18n.el[key] || key; }

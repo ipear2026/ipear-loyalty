@@ -2,8 +2,6 @@
 //  MAIN.JS — Central Orchestrator
 // ═══════════════════════════════════════════════════════════════════════════
 import { logger, tagLog } from './logger.js';
-tagLog('PAGE-LOAD', `🚀 main.js loaded at ${new Date().toISOString()}`);
-tagLog('PAGE-LOAD', 'ipear_rem in localStorage:', localStorage.getItem('ipear_rem') || '❌ NOT FOUND');
 
 // ── Module imports ──
 import { state } from './state.js';
@@ -14,8 +12,10 @@ import {
   _haptic, _animateNumber,
 } from './utils.js';
 import { _t } from './i18n.js';
-import { _setPushUI, _syncPushState, _dismissPushOnboard, _acceptPushOnboard, registerServiceWorker } from './push-notifications.js';
+import { registerServiceWorker } from './sw-registration.js';
+import { pendingBonuses } from './customer/bonus-retry.js';
 import './firebase-init.js';
+import { openMyCoupons } from './customer/ui/coupons-ui.js';
 import {
   renderHomeRewards, renderRewardsList,
   startRewardsListener, stopRewardsListener, getActiveRewards,
@@ -24,18 +24,20 @@ import {
   loadHistory, loadHistoryMore,
   generateQR,
   openOfferSheet, closeOfferSheet, offerRedeemStep1, closeOfferConfirm,
-  offerGenerateQR, cancelOfferQR, offerGenerateEshopCoupon, _copyEshopCoupon,
+  offerGenerateQR, cancelOfferQR, minimizeOfferQR, restoreOfferQR, navigateOfferQR,
+  offerGenerateEshopCoupon, _copyEshopCoupon,
   _offerTick, _stopOfferRedeemWatch,
   copyReferral, shareReferral,
-  _expandLeaderboard, _collapseLb, _toggleHistory
+  _expandLeaderboard, _collapseLb, _retryLeaderboard, _toggleHistory
 } from './ui-renderers.js';
 import {
   showScreen, _showLogin, autoLogin, _getSavedAccount, _initCheckboxStyle,
-  setupReferralAutoFill, togglePassVis, _REM_KEY,
+  setupReferralAutoFill, togglePassVis,
   submitPhone, submitCreatePass, goToPhone,
   openForgotPass, submitForgotPass, backToLogin,
   openRegister, submitRegister, submitOTP, resendOTP, cancelOTP,
-  logout, requestAccountDeletion
+  logout, requestAccountDeletion,
+  resendEmailVerification, handleAuthActionReturn
 } from './auth.js';
 
 // ════════════════════════════════════════
@@ -230,7 +232,7 @@ async function _generateUniquePendingCode(maxTries = 3) {
 //  "still signed in" to a deleted account.
 // ════════════════════════════════════════════════════════════════════
 let _kickInFlight = false;
-export async function _kickOutDeletedAccount(reason = 'deleted') {
+async function _kickOutDeletedAccount(reason = 'deleted') {
   if (_kickInFlight) return;
   _kickInFlight = true;
   logger.warn('[kick-out] account no longer exists — reason:', reason);
@@ -679,7 +681,6 @@ export function switchTab(name) {
   if (name==='card')    generateQR();
   if (name==='profile') {
     loadLeaderboard();
-    _syncPushState();
     // Refresh transactions every time the user opens their profile — worker-
     // driven credits (referral, marketing) land asynchronously and don't
     // trigger _animateLivePointsChange when the first snapshot already shows
@@ -837,7 +838,6 @@ function _customerKeepAlive() {
     startOffersListener();
     startRewardsListener();
     try { loadLeaderboard(); } catch(_) {}
-    try { _syncPushState(); } catch(_) {}
   } catch(e) { logger.warn('[keepalive] error:', e); }
 }
 
@@ -1015,22 +1015,125 @@ export function _refreshPointsUI() {
 //  REDEMPTION
 // ════════════════════════════════════════
 let _redeemInProgress = false;
-let _redeemLastAt = 0;
-const _REDEEM_COOLDOWN = 2000;
 
 // startRedemption(rewardIdOrPoints, label)
 //   - new path: first arg is a string reward id, label optional (server doc wins)
 //   - legacy:   first arg is a number (= points cost), label required — kept
 //               so cached HTML or in-flight overlays don't break mid-deploy
-export async function startRedemption(rewardIdOrPoints, label) {
+export async function startRedemption(rewardIdOrPoints, label, channel) {
   if (state._maintenanceMode) { showToast('🔧 Αναβάθμιση σε εξέλιξη. Δοκίμασε σε λίγο', 'warn'); return; }
+  // Double-SUBMIT guard ONLY — an in-flight lock held for the duration of the
+  // actual redemption action. The channel-choice overlay opens instantly and
+  // releases it, so picking "Στο κατάστημα" / "Κουπόνι e-shop" right after
+  // tapping the reward is never blocked. The previous 2s time cooldown fired a
+  // SECOND time at the channel step (same function, re-entered within 2s),
+  // falsely showing "Περίμενε λίγο" and stalling both redemption paths. Removed:
+  // financial safety is server-authoritative (idempotent open-redemption pointer
+  // + immutable ledger + Worker rate limits); the client only needs to stop a
+  // concurrent duplicate submit of the SAME action.
   if (_redeemInProgress) return;
-  const now = Date.now();
-  if (now - _redeemLastAt < _REDEEM_COOLDOWN) { showToast('⏳ Περίμενε λίγο…'); return; }
-  _redeemLastAt = now;
   _redeemInProgress = true;
   _haptic('pop');
-  try { await _startRedemptionInner(rewardIdOrPoints, label); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
+  try { await _startRedemptionInner(rewardIdOrPoints, label, channel); } catch(e) { showToast('❌ ' + e.message); } finally { _redeemInProgress = false; }
+}
+
+function _escRw(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+// Flow B — channel choice overlay for an e-shop-eligible reward. Generates ONE
+// stable idempotency key per tap so the e-shop button is retry/double-click safe.
+function _showRewardChannelChoice(spec) {
+  const safeId = String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '');
+  const jsLabel = String(spec.label || '').replace(/[\\'"]/g, '');
+  document.getElementById('reward-channel-overlay')?.remove();
+  const ov = document.createElement('div');
+  ov.id = 'reward-channel-overlay';
+  ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true');
+  ov.style.cssText = 'display:flex;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML =
+    '<div style="background:var(--card,#fff);border-radius:18px;max-width:360px;width:100%;padding:22px;text-align:center;position:relative">' +
+      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove()" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
+      '<div style="font-size:2.4rem;margin-bottom:8px">🎟️</div>' +
+      '<div style="font-weight:800;margin-bottom:4px;color:var(--bk,#111)">' + _escRw(spec.label) + '</div>' +
+      '<div style="font-size:.82rem;color:var(--grl,#888);margin-bottom:18px">' + _escRw(spec.cost) + ' πόντοι · ' + _escRw(spec.discount) + '€ έκπτωση</div>' +
+      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'instore\')" style="display:block;width:100%;padding:13px;margin-bottom:10px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">📱 Εξαργύρωση στο κατάστημα</button>' +
+      '<button onclick="document.getElementById(\'reward-channel-overlay\').remove();window.startRedemption(\'' + safeId + '\',\'' + jsLabel + '\',\'eshop\')" style="display:block;width:100%;padding:13px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.92rem;cursor:pointer;min-height:46px">🛒 Κουπόνι e-shop</button>' +
+    '</div>';
+  document.body.appendChild(ov);
+}
+
+// Flow B — call the server-authoritative points-based reward coupon endpoint.
+// The server deducts points exactly once + creates the Woo coupon (idempotent).
+async function _redeemRewardEshop(spec, opts) {
+  const authUser = window._auth?.currentUser;
+  if (!authUser) { showToast('⚠️ Συνδέσου ξανά', 'red'); return; }
+
+  // Idempotency is SERVER-authoritative (per-(customer,reward) open-redemption
+  // pointer). No client key is needed or sent: a retry / refresh / new browser
+  // is recovered server-side (resume in-flight, or REPLAY a completed one — never
+  // a second charge, regardless of elapsed time). A genuinely new coupon for a
+  // repeatable reward requires an EXPLICIT newGeneration intent (the "Ξανά"
+  // button), which the server validates against its own state.
+  const newGeneration = !!(opts && opts.newGeneration);
+  showToast(newGeneration ? '⏳ Νέα εξαργύρωση…' : '⏳ Δημιουργία κουπονιού…');
+  try {
+    const idToken = await authUser.getIdToken(true);
+    const res = await fetch(_WORKER_URL + '/woo-reward-coupon', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newGeneration ? { idToken, rewardId: spec.rewardId, newGeneration: true } : { idToken, rewardId: spec.rewardId }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      const m = data.reason || data.error || 'Σφάλμα δημιουργίας κουπονιού';
+      showToast('❌ ' + (data.error === 'insufficient-points' ? 'Δεν φτάνουν οι πόντοι' : m), 'red');
+      return;
+    }
+    _showRewardCouponResult(data.code, (Number(data.discountAmount) || spec.discount) + '€', data.expiresAt, spec, data.canRedeemAgain === true);
+  } catch (e) {
+    logger.warn('[reward-eshop]', e);
+    showToast('❌ Δεν συνδέθηκε. Δοκίμασε ξανά', 'red');
+  }
+}
+
+// Explicit "redeem again" — the only client path that requests a NEW charge for
+// an already-completed repeatable reward. The server re-validates (previous
+// terminal + no in-flight + atomic generation bump).
+export async function rewardRedeemAgain(rewardId, label) {
+  if (_redeemInProgress) return;
+  const spec = _resolveRewardSpec(rewardId, label);
+  if (!spec || !spec.rewardId) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
+  const pts = state.foundCustomer?.points || 0;
+  if (pts < (Number(spec.cost) || 0)) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
+  _redeemInProgress = true;
+  try { await _redeemRewardEshop(spec, { newGeneration: true }); }
+  catch (e) { showToast('❌ ' + e.message); }
+  finally { _redeemInProgress = false; }
+}
+
+function _showRewardCouponResult(code, discountLabel, expiresAt, spec, canRedeemAgain) {
+  document.getElementById('reward-channel-overlay')?.remove();
+  document.getElementById('reward-coupon-overlay')?.remove();
+  const expDate = expiresAt ? new Date(expiresAt).toLocaleDateString('el-GR') : '';
+  const againBtn = (canRedeemAgain && spec && spec.rewardId)
+    ? '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove();window.rewardRedeemAgain(\'' + String(spec.rewardId).replace(/[^A-Za-z0-9_-]/g, '') + '\',\'' + String(spec.label || '').replace(/[\\'"]/g, '') + '\')" style="display:block;width:100%;margin-top:10px;padding:11px;background:#111;color:#fff;border:none;border-radius:12px;font-weight:800;font-size:.86rem;cursor:pointer;min-height:44px">🔁 Ξανά εξαργύρωση (' + _escRw(spec.cost) + ' πόντοι)</button>'
+    : '';
+  const ov = document.createElement('div');
+  ov.id = 'reward-coupon-overlay';
+  ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true');
+  ov.style.cssText = 'display:flex;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML =
+    '<div style="background:var(--card,#fff);border-radius:18px;max-width:360px;width:100%;padding:24px 16px;text-align:center;position:relative">' +
+      '<button onclick="document.getElementById(\'reward-coupon-overlay\').remove()" aria-label="Κλείσιμο" style="position:absolute;top:8px;right:12px;background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--bk,#111)">×</button>' +
+      '<div style="font-size:3rem;margin-bottom:12px">🛒</div>' +
+      '<div style="font-size:1.1rem;font-weight:800;color:var(--bk,#111);margin-bottom:4px">Το κουπόνι σου είναι έτοιμο!</div>' +
+      '<div style="font-size:.82rem;color:var(--grl,#888);margin-bottom:20px">Έκπτωση ' + _escRw(discountLabel) + ' στο e-shop</div>' +
+      '<div style="background:linear-gradient(135deg,#f0fff0,#e8ffe8);border:2.5px dashed var(--g,#b7e33b);border-radius:14px;padding:18px;margin-bottom:16px">' +
+        '<div id="reward-coupon-code" style="font-size:1.5rem;font-weight:900;letter-spacing:2px;color:var(--gd,#2a7);font-family:monospace">' + _escRw(String(code).toUpperCase()) + '</div>' +
+      '</div>' +
+      '<button onclick="(function(){var t=document.getElementById(\'reward-coupon-code\').textContent;if(navigator.clipboard)navigator.clipboard.writeText(t);})()" style="padding:12px 24px;background:var(--g,#b7e33b);color:#111;border:none;border-radius:12px;font-weight:800;font-size:.9rem;cursor:pointer;min-height:44px">📋 Αντιγραφή κωδικού</button>' +
+      againBtn +
+      '<div style="font-size:.76rem;color:var(--grl,#888);margin-top:10px">' + (expDate ? 'Ισχύει έως ' + _escRw(expDate) : '') + ' · Μόνο για το email σου</div>' +
+    '</div>';
+  document.body.appendChild(ov);
 }
 
 // Resolve `arg` → { rewardId, cost, discount, label }. Cost+discount must
@@ -1051,6 +1154,7 @@ function _resolveRewardSpec(arg, fallbackLabel) {
         cost: Number(hit.cost) || 0,
         discount: Number(hit.discount) || 0,
         label: fallbackLabel || hit.title || '',
+        eshopEligible: !!hit.eshopEligible,
       };
     }
     // Fallback ids like `fallback-1000` from the seeded fallback list — map
@@ -1069,13 +1173,27 @@ function _resolveRewardSpec(arg, fallbackLabel) {
   return null;
 }
 
-async function _startRedemptionInner(rewardIdOrPoints, label) {
+async function _startRedemptionInner(rewardIdOrPoints, label, channel) {
   const spec = _resolveRewardSpec(rewardIdOrPoints, label);
   if (!spec) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
   const { rewardId, cost, discount, label: resolvedLabel } = spec;
 
   const pts = state.foundCustomer?.points || 0;
   if (!Number.isInteger(cost) || cost <= 0) { showToast('⚠️ Μη έγκυρο πακέτο'); return; }
+
+  // Flow B: e-shop-eligible rewards let the customer pick the channel. The
+  // choice overlay re-enters startRedemption with an explicit channel + a
+  // STABLE idempotency key (so a double-click replays, never double-charges).
+  if (spec.eshopEligible && rewardId && !channel) {
+    if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
+    _showRewardChannelChoice(spec);
+    return;
+  }
+  if (channel === 'eshop') {
+    if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
+    await _redeemRewardEshop(spec);
+    return;
+  }
   if (pts < cost) { showToast('⚠️ Δεν φτάνουν οι πόντοι'); return; }
 
   await _cancelActiveRedemption('replaced-by-new-code');
@@ -1236,8 +1354,6 @@ document.addEventListener('keydown', (e) => {
   if (os && os.classList.contains('show')) { closeOfferSheet(); return; }
   const ov = document.getElementById('redeem-overlay');
   if (ov && ov.style.display === 'flex') { cancelRedemption(); return; }
-  const po = document.getElementById('push-onboard');
-  if (po && po.style.display === 'flex') { _dismissPushOnboard(); return; }
 });
 
 // ════════════════════════════════════════
@@ -1337,14 +1453,6 @@ export async function startApp() {
   startLiveListener();
   startRewardsListener();
   _startMaintenanceListener();
-  _startEmailVerifyFlow();
-
-  if ('Notification' in window && Notification.permission !== 'denied') {
-    const pushSection = document.getElementById('push-section');
-    if (pushSection) pushSection.style.display = 'block';
-    const pushActive = Notification.permission === 'granted' && !!c.fcmToken;
-    _setPushUI(pushActive);
-  }
 
   if (c.birthday) {
     const bday = new Date(c.birthday + 'T00:00:00');
@@ -1367,166 +1475,46 @@ export async function startApp() {
 async function _retryPendingBonuses(c) {
   const authUser = window._auth?.currentUser;
   if (!authUser) return;
-  const needsWelcome  = c.marketingOptIn === true && c.marketingWelcomeProcessed !== true;
-  const needsReferral = !!c.referredBy && c.referralProcessed !== true;
-  if (!needsWelcome && !needsReferral) return;
+  const { needsWelcome, needsReferral, any } = pendingBonuses(c);
+  if (!any) return;
+  // Observe the retry outcome instead of silently discarding it, so a
+  // persistently-failing bonus is visible in logs (idempotent server-side,
+  // so re-firing is always safe — it no-ops once the flag flips).
+  const _observe = (label, p) => p.then(async (r) => {
+    let ok = r.ok, reason = '';
+    try { const d = await r.clone().json(); if (d && d.ok === false) { ok = false; reason = d.error || d.reason || ''; } else if (d && d.reason) { reason = d.reason; } } catch (_) {}
+    if (!ok) logger.warn(`[retry-bonuses] ${label} not credited:`, r.status, reason);
+    else logger.log(`[retry-bonuses] ${label} ok`, reason ? '(' + reason + ')' : '');
+  }).catch((e) => logger.warn(`[retry-bonuses] ${label} network error:`, e?.message || e));
+
   try {
     const idToken = await authUser.getIdToken(true);
     if (needsWelcome) {
-      fetch(_WORKER_URL + '/send-welcome', {
+      _observe('welcome', fetch(_WORKER_URL + '/send-welcome', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken, name: c.name || '', marketingOptIn: true }),
-      }).catch(() => {});
+      }));
     }
     if (needsReferral) {
-      fetch(_WORKER_URL + '/process-referral', {
+      _observe('referral', fetch(_WORKER_URL + '/process-referral', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken }),
-      }).catch(() => {});
+      }));
     }
   } catch (e) {
     logger.warn('[retry-bonuses] idToken failed:', e?.message || e);
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  EMAIL-VERIFY BANNER + POLLING
-// ════════════════════════════════════════════════════════════════════════
-//
-// Dual-verification model (paired with SMS OTP already done at signup):
-//   • SMS OTP confirms phone → gates customer doc creation.
-//   • Email verification confirms inbox → gates +50/+100 bonuses
-//     (server-side CRIT-1 fix on /send-welcome and /process-referral).
-//
-// This function shows a persistent top banner whenever the signed-in user
-// has emailVerified=false. Polls authUser.reload() every 30s; when the user
-// flips to verified, the banner is removed, a success toast is shown, and
-// /send-welcome + /process-referral are re-triggered so any pending bonuses
-// finally land.
-//
-// Also auto-detects the return from Firebase's verify page: if URL contains
-// `?verified=1` (the continueUrl we asked Firebase to redirect to), we run
-// one immediate reload + bonus retrigger before settling into the 30s loop.
-let _emailVerifyTimer = null;
-let _emailVerifyLastResend = 0;
-const _EMAIL_VERIFY_RESEND_COOLDOWN_MS = 60_000;
-const _EMAIL_VERIFY_POLL_MS = 30_000;
-
-function _startEmailVerifyFlow() {
-  // Email verification removed — SMS OTP at signup is the sole verification.
-  // Bonuses are credited immediately by the Worker on /send-welcome and
-  // /process-referral calls fired from _finishRegistration. No polling needed.
-}
-
-function _stopEmailVerifyPolling() {
-  if (_emailVerifyTimer) { clearInterval(_emailVerifyTimer); _emailVerifyTimer = null; }
-}
-
-async function _checkEmailVerified(fastPath = false) {
-  const authUser = window._auth?.currentUser;
-  if (!authUser) { _stopEmailVerifyPolling(); return; }
-  try {
-    await authUser.reload();
-  } catch (e) {
-    logger.warn('[verify-poll] reload failed:', e?.message || e);
-    return;
-  }
-  if (authUser.emailVerified !== true) return;
-
-  // ✅ Verified — celebrate, retrigger bonuses, stop polling.
-  _stopEmailVerifyPolling();
-  _hideEmailVerifyBanner();
-  showToast('🎉 Email επιβεβαιώθηκε! Τα bonuses ενεργοποιούνται…', 'green');
-
-  // Retrigger Worker bonuses now that the token will pass emailVerified gate.
-  try {
-    const idToken = await authUser.getIdToken(true);
-    const name = state.foundCustomer?.name || authUser.displayName || '';
-    const marketingOptIn = !!state.foundCustomer?.marketingOptIn;
-    // /send-welcome — idempotent via marketingWelcomeProcessed
-    fetch(_WORKER_URL + '/send-welcome', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken, name, marketingOptIn }),
-    }).catch(() => {});
-    // /process-referral — idempotent via referralProcessed flag in queue doc
-    fetch(_WORKER_URL + '/process-referral', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken }),
-    }).catch(() => {});
-  } catch (e) {
-    logger.warn('[verify-poll] bonus retrigger failed:', e?.message || e);
-  }
-
-  if (fastPath) {
-    // Came back via ?verified=1 — give a longer toast trail.
-    setTimeout(() => showToast('🎁 Έλεγξε το ιστορικό για τους πόντους που μόλις προστέθηκαν!', 'green'), 2500);
-  }
-}
-
-function _showEmailVerifyBanner() {
-  // Banner removed by request — verification polling keeps running silently so
-  // that the +50/+100 bonuses still trigger when the user clicks the email link.
-  // Resend button is available in the profile tab if we add one later.
-}
-
-function _hideEmailVerifyBanner() {
-  const el = document.getElementById('email-verify-banner');
-  if (el) el.remove();
-  document.body.style.paddingTop = '';
-}
-
-async function _resendVerifyEmail() {
-  const btn = document.getElementById('email-verify-resend');
-  const now = Date.now();
-  if (now - _emailVerifyLastResend < _EMAIL_VERIFY_RESEND_COOLDOWN_MS) {
-    const sec = Math.ceil((_EMAIL_VERIFY_RESEND_COOLDOWN_MS - (now - _emailVerifyLastResend)) / 1000);
-    showToast(`⏳ Δοκίμασε ξανά σε ${sec}s.`, 'orange');
-    return;
-  }
-  _emailVerifyLastResend = now;
-  if (btn) { btn.disabled = true; btn.style.opacity = '.6'; btn.textContent = 'Αποστολή…'; }
-
-  try {
-    const authUser = window._auth?.currentUser;
-    if (!authUser) throw new Error('not signed in');
-    const idToken = await authUser.getIdToken(true);
-    const res = await fetch(_WORKER_URL + '/send-verification-link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idToken }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (data.alreadyVerified) {
-      _hideEmailVerifyBanner();
-      _stopEmailVerifyPolling();
-      showToast('✅ Το email σου είναι ήδη επιβεβαιωμένο!', 'green');
-      return;
-    }
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    showToast('📨 Στάλθηκε! Έλεγξε το inbox σου (και τον φάκελο spam).', 'green');
-  } catch (e) {
-    logger.warn('[verify-resend] error:', e?.message || e);
-    showToast('❌ Αποτυχία αποστολής. Δοκίμασε σε λίγο.', 'red');
-    _emailVerifyLastResend = 0; // allow immediate retry on hard failure
-  } finally {
-    if (btn) {
-      setTimeout(() => {
-        btn.disabled = false; btn.style.opacity = '1'; btn.textContent = 'Στείλε ξανά';
-      }, 2000);
-    }
-  }
-}
-
 // ════════════════════════════════════════
-//  PWA INSTALL
+//  STANDALONE RUNTIME DETECTION
+//  Install-prompt UI removed — we no longer solicit "Add to Home Screen".
+//  These helpers stay because users who ALREADY installed the app before
+//  the strip still open it in standalone mode, and iOS Safari's viewport
+//  handling (bottom-nav pinning in _pinNav below) needs to know.
 // ════════════════════════════════════════
-let _deferredPrompt = null;
-const _pwaKey = 'ipear_pwa_dismissed';
-
 function _isIOS() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent);
 }
@@ -1568,53 +1556,10 @@ if (_isStandalone()) {
   }, {passive:true});
 }
 
-window.addEventListener('beforeinstallprompt', e => {
-  e.preventDefault();
-  _deferredPrompt = e;
-  const ib = document.getElementById('install-app-section');
-  if (ib && !_isStandalone()) ib.style.display = '';
-});
-
-function _showPWABanner(type) {
-  const banner = document.getElementById('pwa-banner');
-  document.getElementById('pwa-ios').style.display     = type === 'ios'     ? '' : 'none';
-  document.getElementById('pwa-android').style.display = type === 'android' ? '' : 'none';
-  banner.style.display = 'block';
-}
-
-function dismissPWA() {
-  document.getElementById('pwa-banner').style.display = 'none';
-  localStorage.setItem(_pwaKey, '1');
-}
-
-async function triggerInstall() {
-  if (!_deferredPrompt) return;
-  _deferredPrompt.prompt();
-  const { outcome } = await _deferredPrompt.userChoice;
-  if (outcome === 'accepted') {
-    dismissPWA();
-    const ib = document.getElementById('install-app-section');
-    if (ib) ib.style.display = 'none';
-  }
-  _deferredPrompt = null;
-}
-
-function _installApp() {
-  if (_deferredPrompt) {
-    triggerInstall();
-  } else if (_isIOS()) {
-    _showPWABanner('ios');
-  }
-}
-
 // ════════════════════════════════════════
 //  DOMContentLoaded
 // ════════════════════════════════════════
 {
-  if (_isIOS() && !_isStandalone()) {
-    const ib = document.getElementById('install-app-section');
-    if (ib) ib.style.display = '';
-  }
   const dayEl  = document.getElementById('reg-bday-d');
   const yearEl = document.getElementById('reg-bday-y');
   if (dayEl) {
@@ -1738,19 +1683,14 @@ registerServiceWorker();
 function _handleFirebaseReady() {
   if (_handleFirebaseReady._done) return;
   _handleFirebaseReady._done = true;
-  logger.log('%c[MAIN] 🔥 firebase-ready HANDLER RUNNING', 'color:#ff6600;font-weight:bold;font-size:16px');
   if (window.DEMO) {
     const dh = document.getElementById('demo-hint');
     if (dh) dh.style.display = 'block';
   }
   const saved = _getSavedAccount();
-  logger.log('%c[MAIN] _getSavedAccount() =', 'color:#ff6600;font-weight:bold;font-size:14px', saved ? JSON.stringify(saved) : 'NULL (no remember-me data)');
-  logger.log('%c[MAIN] auth.currentUser =', 'color:#0088ff;font-weight:bold;font-size:14px', window._auth?.currentUser ? '✅ ' + window._auth.currentUser.email : '❌ NULL');
   if (saved) {
-    logger.log('%c[MAIN] → Calling autoLogin(' + saved.email + ')', 'color:#00cc00;font-weight:bold;font-size:14px');
     autoLogin(saved.email);
   } else {
-    logger.log('%c[MAIN] → No saved account, showing login screen', 'color:#ff0000;font-weight:bold;font-size:14px');
     _showLogin();
   }
   _startMaintenanceListener();
@@ -1761,10 +1701,7 @@ window.addEventListener('firebase-ready', _handleFirebaseReady);
 
 // firebase-init.js uses top-level await and finishes BEFORE this module body runs,
 // so the 'firebase-ready' event has already fired — check the flag immediately.
-if (window._firebaseReady) {
-  logger.log('%c[MAIN] ⚡ firebase-ready already fired (flag=true), running handler immediately', 'color:#ff6600;font-weight:bold;font-size:16px');
-  _handleFirebaseReady();
-}
+if (window._firebaseReady) _handleFirebaseReady();
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  CUSTOMER-ORPHAN AUTH VALIDATOR (was: firebase-init.js)
@@ -1824,7 +1761,9 @@ setupReferralAutoFill();
 //  WINDOW GLOBALS (for HTML onclick handlers)
 // ════════════════════════════════════════
 window.switchTab = switchTab;
+window.openMyCoupons = openMyCoupons;
 window.startRedemption = startRedemption;
+window.rewardRedeemAgain = rewardRedeemAgain;
 window.cancelRedemption = cancelRedemption;
 window.showScreen = showScreen;
 window.logout = logout;
@@ -1840,6 +1779,13 @@ window.submitRegister = submitRegister;
 window.submitOTP = submitOTP;
 window.resendOTP = resendOTP;
 window.cancelOTP = cancelOTP;
+// L2.4-A exports
+window.resendEmailVerification = resendEmailVerification;
+// Fire once on boot to consume any reset/verify return-parameters left in
+// the URL by the Firebase-hosted action widget. Handler is idempotent and
+// tolerant of missing DOM elements.
+handleAuthActionReturn();
+
 window.togglePassVis = togglePassVis;
 window.openOfferSheet = openOfferSheet;
 window.closeOfferSheet = closeOfferSheet;
@@ -1847,17 +1793,16 @@ window.offerRedeemStep1 = offerRedeemStep1;
 window.closeOfferConfirm = closeOfferConfirm;
 window.offerGenerateQR = offerGenerateQR;
 window.cancelOfferQR = cancelOfferQR;
+window.minimizeOfferQR = minimizeOfferQR;
+window.restoreOfferQR = restoreOfferQR;
+window.navigateOfferQR = navigateOfferQR;
 window.offerGenerateEshopCoupon = offerGenerateEshopCoupon;
 window._copyEshopCoupon = _copyEshopCoupon;
 window.copyReferral = copyReferral;
 window.shareReferral = shareReferral;
 window._expandLeaderboard = _expandLeaderboard;
 window._collapseLb = _collapseLb;
+window._retryLeaderboard = _retryLeaderboard;
 window._toggleHistory = _toggleHistory;
 window.loadHistoryMore = loadHistoryMore;
-window._dismissPushOnboard = _dismissPushOnboard;
-window._acceptPushOnboard = _acceptPushOnboard;
-window._installApp = _installApp;
-window.dismissPWA = dismissPWA;
-window.triggerInstall = triggerInstall;
 window.generateQR = generateQR;

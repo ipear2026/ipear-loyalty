@@ -3,9 +3,12 @@
 //  Config UI, connection test, health probe, single-customer search,
 //  template fill, and authenticated bulk-email broadcast via Brevo.
 // ═══════════════════════════════════════════════════════════════════════════
-import { tier, escHtml, escJs } from '../utils.js';
+import { tier, escHtml, escJs, friendlyError } from '../utils.js';
 import { toast } from './ui.js';
 import { getWorkerSecret, setWorkerSecret } from './worker-secret.js';
+// ADMIN FORTRESS Stage 3B — owner-auth path (flag ON). Mutually exclusive with
+// the legacy ADMIN_SECRET path; NO automatic fallback.
+import { isOwnerAuthEnabled, ownerSendEmail } from './owner-api.js';
 
 const DB = () => window._db;
 
@@ -18,10 +21,17 @@ export function toggleWorkerConfig() {
   btn.textContent = open ? '▲ Απόκρυψη' : '▼ Ρυθμίσεις';
   if (open) {
     const url = localStorage.getItem('ipear_worker_url') || '';
-    const sec = getWorkerSecret() || '';
     document.getElementById('worker-url').value = url;
-    document.getElementById('worker-secret').value = sec ? '••••••••' : '';
-    document.getElementById('worker-secret').dataset.real = sec;
+    const secEl = document.getElementById('worker-secret');
+    // Flag ON: owner-auth needs NO master secret — never read/surface it.
+    if (isOwnerAuthEnabled()) {
+      const row = secEl && secEl.closest ? secEl.closest('.worker-secret-row') : null;
+      if (row) row.style.display = 'none';
+      if (secEl) { secEl.value = ''; secEl.dataset.real = ''; secEl.disabled = true; }
+    } else {
+      const sec = getWorkerSecret() || '';
+      if (secEl) { secEl.value = sec ? '••••••••' : ''; secEl.dataset.real = sec; }
+    }
   }
 }
 
@@ -48,8 +58,28 @@ export function saveWorkerConfig() {
 
 export async function testWorkerConnection() {
   const url = localStorage.getItem('ipear_worker_url');
-  const sec = getWorkerSecret();
   const st = document.getElementById('worker-cfg-status');
+  // Flag ON: there is no master secret to test. Verify the owner-auth path is
+  // usable (Firebase session + App Check token) WITHOUT any Worker mutation.
+  if (isOwnerAuthEnabled()) {
+    if (!url) { toast('⚠️ Πρώτα αποθήκευσε Worker URL!', 'error'); return; }
+    st.style.color = 'var(--gray)';
+    st.textContent = '⏳ Έλεγχος ταυτότητας...';
+    try {
+      const user = window._auth && window._auth.currentUser;
+      if (!user) throw new Error('no-session');
+      await user.getIdToken(false);
+      if (typeof window._getAppCheckToken === 'function') await window._getAppCheckToken(false);
+      st.style.color = 'var(--green-dark)';
+      st.textContent = '✅ Owner-auth έτοιμο (χωρίς master secret)';
+    } catch (_) {
+      st.style.color = '#e53935';
+      st.textContent = '❌ Owner-auth μη διαθέσιμο (σύνδεση/App Check)';
+    }
+    setTimeout(() => (st.textContent = ''), 4000);
+    return;
+  }
+  const sec = getWorkerSecret();
   if (!url || !sec) {
     toast('⚠️ Πρώτα αποθήκευσε URL και Secret!', 'error');
     return;
@@ -87,22 +117,22 @@ export async function checkWorkerHealth() {
   const wrap = document.getElementById('worker-health');
   wrap.style.display = 'flex';
   dot.className = 'health-dot unknown';
-  txt.textContent = 'Worker...';
+  txt.textContent = 'Έλεγχος…';
   try {
     const r = await fetch(workerUrl + '/health', { method: 'GET', signal: AbortSignal.timeout(8000) });
     if (r.ok) {
       const data = await r.json();
       dot.className = 'health-dot ok';
-      txt.textContent = 'Worker ✓';
-      txt.title = 'Brevo: ' + (data.brevo ? '✓' : '✗') + ' | FCM: ' + (data.fcm ? '✓' : '✗');
+      txt.textContent = 'Διακομιστής: ΟΚ';
+      txt.title = 'Brevo: ' + (data.brevo ? '✓' : '✗');
     } else {
       dot.className = 'health-dot err';
-      txt.textContent = 'Worker ✗';
+      txt.textContent = 'Διακομιστής: πρόβλημα';
     }
   } catch (e) {
     dot.className = 'health-dot err';
-    txt.textContent = 'Worker ✗';
-    txt.title = e.message;
+    txt.textContent = 'Διακομιστής: πρόβλημα';
+    txt.title = friendlyError(e);
   }
 }
 
@@ -233,9 +263,12 @@ let _sendEmailBulkBusy = false;
 
 export async function sendEmailBulk() {
   if (_sendEmailBulkBusy) return;
+  const _ownerAuth = isOwnerAuthEnabled();
   const workerUrl = localStorage.getItem('ipear_worker_url');
-  const workerSec = getWorkerSecret();
-  if (!workerUrl || !workerSec) {
+  const workerSec = _ownerAuth ? '' : getWorkerSecret();
+  // Flag ON: owner-auth needs only the Worker URL (identity via Firebase SDK).
+  // Flag OFF: legacy path still needs the master secret.
+  if (!workerUrl || (!_ownerAuth && !workerSec)) {
     toast('⚠️ Ρύθμισε πρώτα τον Worker (κουμπί Ρυθμίσεις)!', 'error');
     document.getElementById('worker-cfg-panel').style.display = 'block';
     document.getElementById('worker-cfg-toggle').textContent = '▲ Απόκρυψη';
@@ -318,13 +351,19 @@ export async function sendEmailBulk() {
       .replace(/\{\{name\}\}/g, '{{params.name}}')
       .replace(/\{\{points\}\}/g, '{{params.points}}');
 
-    const response = await fetch(workerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${workerSec}` },
-      body: JSON.stringify({ recipients, subject, message: finalMessage }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    let data;
+    if (_ownerAuth) {
+      // Owner-auth v2 path: Firebase ID token + App Check (no master secret).
+      data = await ownerSendEmail({ recipients, subject, message: finalMessage });
+    } else {
+      const response = await fetch(workerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${workerSec}` },
+        body: JSON.stringify({ recipients, subject, message: finalMessage }),
+      });
+      data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    }
 
     prog.style.display = 'none';
     const failedLine =
@@ -344,7 +383,7 @@ export async function sendEmailBulk() {
     prog.style.display = 'none';
     res.innerHTML = `<div style="background:#fff3f3;border:1px solid #e53935;border-radius:10px;padding:14px;color:#c62828;font-size:.85rem">
       ❌ Σφάλμα: ${escHtml(e.message)}</div>`;
-    toast('❌ ' + e.message, 'error');
+    toast('❌ ' + friendlyError(e), 'error');
   } finally {
     btn.disabled = false;
     spin.classList.remove('show');

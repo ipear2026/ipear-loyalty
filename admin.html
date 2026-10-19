@@ -57,28 +57,39 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       Αποσύνδεση
     </button>
-    <div id="worker-health" title="Worker Status" style="display:none;align-items:center;gap:5px;cursor:pointer" data-action="checkWorkerHealth">
-      <span style="font-size:.72rem;color:#888;font-weight:600" id="worker-health-txt">Worker</span>
-      <div class="health-dot unknown" id="worker-health-dot"></div>
-    </div>
-    <span class="conn-txt" id="ctxt">Firebase</span>
+    <!-- Worker health moved to System/Advanced (diagnostic). The Firebase
+         connection indicator stays — it is live operational connection state. -->
+    <span class="conn-txt" id="ctxt">Σύνδεση</span>
     <div class="conn-dot" id="cdot"></div>
   </div>
 </header>
 
 <!-- ═══ TABS ═══ -->
+<!-- Admin IA (owner-approved grouping, 2026-10-08): tabs ordered by business
+     group — CUSTOMERS → LOYALTY → COMMUNICATION → REPORTS → ADVANCED/SYSTEM.
+     Grouping only: showTab()/data-arg/section ids unchanged; `search` stays the
+     active landing (no routing/behavior change). -->
 <div class="tabs">
+  <!-- CUSTOMERS -->
   <button class="tab active" data-action="showTab" data-arg="search"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg> Αναζήτηση</button>
-  <button class="tab" data-action="showTab" data-arg="register"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Εγγραφή</button>
   <button class="tab" data-action="showTab" data-arg="customers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Πελάτες</button>
+  <button class="tab" data-action="showTab" data-arg="register"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Εγγραφή</button>
+  <button class="tab" data-action="showTab" data-arg="gdpr" id="tab-btn-gdpr" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> GDPR <span id="gdpr-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
+  <!-- LOYALTY -->
   <button class="tab" data-action="showTab" data-arg="transactions"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg> Συναλλαγές</button>
   <button class="tab" data-action="showTab" data-arg="approvals" id="tab-btn-approvals" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Εγκρίσεις <span id="approvals-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
-  <button class="tab" data-action="showTab" data-arg="offers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg> Προσφορές</button>
   <button class="tab" data-action="showTab" data-arg="rewards"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.5 13.5L17 22l-5-3-5 3 1.5-8.5"/></svg> Ανταμοιβές</button>
+  <button class="tab" data-action="showTab" data-arg="offers"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v10H4V12"/><path d="M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg> Προσφορές</button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
+  <!-- COMMUNICATION -->
   <button class="tab" data-action="showTab" data-arg="marketing"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg> Μάρκετινγκ</button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
+  <!-- REPORTS -->
   <button class="tab" data-action="showTab" data-arg="stats"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Στατιστικά</button>
+  <span aria-hidden="true" style="width:1px;align-self:center;height:22px;background:var(--bd,#e5e5e5);margin:0 4px;flex:0 0 auto"></span>
+  <!-- ADVANCED / DIAGNOSTICS (last) -->
   <button class="tab" data-action="showTab" data-arg="system"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Σύστημα</button>
-  <button class="tab" data-action="showTab" data-arg="gdpr" id="tab-btn-gdpr" style="position:relative"><svg class="tab-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg> GDPR <span id="gdpr-badge" style="display:none;position:absolute;top:4px;right:4px;background:#ff3b30;color:#fff;font-size:.6rem;font-weight:900;border-radius:50%;width:18px;height:18px;line-height:18px;text-align:center">0</span></button>
 </div>
 
 <div class="container">
@@ -268,12 +279,6 @@
         <div class="dash-kpi-sub" id="dash-active30-pct">—</div>
       </div>
       <div class="dash-kpi">
-        <div class="dash-kpi-val" id="dash-push-count" style="color:#8ae900">—</div>
-        <div class="dash-kpi-lbl">🔔 Push Reach</div>
-        <div class="push-reach-bar"><div class="push-reach-fill" id="dash-push-bar" style="width:0%"></div></div>
-        <div class="dash-kpi-sub" id="dash-push-pct">—</div>
-      </div>
-      <div class="dash-kpi">
         <div class="dash-kpi-val" id="dash-top-reward">—</div>
         <div class="dash-kpi-lbl">Top Reward</div>
         <div class="dash-kpi-sub" id="dash-top-reward-count">—</div>
@@ -299,14 +304,6 @@
         <ul class="top-referrers-list" id="kpi-top-referrers" style="max-height:320px;overflow-y:auto">
           <li style="color:var(--gray);font-size:.85rem;justify-content:center">⏳ Φόρτωση...</li>
         </ul>
-      </div>
-    </div>
-
-    <!-- Push Notifications Status -->
-    <div class="card" style="margin-bottom:18px;padding:18px">
-      <h2 style="font-size:.95rem;margin-bottom:12px"><span class="ico" style="width:28px;height:28px;font-size:.8rem">🔔</span> Push Notifications — Ενεργοί Πελάτες</h2>
-      <div id="push-customers-list" style="max-height:350px;overflow-y:auto">
-        <div style="color:var(--gray);font-size:.85rem;text-align:center;padding:14px">⏳ Φόρτωση...</div>
       </div>
     </div>
 
@@ -471,10 +468,14 @@
 
   <!-- ── APPROVALS TAB ── -->
   <div id="tab-approvals" class="tc">
+    <!-- Canonical approval queue (redemptions + offers awaiting owner approval) -->
     <div class="card">
-      <h2><span class="ico">🔔</span> Εκκρεμείς Εγκρίσεις Προσφορών</h2>
-      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Οι προσφορές που περιμένουν έγκριση από το tablet εμφανίζονται εδώ σε πραγματικό χρόνο.</p>
-      <div id="approvals-list"><div class="empty"><span class="e">✅</span>Δεν υπάρχουν εκκρεμείς εγκρίσεις</div></div>
+      <h2>
+        <span class="ico">🔔</span> Εκκρεμείς Εγκρίσεις
+        <span id="l23a-approvals-badge" style="display:none;background:#ff3b30;color:#fff;font-size:.7rem;font-weight:900;border-radius:12px;padding:2px 8px;margin-left:8px">0</span>
+      </h2>
+      <p style="color:var(--gray);font-size:.84rem;margin-bottom:16px">Εδώ εμφανίζονται οι εξαργυρώσεις και οι προσφορές που περιμένουν την έγκρισή σου. Οι πόντοι του πελάτη αλλάζουν μόνο αφού εγκρίνεις το αίτημα.</p>
+      <div id="l23a-approvals-list"><div class="empty" style="opacity:.6;padding:16px;text-align:center">Δεν υπάρχουν εκκρεμή αιτήματα</div></div>
     </div>
   </div>
 
@@ -485,12 +486,6 @@
     <div class="card" style="margin-bottom:18px">
       <h2><span class="ico">💰</span> Κόστος Επικοινωνιών</h2>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
-        <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:12px;padding:14px 16px;text-align:center">
-          <div style="font-size:1.6rem;margin-bottom:4px">🔔</div>
-          <div style="font-weight:800;font-size:.95rem;color:var(--green-dark)">Push</div>
-          <div style="font-size:1.3rem;font-weight:900;color:var(--green);margin:4px 0">ΔΩΡΕΑΝ</div>
-          <div style="font-size:.72rem;color:var(--gray);line-height:1.4">Απεριόριστα μηνύματα<br>μέσω FCM (Google)</div>
-        </div>
         <div style="background:#f0f4ff;border:1px solid #a0b4ff;border-radius:12px;padding:14px 16px;text-align:center">
           <div style="font-size:1.6rem;margin-bottom:4px">📧</div>
           <div style="font-weight:800;font-size:.95rem;color:#3a50b0">Email</div>
@@ -511,7 +506,7 @@
         </div>
       </div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span style="font-size:.78rem;color:var(--gray)">💡 <strong>Σύσταση:</strong> Push για καθημερινά, Email για σημαντικά, SMS μόνο για επείγοντα.</span>
+        <span style="font-size:.78rem;color:var(--gray)">💡 <strong>Σύσταση:</strong> Email για σημαντικά, SMS μόνο για επείγοντα.</span>
       </div>
     </div>
 
@@ -600,43 +595,6 @@
       </button>
       <div id="email-progress" style="margin-top:10px;font-size:.84rem;color:var(--gray);display:none">⏳ Φόρτωση...</div>
       <div id="email-result" style="margin-top:12px"></div>
-    </div>
-
-    <!-- PUSH NOTIFICATIONS -->
-    <div class="card" style="margin-bottom:18px">
-      <h2><span class="ico">🔔</span> Push Notifications — Άμεση Αποστολή</h2>
-      <p style="color:var(--gray);font-size:.85rem;line-height:1.6;margin-bottom:16px">
-        Στείλε push notification απευθείας στις συσκευές των πελατών που έχουν ενεργοποιήσει τις ειδοποιήσεις.
-        Δεν χρειάζεται SMS — εμφανίζεται κατευθείαν στην οθόνη τους.
-      </p>
-
-      <!-- Info: uses Cloudflare Worker (no server key needed here) -->
-      <div style="background:#f0ffe0;border:1px solid var(--green);border-radius:10px;padding:13px 16px;margin-bottom:16px;font-size:.82rem;color:#333;line-height:1.7">
-        ✅ Χρησιμοποιεί τον <strong>Cloudflare Worker</strong> σου (FCM V1 API). Δεν χρειάζεται server key εδώ — αρκεί το Worker URL από τις ρυθμίσεις Email παραπάνω.
-      </div>
-
-      <!-- Compose push -->
-      <div class="fg" style="margin-bottom:10px">
-        <label>Τίτλος Push</label>
-        <input type="text" id="push-title" placeholder="π.χ. 🎁 Νέα Προσφορά iPear!" maxlength="80">
-      </div>
-      <div class="fg" style="margin-bottom:10px">
-        <label>Μήνυμα</label>
-        <textarea id="push-body" rows="3" placeholder="π.χ. Έχεις 500 πόντους! Έλα να τους εξαργυρώσεις μέχρι το τέλος του μήνα. 🍐" style="resize:vertical"></textarea>
-      </div>
-
-      <!-- Quick templates -->
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">
-        <button class="chip" data-action="fillPushTpl" data-arg="promo">🎁 Προσφορά</button>
-        <button class="chip" data-action="fillPushTpl" data-arg="points">📊 Πόντοι</button>
-        <button class="chip" data-action="fillPushTpl" data-arg="bday">🎂 Γενέθλια</button>
-        <button class="chip" data-action="fillPushTpl" data-arg="new">✨ Νέο Προϊόν</button>
-      </div>
-
-      <button class="btn btn-green btn-full" id="send-push-btn" data-action="sendPushNotification" style="font-size:1rem;padding:14px">
-        🔔 Αποστολή Push Notification
-      </button>
-      <div id="push-result" style="margin-top:12px"></div>
     </div>
 
     <!-- BULK SMS (Brevo API) -->
@@ -752,6 +710,17 @@
 
   <!-- ══ SYSTEM TAB (Συντήρηση + Backup) ══ -->
   <div id="tab-system" class="tc">
+    <!-- WORKER / SYSTEM HEALTH — moved here from the header (diagnostic) -->
+    <div class="card" style="margin-bottom:18px">
+      <h2 style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <span><span class="ico">🩺</span> Κατάσταση Συστήματος</span>
+        <button class="btn btn-sm btn-primary" data-action="checkWorkerHealth">🩺 Έλεγχος διακομιστή</button>
+      </h2>
+      <div id="worker-health" style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:.85rem;color:#555;font-weight:700" id="worker-health-txt">Διακομιστής</span>
+        <div class="health-dot unknown" id="worker-health-dot"></div>
+      </div>
+    </div>
     <!-- KILL SWITCH -->
     <div class="kill-switch-wrap" id="kill-switch-wrap">
       <div style="font-size:2rem;flex-shrink:0">🔴</div>
@@ -1026,6 +995,19 @@
       <div class="fg"><label>Τίτλος *</label><input type="text" id="rw-title" placeholder="π.χ. 5€ Έκπτωση"></div>
     </div>
     <div class="fg"><label>Περιγραφή</label><textarea id="rw-desc" rows="2" placeholder="π.χ. Εξαργύρωσε πόντους για άμεση έκπτωση"></textarea></div>
+    <div class="fg">
+      <label>Φωτογραφία <span style="font-weight:400;color:var(--gray)">(προαιρετικό — αλλιώς εμφανίζεται το εικονίδιο)</span></label>
+      <input type="hidden" id="rw-imageUrl">
+      <input type="file" id="rw-image-file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" data-on-change="call:previewRewardImage:event">
+      <div id="rw-img-area" data-click-target="rw-image-file" style="border:2px dashed var(--border);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:border-color .2s;position:relative" data-on-mouseover="hover-green" data-on-mouseout="hover-default">
+        <div id="rw-img-placeholder" style="color:var(--gray);font-size:.88rem">📷 Κλικ για επιλογή φωτογραφίας</div>
+        <div id="rw-img-preview" style="display:none">
+          <img id="rw-img-thumb" style="max-height:130px;max-width:100%;border-radius:9px;object-fit:cover;display:block;margin:0 auto">
+          <button data-action="_removeRewardImageEvt" data-pass-event="1" style="margin-top:8px;background:#fee2e2;color:#dc2626;border:none;border-radius:7px;padding:4px 12px;font-size:.78rem;font-weight:700;cursor:pointer;font-family:inherit">✕ Αφαίρεση</button>
+        </div>
+      </div>
+      <div style="font-size:.72rem;color:var(--gray);margin-top:5px">JPG / PNG / WebP · μέγιστο 10MB · αποθηκεύεται αυτόματα (συμπιεσμένο) στη βάση σου</div>
+    </div>
     <div class="form-row">
       <div class="fg"><label>Κόστος (πόντοι) *</label><input type="number" id="rw-cost" min="1" step="100" value="1000"></div>
       <div class="fg"><label>Έκπτωση (€) *</label><input type="number" id="rw-discount" min="0" step="1" value="5"></div>
@@ -1034,6 +1016,11 @@
       <div class="fg"><label>Σειρά εμφάνισης</label><input type="number" id="rw-order" min="0" step="1" value="0"></div>
       <div class="fg" style="display:flex;align-items:flex-end;padding-bottom:6px">
         <div class="chk" style="margin:0"><input type="checkbox" id="rw-active" checked><label for="rw-active">Ενεργή</label></div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="fg" style="display:flex;align-items:flex-end;padding-bottom:6px">
+        <div class="chk" style="margin:0"><input type="checkbox" id="rw-eshop"><label for="rw-eshop">Διαθέσιμη ως κουπόνι e-shop (εξαργύρωση πόντων online)</label></div>
       </div>
     </div>
     <p style="font-size:.72rem;color:var(--gray);margin-top:4px;line-height:1.5">⚠️ Τα ζευγάρια <strong>κόστος ↔ έκπτωση</strong> πρέπει να συμφωνούν με τους Firestore rules: 1000→5, 2500→15, 4000→30 (legacy ladder) ή χρησιμοποίησε το dynamic-catalog path με rewardId (αυτόματα).</p>
@@ -1080,7 +1067,7 @@
             <option value="percent">% Ποσοστό</option>
             <option value="fixed_cart">€ Σταθερό</option>
           </select>
-          <input type="number" id="of-eshop-amount" min="0" step="1" value="0" placeholder="π.χ. 10" style="flex:1">
+          <input type="number" id="of-eshop-amount" min="0" step="1" value="0" placeholder="π.χ. 10" style="flex:1 1 auto;min-width:90px;width:auto">
         </div>
       </div>
     </div>
@@ -1095,26 +1082,6 @@
     <div class="modal-act">
       <button class="btn btn-green" data-action="saveOffer">✅ Αποθήκευση</button>
       <button class="btn btn-outline" data-action="closeM">Ακύρωση</button>
-    </div>
-  </div>
-</div>
-
-<!-- PUSH AFTER OFFER MODAL -->
-<div class="modal-bg" id="m-offer-push" role="dialog" aria-modal="true" aria-label="Push ειδοποίηση προσφοράς">
-  <div class="modal" style="max-width:400px;text-align:center">
-    <div style="font-size:2.5rem;margin-bottom:12px">🔔</div>
-    <h3 style="margin-bottom:8px">Αποστολή Push Notification;</h3>
-    <p style="font-size:.88rem;color:var(--gray);line-height:1.6;margin-bottom:6px">Η προσφορά αποθηκεύτηκε επιτυχώς!</p>
-    <p style="font-size:.84rem;color:var(--gray);line-height:1.5;margin-bottom:20px">Θέλεις να ειδοποιήσεις <strong>όλους τους πελάτες</strong> με push notification για τη νέα προσφορά;</p>
-    <div id="offer-push-preview" style="background:var(--light);border:1px solid var(--border);border-radius:11px;padding:14px;text-align:left;margin-bottom:18px">
-      <div style="font-size:.72rem;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:6px">Προεπισκόπηση</div>
-      <div style="font-weight:800;font-size:.92rem" id="offer-push-title"></div>
-      <div style="font-size:.82rem;color:var(--gray);margin-top:3px" id="offer-push-body"></div>
-    </div>
-    <div id="offer-push-result" style="margin-bottom:12px"></div>
-    <div class="modal-act" style="justify-content:center;gap:10px">
-      <button class="btn btn-outline" data-action="closeM">Όχι, ευχαριστώ</button>
-      <button class="btn btn-green" id="offer-push-send-btn" data-action="sendOfferPush">🔔 Αποστολή</button>
     </div>
   </div>
 </div>

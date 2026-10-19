@@ -803,10 +803,10 @@ html[data-theme="dark"]{
           </svg>
         </div>
         <div class="idle-opt-body">
-          <div class="idle-opt-title">Όνομα ή Τηλέφωνο</div>
+          <div class="idle-opt-title">Αριθμός Τηλεφώνου</div>
           <div class="idle-opt-row">
-            <input id="sinput" type="text" class="idle-opt-inp" placeholder="π.χ. Νότης ή 6912345678"
-              aria-label="Αναζήτηση πελάτη με όνομα ή τηλέφωνο"
+            <input id="sinput" type="text" inputmode="numeric" class="idle-opt-inp" placeholder="π.χ. 6912345678"
+              aria-label="Αριθμός Τηλεφώνου"
               onkeydown="if(event.key==='Enter')doSearch()">
             <button id="sbtn" class="idle-opt-sbtn" onclick="doSearch()">Αναζήτηση →</button>
           </div>

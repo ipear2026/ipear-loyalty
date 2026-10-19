@@ -1,0 +1,646 @@
+rules_version = '2';
+// ═══════════════════════════════════════════════════════════════════════════
+//  iPear Loyalty — Firestore Security Rules
+//  Senior Security Audit · v95-hardening
+//
+//  Threat model the rules defend against:
+//    1. Point injection      — client sets `points` to arbitrary value
+//    2. Tier escalation      — client flips `tier` / `totalPoints`
+//    3. Block bypass         — banned customer flips `blocked` to false
+//    4. Email spoofing       — client claims another user's email
+//    5. Reward duplication   — client creates >1 active pending code
+//    6. Discount manipulation — client mints a 30€ reward for 1000 pts
+//    7. Replay attacks       — client backdates/forward-dates timestamps
+//    8. Privilege escalation — non-admin writes to admin-only collections
+//    9. Cross-tenant read    — customer reads another customer's doc/tx
+//   10. Offer impersonation  — client sets customerId to another UID
+//
+//  Collection naming note: actual collection is `ipear_customers`
+//  (the spec called it `ipear_users` but the live data lives under
+//  `ipear_customers`; renaming would require a destructive migration).
+// ═══════════════════════════════════════════════════════════════════════════
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Identity helpers ──────────────────────────────────────────────────
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // HIGH-1: Verified auth = signed in AND identity confirmed via one of
+    // two channels:
+    //
+    //   • email_verified == true                                  (legacy
+    //     dual-verification flow)
+    //   • current session was opened via Phone Auth (sign_in_provider=='phone')
+    //                                                              (SMS-only
+    //     flow, fresh signup)
+    //   • the user record has a phone identity linked (firebase.identities.phone)
+    //                                                              (SMS-only
+    //     flow, returning user signing in via email/password — phone was
+    //     verified at registration and stays linked on the record forever)
+    //
+    // Each branch certifies that the caller really controls one of the
+    // identifiers Firebase Auth associates with this UID, blocking the
+    // email-spoof attack the original CRIT-1 fix defended against.
+    function isVerifiedAuth() {
+      return isAuth() && (
+        request.auth.token.email_verified == true ||
+        request.auth.token.firebase.sign_in_provider == 'phone' ||
+        ('phone' in request.auth.token.firebase.identities)
+      );
+    }
+
+    // L2.3A HARDENING (2026-08-30):
+    // Admin is now ONLY the `admin: true` custom claim. The transitional
+    // ipear_admins/{uid} doc fallback and the hardcoded email allow-list
+    // (J-3 P0) are BOTH removed. All admins must have the claim before this
+    // ruleset is deployed — see deploy plan (extended syncAdminClaim
+    // provisions role+storeId claims; backfillAdminClaims backfills existing
+    // ipear_admins docs; refresh tokens are revoked so admins re-login and
+    // pick up the fresh token). Tablet users are covered by isTablet() below
+    // and get a strictly narrower rule set — they never satisfy isAdmin().
+    function isAdmin() {
+      return isAuth() && request.auth.token.admin == true;
+    }
+
+    // L2.3A: tablet role — separate custom claim. Set by extended
+    // syncAdminClaim from ipear_admins.role == 'tablet'. Tablet claim also
+    // carries a canonical storeId (from ipear_admins.storeid). A tablet
+    // NEVER has admin==true; the two roles are mutually exclusive in the
+    // syncAdminClaim provisioning.
+    function isTablet() {
+      return isAuth() &&
+             request.auth.token.role == 'tablet' &&
+             request.auth.token.storeId is string &&
+             request.auth.token.storeId.size() > 0;
+    }
+
+    function tabletStoreId() {
+      return request.auth.token.storeId;
+    }
+
+    // Self-ownership of a customer doc (uid field OR matching email).
+    // HIGH-1: email path now requires a verified email on the auth token.
+    // uid path is safe without the check (uid binding requires verification
+    // via isUidBindOnly below, so any doc with uid==auth.uid is already gated).
+    function ownsCustomer(data) {
+      return (isAuth() && data.uid == request.auth.uid) ||
+             (isVerifiedAuth() && data.email == request.auth.token.email);
+    }
+
+    function isPositiveInt(v) {
+      return v is int && v > 0;
+    }
+
+    // ── Financial / identity fields a customer can NEVER touch ──────────
+    // Customers may freely update any other field (fcmToken, name, phone,
+    // birthday, marketing flags, deletion request, etc.). Any change to the
+    // fields below is REJECTED unless the actor is admin — this is the
+    // single anti-point-injection guardrail.
+    function touchesFinancial() {
+      return request.resource.data.diff(resource.data)
+               .affectedKeys()
+               .hasAny([
+                 'points', 'totalPoints', 'tier', 'lastTierCheck',
+                 'blocked', 'suspicious',
+                 'card', 'email', 'uid', 'createdAt',
+                 'referredBy', 'referralProcessed', 'referralCount',
+                 'registeredStoreId', 'registeredStoreName',
+                 '_migratedFrom', 'eshopCouponUsed'
+               ]);
+    }
+
+    // ADMIN FORTRESS Stage 2 lock — the server-authoritative BALANCE/lifetime
+    // fields. Narrower than touchesFinancial(): the lock blocks the admin
+    // BROWSER from writing these (they flow only through the server callables /
+    // Admin SDK), while admin may still edit non-balance fields (blocked,
+    // suspicious, tier, name, etc.). referralCount/referralProcessed are now
+    // server-authoritative (referral unified on the Worker).
+    function touchesBalance() {
+      return request.resource.data.diff(resource.data)
+               .affectedKeys()
+               .hasAny(['points', 'totalPoints', 'referralCount', 'referralProcessed']);
+    }
+
+    // One-time UID binding (legacy doc → uid path migration helper).
+    // HIGH-1: requires a verified email — without this, an attacker could
+    // register an unverified Firebase Auth account with a victim's email and
+    // bind their own UID onto the victim's legacy customer doc.
+    function isUidBindOnly() {
+      return isVerifiedAuth() &&
+             request.resource.data.diff(resource.data)
+               .affectedKeys().hasOnly(['uid']) &&
+             (resource.data.uid == null || resource.data.uid == '') &&
+             request.resource.data.uid == request.auth.uid;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_customers — customer profile + point balance (canonical)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_customers/{customerId} {
+
+      // READ ── admin sees all, customer sees only their own doc.
+      // Ownership accepted via uid (post-migration) OR email (pre-migration).
+      allow read: if isAdmin() || ownsCustomer(resource.data);
+
+      // CREATE ── two controlled paths only:
+      //   (A) Self-registration: docId == auth.uid, strict signup signature
+      //   (B) Migration:         docId == auth.uid, copy of pre-existing
+      //                          random-id doc owned by the same email
+      // Admin can create anything.
+      //
+      // The top-level predicate stays isAuth() so Path A (fresh signup,
+      // points=0, no migration) can land before the user clicks the email
+      // verification link. Path B (the email-match clone of a legacy doc) is
+      // gated by isVerifiedAuth() inside the branch — see CRITICAL-2 note.
+      allow create: if (isAdmin()
+          && request.resource.data.points == 0
+          && request.resource.data.totalPoints == 0) || (
+        isAuth() &&
+        customerId == request.auth.uid &&
+        request.resource.data.uid   == request.auth.uid &&
+        request.resource.data.email == request.auth.token.email &&
+        request.resource.data.blocked == false &&
+        request.resource.data.referralProcessed == false &&
+        request.resource.data.card is string &&
+        request.resource.data.card.matches('IP-[A-Z0-9]{6}') &&
+        request.resource.data.name  is string &&
+        request.resource.data.name.size() > 0 &&
+        request.resource.data.name.size() <= 100 &&
+        (
+          // Path A: fresh registration — CRITICAL-2 hardening.
+          //
+          //   • points and totalPoints MUST be 0. The client no longer self-credits
+          //     marketing or referral bonuses. Server-side workers/functions award
+          //     them after verification:
+          //       - /send-welcome credits +50 marketing bonus (requires verified
+          //         idToken matching the customer doc).
+          //       - /process-referral credits +100 to new customer AND +100 to
+          //         referrer ONLY if the referrer card exists and is under cap.
+          //   • referredBy is still recorded so the worker has the code to validate.
+          //   • marketingOptIn is still recorded so the worker knows whether to
+          //     award +50 and what consent timestamp to use.
+          (
+            request.resource.data.keys().hasOnly([
+              'uid','email','name','phone','card','points','totalPoints',
+              'birthday','referredBy','blocked','referralProcessed',
+              'referralCount','marketingOptIn','marketingOptInAt',
+              'termsAcceptedAt','createdAt'
+            ]) &&
+            request.resource.data.points == 0 &&
+            request.resource.data.totalPoints == 0 &&
+            (request.resource.data.referredBy == '' ||
+             request.resource.data.referredBy.matches('IP-[A-Z0-9]{6}'))
+          )
+          ||
+          // Path B: migration of legacy doc into uid-keyed doc.
+          // Points/totalPoints/blocked MUST match the source doc exactly,
+          // and the source doc MUST belong to the same auth email.
+          //
+          // CRITICAL-2: requires isVerifiedAuth() — without this gate, an
+          // attacker who registers a Firebase Auth account using a legacy
+          // customer's email (Firebase Auth allows registering any email; the
+          // legacy doc has no associated Auth user) can fork the victim's
+          // entire point balance into an attacker-owned uid-keyed doc and
+          // claim ownership via the uid path of ownsCustomer(). isUidBindOnly()
+          // plugged the UPDATE binding path; this plugs the CREATE/fork path.
+          (
+            isVerifiedAuth() &&
+            request.resource.data.keys().hasOnly([
+              'uid','email','name','phone','card','points','totalPoints',
+              'birthday','referredBy','blocked','referralProcessed',
+              'referralCount','marketingOptIn','marketingOptInAt',
+              'termsAcceptedAt','createdAt','_migratedFrom',
+              'tier','notificationsEnabled','lastTierCheck','eshopCouponUsed'
+            ]) &&
+            request.resource.data._migratedFrom is string &&
+            exists(/databases/$(database)/documents/ipear_customers/$(request.resource.data._migratedFrom)) &&
+            get(/databases/$(database)/documents/ipear_customers/$(request.resource.data._migratedFrom)).data.email == request.auth.token.email &&
+            request.resource.data.points      == get(/databases/$(database)/documents/ipear_customers/$(request.resource.data._migratedFrom)).data.points &&
+            request.resource.data.totalPoints == get(/databases/$(database)/documents/ipear_customers/$(request.resource.data._migratedFrom)).data.totalPoints &&
+            request.resource.data.blocked     == get(/databases/$(database)/documents/ipear_customers/$(request.resource.data._migratedFrom)).data.blocked
+          )
+        )
+      );
+
+      // UPDATE ── three controlled paths:
+      //   (1) Admin: anything goes (single source of truth for points/tier).
+      //   (2) Customer self-update: any field EXCEPT financial/identity, AND
+      //       all writable string fields must respect strict size caps.
+      //       Customer-facing flows (FCM token, opt-in toggles, deletion
+      //       request, profile edits) all touch only safe fields.
+      //   (3) UID-binding: legacy doc that has email match but no uid yet
+      //       receives a single-shot `uid` assignment.
+      //
+      // S-1 hardening: string size caps prevent doc-bloat / DoS attacks.
+      // Any field absent from the update payload is unaffected by the cap;
+      // any field present must be a string AND respect the limit.
+      allow update: if
+        (isAdmin() && !touchesBalance())
+        ||
+        (ownsCustomer(resource.data) && !touchesFinancial() &&
+         (!('name'     in request.resource.data) || (request.resource.data.name     is string && request.resource.data.name.size()     <= 100)) &&
+         (!('phone'    in request.resource.data) || (request.resource.data.phone    is string && request.resource.data.phone.size()    <= 20))  &&
+         (!('birthday' in request.resource.data) || (request.resource.data.birthday is string && request.resource.data.birthday.size() <= 10))
+        )
+        ||
+        (isAuth() &&
+         resource.data.email == request.auth.token.email &&
+         isUidBindOnly());
+
+      // DELETE ── admin only, plus the one valid customer case:
+      // after migrating to a uid-keyed doc, the old random-id doc may be
+      // deleted by the now-bound customer (post-migration cleanup).
+      allow delete: if isAdmin() ||
+        (ownsCustomer(resource.data) &&
+         customerId != request.auth.uid &&
+         exists(/databases/$(database)/documents/ipear_customers/$(request.auth.uid)));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_transactions — immutable point ledger (admin/tablet writes)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_transactions/{txId} {
+      // READ ── admin sees all; customer sees only own transactions,
+      // matched on customerUid OR customerId == auth.uid OR customerEmail.
+      // SEC-M1: uid branches stay on isAuth() (uid is authoritative and its
+      // binding is already verified-email-gated via isUidBindOnly()). The
+      // customerEmail branch MUST require isVerifiedAuth() — otherwise an
+      // attacker who registers an unverified Firebase Auth account with a
+      // legacy customer's email (no Auth account of their own) could read that
+      // customer's entire point ledger. Email verification here is an
+      // ADDITIONAL condition on top of the email-ownership match, never a
+      // substitute for ownership. Consistent with ownsCustomer() / HIGH-1.
+      allow read: if isAdmin() ||
+        (isAuth() && (
+          resource.data.customerUid == request.auth.uid ||
+          resource.data.customerId  == request.auth.uid
+        )) ||
+        (isVerifiedAuth() &&
+          resource.data.customerEmail == request.auth.token.email);
+
+      // WRITE ── admin only. The tablet/admin app authenticates as an
+      // ADMIN FORTRESS Stage 2 lock — the ledger is append-only + server-only.
+      // No client (incl. a valid admin session) may create/update/delete a
+      // transaction; the Cloud Functions service account (Admin SDK) bypasses
+      // rules and remains the sole writer. Reads unchanged (above).
+      allow create, update, delete: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_offers — marketing offers (read = all customers, write = admin)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_offers/{offerId} {
+      // READ ── admin sees everything; customers see active offers only.
+      // `active == true` gating prevents draft-offer leakage.
+      allow read:  if isAdmin() || (isAuth() && resource.data.active == true);
+
+      // WRITE ── admin only (create, update, delete).
+      allow write: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_rewards — point-redeemable reward tiers (admin-managed catalog)
+    //  Source-of-truth for cost/label that startRedemption + confirmVerify
+    //  validate against. Decoupling these from the client lets the catalog
+    //  evolve (new tiers, seasonal rewards) without a frontend deploy.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_rewards/{rewardId} {
+      // READ ── admin sees everything; customers see active rewards only.
+      allow read:  if isAdmin() || (isAuth() && resource.data.isActive == true);
+
+      // WRITE ── admin only.
+      allow write: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_redemptions — pending reward QR codes
+    //  Hardened to prevent: point injection, discount manipulation, replay.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_redemptions/{rId} {
+      allow read: if isAdmin() ||
+        (isAuth() && resource.data.customerUid == request.auth.uid);
+
+      // Helper: customer doc referenced by this redemption.
+      function custFromRedemption() {
+        return get(/databases/$(database)/documents/ipear_customers/$(request.resource.data.customerId));
+      }
+
+      // Helper: reward doc referenced by this redemption (dynamic-catalog path).
+      function rewardFromRedemption() {
+        return get(/databases/$(database)/documents/ipear_rewards/$(request.resource.data.rewardId));
+      }
+
+      // CREATE ── customer mints a pending reward code. Guards:
+      //   • Field whitelist locks shape (rewardId optional for legacy callers)
+      //   • customerUid == auth.uid (no impersonation)
+      //   • Customer doc verifies ownership AND has enough points AND not blocked
+      //   • points/discount must match EITHER:
+      //       (a) dynamic catalog: rewardId points at an isActive reward and
+      //           points == reward.cost AND discount == reward.discount
+      //       (b) legacy ladder: 1000→5, 2500→15, 4000→30 (for clients that
+      //           haven't shipped the rewardId field yet — drop this branch
+      //           once telemetry shows zero legacy traffic)
+      //   • Timestamps server-validated against `request.time` ±5min (no replay)
+      //   • expires within 11 minutes (no long-lived codes)
+      allow create: if isAuth() &&
+        request.resource.data.keys().hasOnly([
+          'code','customerId','customerUid','customerName','card',
+          'points','discount','label','status','rewardId',
+          'createdAt','expiresAt','used','createdAtTs','expiresAtTs'
+        ]) &&
+        request.resource.data.customerUid == request.auth.uid &&
+        request.resource.data.customerId  is string &&
+        (
+          // Customer doc at customerId is owned + funded + not blocked.
+          // CRITICAL-3: the email-match branch is gated by isVerifiedAuth() so
+          // an unverified account whose token.email happens to match a legacy
+          // customer's email cannot mint a redemption that drains the legacy
+          // customer's points and gives the attacker a real-€ discount QR.
+          // The uid-match branch stays on isAuth() because uid binding itself
+          // is already verified-email-gated via isUidBindOnly().
+          (exists(/databases/$(database)/documents/ipear_customers/$(request.resource.data.customerId)) &&
+           (custFromRedemption().data.uid == request.auth.uid ||
+            (isVerifiedAuth() &&
+             custFromRedemption().data.email == request.auth.token.email)) &&
+           custFromRedemption().data.blocked == false &&
+           custFromRedemption().data.points  >= request.resource.data.points)
+          ||
+          // Fallback: legacy customerId but uid-keyed doc exists and is funded
+          (request.resource.data.customerId != request.auth.uid &&
+           exists(/databases/$(database)/documents/ipear_customers/$(request.auth.uid)) &&
+           get(/databases/$(database)/documents/ipear_customers/$(request.auth.uid)).data.blocked == false &&
+           get(/databases/$(database)/documents/ipear_customers/$(request.auth.uid)).data.points >= request.resource.data.points)
+        ) &&
+        request.resource.data.used == false &&
+        request.resource.data.code is string &&
+        request.resource.data.code.matches('^[0-9]{6}$') &&
+        isPositiveInt(request.resource.data.points) &&
+        request.resource.data.discount is number &&
+        (
+          // (a) Dynamic-catalog path — points/discount sourced from server doc
+          ('rewardId' in request.resource.data &&
+           request.resource.data.rewardId is string &&
+           request.resource.data.rewardId.size() > 0 &&
+           exists(/databases/$(database)/documents/ipear_rewards/$(request.resource.data.rewardId)) &&
+           rewardFromRedemption().data.isActive == true &&
+           rewardFromRedemption().data.cost == request.resource.data.points &&
+           rewardFromRedemption().data.discount == request.resource.data.discount)
+          ||
+          // (b) Legacy ladder — fixed pairs, no rewardId
+          (request.resource.data.points == 1000 && request.resource.data.discount ==  5) ||
+          (request.resource.data.points == 2500 && request.resource.data.discount == 15) ||
+          (request.resource.data.points == 4000 && request.resource.data.discount == 30)
+        ) &&
+        request.resource.data.createdAt   is string &&
+        request.resource.data.expiresAt   is string &&
+        request.resource.data.createdAtTs is timestamp &&
+        request.resource.data.expiresAtTs is timestamp &&
+        request.resource.data.createdAtTs >= request.time - duration.value(5, 'm') &&
+        request.resource.data.createdAtTs <= request.time + duration.value(5, 'm') &&
+        request.resource.data.expiresAtTs  > request.time &&
+        request.resource.data.expiresAtTs <= request.time + duration.value(11, 'm') &&
+        request.resource.data.get('status', 'pending') == 'pending';
+
+      // UPDATE ── admin marks as used; OR customer cancels OWN pending code.
+      allow update: if
+        (isAdmin() &&
+         request.resource.data.diff(resource.data)
+           .affectedKeys().hasOnly(['used', 'usedAt', 'status']) &&
+         request.resource.data.used   == true &&
+         request.resource.data.status == 'used' &&
+         resource.data.used == false)
+        ||
+        (isAuth() &&
+         resource.data.customerUid == request.auth.uid &&
+         resource.data.used == false &&
+         request.resource.data.diff(resource.data)
+           .affectedKeys().hasOnly(['status', 'cancelledAt', 'cancelReason']) &&
+         request.resource.data.status == 'cancelled');
+
+      // DELETE ── admin anytime; customer can drop OWN unused codes.
+      allow delete: if isAdmin() ||
+        (isAuth() &&
+         resource.data.customerUid == request.auth.uid &&
+         resource.data.used == false &&
+         (resource.data.status == 'pending' || resource.data.status == 'cancelled'));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_offer_redemptions — pending offer QR codes (customer-created)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_offer_redemptions/{rId} {
+      allow read: if isAdmin() ||
+        (isAuth() && resource.data.customerId == request.auth.uid);
+
+      allow create: if isAuth() &&
+        request.resource.data.keys().hasOnly([
+          'code','offerId','offerTitle','bonusPoints','singleUse',
+          'customerId','customerDocId','customerName','card',
+          'status','used','createdAt','expiresAt','createdAtTs','expiresAtTs'
+        ]) &&
+        request.resource.data.customerId == request.auth.uid &&
+        request.resource.data.offerId is string &&
+        request.resource.data.offerId.size() > 0 &&
+        request.resource.data.code is string &&
+        request.resource.data.code.matches('^[0-9]{6}$') &&
+        request.resource.data.bonusPoints is number &&
+        request.resource.data.bonusPoints >= 0 &&
+        request.resource.data.bonusPoints <= 2500 &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.used   == false &&
+        request.resource.data.createdAt   is string &&
+        request.resource.data.expiresAt   is string &&
+        request.resource.data.createdAtTs is timestamp &&
+        request.resource.data.expiresAtTs is timestamp &&
+        request.resource.data.createdAtTs >= request.time - duration.value(5, 'm') &&
+        request.resource.data.createdAtTs <= request.time + duration.value(5, 'm') &&
+        request.resource.data.expiresAtTs  > request.time &&
+        request.resource.data.expiresAtTs <= request.time + duration.value(11, 'm');
+
+      allow update: if isAdmin();
+      allow delete: if isAdmin() ||
+        (isAuth() &&
+         resource.data.customerId == request.auth.uid &&
+         resource.data.used == false &&
+         resource.data.status == 'pending');
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_birthday_claims — 1/year self-claim (id == uid_year)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_birthday_claims/{claimId} {
+      allow read: if isAdmin() ||
+        (isAuth() && resource.data.customerUid == request.auth.uid);
+
+      allow create: if isAuth() &&
+        request.resource.data.keys().hasOnly([
+          'customerId','customerUid','customerName','customerEmail',
+          'card','birthday','year','points','processed',
+          'claimedAt','claimedAtTs'
+        ]) &&
+        claimId == (request.auth.uid + '_' + string(request.resource.data.year)) &&
+        request.resource.data.customerUid == request.auth.uid &&
+        request.resource.data.processed == false &&
+        request.resource.data.points == 50 &&
+        request.resource.data.year is int &&
+        (request.resource.data.get('claimedAtTs', null) == null ||
+         (request.resource.data.claimedAtTs is timestamp &&
+          request.resource.data.claimedAtTs >= request.time - duration.value(5, 'm') &&
+          request.resource.data.claimedAtTs <= request.time + duration.value(5, 'm')));
+
+      allow update, delete: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_referral_queue — queued referral credit (1 per signup, id==uid)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_referral_queue/{qId} {
+      allow create: if isAuth() &&
+        qId == request.auth.uid &&
+        request.resource.data.keys().hasOnly([
+          'newCustomerId','newCustomerUid','newCustomerEmail',
+          'newCustomerCard','newCustomerName','referrerCard',
+          'processed','createdAt'
+        ]) &&
+        request.resource.data.newCustomerUid == request.auth.uid &&
+        request.resource.data.processed == false &&
+        request.resource.data.referrerCard is string &&
+        request.resource.data.referrerCard.matches('IP-[A-Z0-9]{6}') &&
+        request.resource.data.referrerCard != request.resource.data.newCustomerCard;
+
+      allow read, update, delete: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_leaderboard — public leaderboard rows (read-only for customers)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_leaderboard/{docId} {
+      allow read:  if isAuth();
+      allow write: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_stores — store directory (read-only for customers)
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_stores/{storeId} {
+      allow read:  if isAuth();
+      allow write: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_admins — admin UID whitelist (self-read only, never writable
+    //  from client; provision via Firebase Console or Cloud Function).
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_admins/{uid} {
+      allow read:  if isAuth() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  settings — maintenance kill switch, global config
+    // ═════════════════════════════════════════════════════════════════════
+    match /settings/{docId} {
+      allow read:  if isAuth();
+      allow write: if isAdmin();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_analytics — daily event-counter docs written by the worker
+    //  via service-account REST (admin SDK bypasses these rules). Client
+    //  needs read access for the admin System Health dashboard. Writes
+    //  blocked at the client tier so a logged-in admin can't accidentally
+    //  poison the funnel counters from DevTools.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_analytics/{day} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  audit_logs — immutable; only GDPR Art.17 anonymisation allowed
+    // ═════════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════════
+    //  admin_audit — ADMIN FORTRESS Stage 0 immutable security log.
+    //  Written EXCLUSIVELY by Cloud Functions via the Admin SDK service account
+    //  (which bypasses these rules). Fully append-only from every client,
+    //  including an admin web token: no client create/update/delete is ever
+    //  permitted, so audit evidence cannot be forged or erased from the UI.
+    //  Admins may READ (for a future hardened audit view).
+    // ═════════════════════════════════════════════════════════════════════
+    match /admin_audit/{entryId} {
+      allow read:   if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    match /audit_logs/{logId} {
+      allow read:   if isAdmin();
+      allow create: if isAdmin();
+      allow update: if isAdmin() &&
+        request.resource.data.diff(resource.data)
+          .affectedKeys().hasOnly(['customerId', 'customerUid', '_anonymizedAt']) &&
+        request.resource.data.customerId  == '[DELETED]' &&
+        request.resource.data.customerUid == '[DELETED]';
+      allow delete: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  ipear_woo_events — Phase L1 authoritative WooCommerce credit/refund
+    //  ledger. Written EXCLUSIVELY by the Cloudflare Worker via service
+    //  account. Client access is fully denied until a dedicated hardened
+    //  admin UI exists. Opening `read: if isAdmin()` NOW would expose the
+    //  ledger to admin web tokens BEFORE a purpose-built view is in place;
+    //  when we later need admin visibility we add either a dedicated
+    //  hardened screen with claim-based auth, or a signed server-generated
+    //  view URL (like /admin/export-download), never a blanket admin read.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_woo_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  L2.3A: ipear_redemption_requests — tablet→admin approval queue.
+    //
+    //  Documents are written EXCLUSIVELY server-side by the admin SDK from
+    //  the createRedemptionRequest / approveRedemption / rejectRedemption
+    //  callable Cloud Functions. The tablet client never writes here;
+    //  the admin client never writes here either. This is the safety
+    //  keystone of the L2.3A approval flow.
+    //
+    //  Read policy:
+    //    • Admin (claim admin==true): read the entire queue.
+    //    • Tablet: read ONLY documents where BOTH
+    //         tabletActorUid == request.auth.uid   (own request only)
+    //         storeId       == request.auth.token.storeId  (own store)
+    //      i.e. one tablet CANNOT read another tablet's request even in the
+    //      same store, and CANNOT read any request from another store.
+    //
+    //  All state transitions (pending→approved / rejected / expired) go
+    //  through the callable functions, which perform:
+    //    • admin-claim auth check,
+    //    • deterministic-id idempotency (approveRedemption ledger id is a
+    //      pure function of requestId, so a retry is a no-op),
+    //    • atomic Firestore runTransaction over customer + redemption +
+    //      ledger + audit + request status.
+    // ═════════════════════════════════════════════════════════════════════
+    match /ipear_redemption_requests/{requestId} {
+      allow read: if isAdmin() ||
+        (isTablet() &&
+         resource.data.tabletActorUid == request.auth.uid &&
+         resource.data.storeId == tabletStoreId());
+
+      // Client writes fully denied. Only the admin SDK (via callable CFs)
+      // can create, update, or delete request documents.
+      allow create, update, delete: if false;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  Default deny — every path not explicitly allowed above is blocked.
+    // ═════════════════════════════════════════════════════════════════════
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
