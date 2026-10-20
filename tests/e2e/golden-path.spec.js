@@ -241,11 +241,16 @@ test.describe('Golden path', () => {
         return parseInt(txt.replace(/\D/g, ''), 10);
       });
 
-    // ── 3. Rewards tab + tap the first unlocked card (5€ = 1000 pts) ─────
+    // ── 3. Rewards tab + tap the SEEDED E2E reward (5€, 1000 pts) ───────
+    // Target the dedicated synthetic reward by its stable id (card carries
+    // data-arg="<rewardId>"), NOT .first() — otherwise the first-rendered REAL
+    // catalog reward (e.g. "Καλώδιο Φόρτισης Baseus") is redeemed instead,
+    // which both breaks the "Έκπτωση" history check and drains points against
+    // a real reward. Selecting the E2E reward keeps the test on synthetic data.
     await page.locator('#nav-rewards').click();
-    const firstUnlocked = page.locator('.rw-full-card.ok').first();
-    await expect(firstUnlocked).toBeVisible({ timeout: 10_000 });
-    await firstUnlocked.click();
+    const e2eReward = page.locator(`.rw-full-card.ok[data-arg="${E2E_REWARD_DOC_ID}"]`);
+    await expect(e2eReward, `seeded E2E reward ${E2E_REWARD_DOC_ID} must be present & unlocked`).toBeVisible({ timeout: 10_000 });
+    await e2eReward.click();
 
     // ── 3b. Channel choice ──────────────────────────────────────────────
     // E-shop-eligible rewards (startRedemption → _showRewardChannelChoice when
@@ -278,6 +283,10 @@ test.describe('Golden path', () => {
     // requirement: throws if the doc never appears.
     const redDoc = await waitForRedemptionByCode(db, code, { timeoutMs: 20_000 });
     const red = redDoc.data();
+    // Lock that we redeemed the INTENDED synthetic reward (not a real catalog
+    // one): the redemption doc must reference e2e_dummy_5eur and its 1000-pt cost.
+    expect(red.rewardId, 'redemption must be for the seeded E2E reward').toBe(E2E_REWARD_DOC_ID);
+    expect(red.points, 'redemption cost must be REWARD_COST').toBe(REWARD_COST);
     const custDocId = red.customerUid || red.customerId;
     const custRef = db.collection('ipear_customers').doc(custDocId);
     const ledgerId = `e2e_verify_${redDoc.id}`;
