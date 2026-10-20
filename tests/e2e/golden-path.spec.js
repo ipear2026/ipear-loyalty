@@ -254,8 +254,14 @@ test.describe('Golden path', () => {
     // wait for whichever appears, and if it's the picker, choose in-store to
     // reach the QR overlay. This exercises the real redemption UX (not a
     // weakened assertion or an added timeout).
+    // #redeem-overlay is ALWAYS in the DOM (hidden via display:none until the
+    // QR path), so a bare .or() matches 2 elements and trips strict mode.
+    // Scope the wait to the VISIBLE match so exactly one element resolves.
     const inStoreBtn = page.locator('[data-action="_redeemChannel"][data-arg3="instore"]');
-    await expect(inStoreBtn.or(page.locator('#redeem-overlay'))).toBeVisible({ timeout: 10_000 });
+    const redeemOverlay = page.locator('#redeem-overlay');
+    await expect(
+      inStoreBtn.or(redeemOverlay).filter({ visible: true }).first(),
+    ).toBeVisible({ timeout: 10_000 });
     if (await inStoreBtn.isVisible()) {
       await inStoreBtn.click();
     }
