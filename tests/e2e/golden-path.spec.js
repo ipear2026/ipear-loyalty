@@ -52,6 +52,34 @@ const E2E_REWARD_PAYLOAD = {
   order: 1,
 };
 
+// Deterministic sync: the customer bundle shows the 6-digit code in the QR
+// overlay the instant it generates it, then writes the ipear_redemptions doc
+// via an async addDoc(). The server commit lands a few hundred ms later, so a
+// single immediate Admin-SDK query by code can race ahead of it and see
+// `empty:true` (the historical flake). Poll the authoritative server state
+// until the doc exists instead of assuming instantaneous propagation. This
+// does NOT weaken the assertion: if the doc never appears within the window the
+// helper throws and the test fails with a clear, actionable message.
+async function waitForRedemptionByCode(db, code, { timeoutMs = 20_000, intervalMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const snap = await db
+      .collection('ipear_redemptions')
+      .where('code', '==', code)
+      .limit(1)
+      .get();
+    if (!snap.empty) return snap.docs[0];
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Redemption doc for code ${code} never appeared in Firestore within ` +
+        `${timeoutMs}ms — the customer-bundle addDoc() write was not observed ` +
+        `server-side (real regression, not a timing allowance).`
+      );
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 function ensureAdminApp() {
   if (getApps().length) return;
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -137,29 +165,41 @@ test.describe('Golden path', () => {
       { points: 1500, totalPoints: 1500, blocked: false },
       { merge: true },
     );
+
+    // Deterministic precondition for the redemption flow: terminate any
+    // lingering 'pending' redemption for the test customer BEFORE the page
+    // loads. Each Playwright test gets a fresh browser context (no IndexedDB
+    // carryover), so with zero server-side pendings the customer app's
+    // _findExistingActivePendingByUser() returns null and the tap creates a
+    // brand-new redemption doc — rather than the UI surfacing a stale pending
+    // code whose doc state the test can't predict. We flip to a terminal
+    // status instead of deleting: deleting raced the customer's offline cache
+    // in earlier attempts; a status flip makes _isPendingAndActive() false and
+    // keeps admin views clean. Two equality filters need no composite index.
+    const pending = await db
+      .collection('ipear_redemptions')
+      .where('customerUid', '==', uid)
+      .where('status', '==', 'pending')
+      .get();
+    if (!pending.empty) {
+      const batch = db.batch();
+      const nowIso = new Date().toISOString();
+      pending.forEach((d) => batch.update(d.ref, { status: 'e2e-reset', used: true, usedAt: nowIso }));
+      await batch.commit();
+    }
   });
 
-  // FLAKY — skipped in CI pending dedicated investigation.
-  //
-  // Symptom: the customer-page redemption flow writes a 6-digit code to the
-  // QR overlay UI, but on the very next Firestore query for that code the
-  // result is empty (`redSnap.empty === true`). The pattern survived
-  // multiple cleanup-strategy changes (full doc deletes, points-only reset,
-  // both). Smells like a snapshot-listener / offline-cache race in the
-  // customer bundle that's not reproducible against a fresh Firestore but
-  // is reliable under CI traffic.
-  //
-  // The kiosk-survival spec covers the regression we actually shipped this
-  // sprint (auth survives the validator window on /tablet + /admin) and is
-  // green in every recent run. Leaving golden-path here as documentation
-  // for the eventual reroll — `.skip` keeps the file imported (so the
-  // beforeAll seeding for the dummy reward still runs as a side-effect of
-  // Playwright loading the spec) without failing the suite.
-  //
-  // TODO: dedicated branch — either move startRedemption to a non-cached
-  // server-side write (Cloud Function) or stub the customer-page Firestore
-  // listener for this spec.
-  test.skip('customer redeems 5€ reward + sees it land live in history', async ({ page }) => {
+  // RE-ENABLED (Phase 22). The historical flake was a read-before-write race:
+  // the single immediate Admin-SDK query by code outran the customer bundle's
+  // async addDoc() server commit, plus stale 'pending' docs could surface a
+  // cached code. Both are now handled deterministically WITHOUT weakening any
+  // assertion:
+  //   • beforeEach terminates lingering 'pending' docs before the page loads,
+  //     so a fresh context always creates a new redemption on tap;
+  //   • waitForRedemptionByCode() polls the authoritative server state until
+  //     the doc exists (throws if it never does — still a hard requirement).
+  // The subsequent balance/history assertions are unchanged.
+  test('customer redeems 5€ reward + sees it land live in history', async ({ page }) => {
     const db = getFirestore();
 
     // ── 0. App Check debug-token shim (optional) ────────────────────────
@@ -214,14 +254,10 @@ test.describe('Golden path', () => {
     expect(code, 'code should be 6 digits').toMatch(/^\d{6}$/);
 
     // ── 5. Approve via Admin SDK (mirrors confirmVerify atomic txn) ─────
-    const redSnap = await db
-      .collection('ipear_redemptions')
-      .where('code', '==', code)
-      .limit(1)
-      .get();
-    expect(redSnap.empty, 'redemption doc must exist for the code').toBe(false);
-
-    const redDoc = redSnap.docs[0];
+    // Deterministic wait for the client addDoc() to land server-side (replaces
+    // the former single-shot get() that raced the write). Still a hard
+    // requirement: throws if the doc never appears.
+    const redDoc = await waitForRedemptionByCode(db, code, { timeoutMs: 20_000 });
     const red = redDoc.data();
     const custDocId = red.customerUid || red.customerId;
     const custRef = db.collection('ipear_customers').doc(custDocId);
