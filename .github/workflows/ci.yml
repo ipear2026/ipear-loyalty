@@ -102,10 +102,10 @@ jobs:
       - name: Audit (production deps only) — STRICT, unweakened
         run: npm audit --omit=dev --audit-level=high
 
-  # Firestore Security Rules — emulator-backed regression tests. Runs in
-  # parallel to the customer + functions jobs. The emulator is JVM-based
-  # so we need a Java runtime; setup-java pins openjdk-17 for determinism
-  # (the firebase emulator dropped Java 11 support in 2024).
+  # Firebase Emulator — emulator-backed regression suites (rules, integration,
+  # lifecycle, finance-lockdown). Runs in parallel to the customer + functions
+  # jobs. The emulator is JVM-based so we need a Java runtime; setup-java pins
+  # Temurin 21 (LTS, supported; the firebase emulator dropped Java 11 in 2024).
   emulator:
     name: Firebase Emulator suites (rules + integration + lifecycle + finance-lockdown)
     runs-on: ubuntu-latest
@@ -121,10 +121,18 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Install
         run: npm ci
+
+      # The integration + lifecycle suites `require('../functions/index.js')`,
+      # whose deps (firebase-functions etc.) live under functions/package.json.
+      # Without this the emulator job dies at "Cannot find module
+      # 'firebase-functions/v2/firestore'" and lifecycle/finance-lockdown never
+      # run. Mirrors the install in the `customer` job.
+      - name: Install Function deps
+        run: npm ci --prefix functions
 
       - name: Cache Firebase emulator binaries
         # firebase emulators:exec downloads the firestore JAR (~70 MB) on
