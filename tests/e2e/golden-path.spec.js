@@ -247,6 +247,19 @@ test.describe('Golden path', () => {
     await expect(firstUnlocked).toBeVisible({ timeout: 10_000 });
     await firstUnlocked.click();
 
+    // ── 3b. Channel choice ──────────────────────────────────────────────
+    // E-shop-eligible rewards (startRedemption → _showRewardChannelChoice when
+    // spec.eshopEligible && no channel) open an in-store/e-shop picker BEFORE
+    // the QR overlay; non-eshop rewards go straight to it. Deterministically
+    // wait for whichever appears, and if it's the picker, choose in-store to
+    // reach the QR overlay. This exercises the real redemption UX (not a
+    // weakened assertion or an added timeout).
+    const inStoreBtn = page.locator('[data-action="_redeemChannel"][data-arg3="instore"]');
+    await expect(inStoreBtn.or(page.locator('#redeem-overlay'))).toBeVisible({ timeout: 10_000 });
+    if (await inStoreBtn.isVisible()) {
+      await inStoreBtn.click();
+    }
+
     // ── 4. Read the 6-digit code from the QR overlay ────────────────────
     await expect(page.locator('#redeem-overlay')).toBeVisible({ timeout: 10_000 });
     const codeText = await page.locator('#ro-code').innerText();
